@@ -1,0 +1,553 @@
+#include "halionbridge/Bridge.h"
+#include "halionbridge/BuildInfo.h"
+#include "Log.h"
+#include "ChildProcessOutput.h"
+#include "PathUtils.h"
+#include "PluginScan.h"
+#include "ProgressMarkers.h"
+#include <juce_core/juce_core.h>
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <algorithm>
+#include <cstddef>
+#include <filesystem>
+#include <iostream>
+#include <span>
+#include <utility>
+#include <vector>
+
+namespace
+{
+
+constexpr const char* kHoldScriptLockArgument = "--halionbridge-tests-hold-script-lock";
+constexpr const char* kScriptDirectoryLockName = "halionbridge_halion_user_scripts";
+
+juce::File gTestTempRoot;
+
+bool contains(const std::vector<std::string>& values, const std::string& value)
+{
+    return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+std::span<const std::byte> asBytes(const juce::MemoryBlock& data)
+{
+    return {reinterpret_cast<const std::byte*>(data.getData()), data.getSize()};
+}
+
+juce::File cleanTempDirectory(const char* name)
+{
+    if (!gTestTempRoot.isDirectory())
+    {
+        gTestTempRoot = juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("halionbridge_tests", "", false);
+        gTestTempRoot.createDirectory();
+    }
+
+    auto directory = gTestTempRoot.getChildFile(name);
+    directory.deleteRecursively();
+    return directory;
+}
+
+bool waitForFileToExist(const juce::File& file, const int timeoutMs)
+{
+    const auto deadline = juce::Time::getMillisecondCounterHiRes() + timeoutMs;
+
+    while (juce::Time::getMillisecondCounterHiRes() < deadline)
+    {
+        if (file.existsAsFile())
+            return true;
+
+        juce::Thread::sleep(10);
+    }
+
+    return file.existsAsFile();
+}
+
+int runScriptLockHolder(const juce::String& readyFilePath, const juce::String& releaseFilePath)
+{
+    juce::InterProcessLock lock(kScriptDirectoryLockName);
+    if (!lock.enter(5000))
+        return 2;
+
+    const auto readyFile = juce::File(readyFilePath);
+    const auto releaseFile = juce::File(releaseFilePath);
+
+    if (!readyFile.replaceWithText("ready"))
+        return 3;
+
+    const auto released = waitForFileToExist(releaseFile, 30000);
+    lock.exit();
+    return released ? 0 : 4;
+}
+
+} // namespace
+
+class ConsoleLogger : public juce::Logger
+{
+    void logMessage(const juce::String& message) override
+    {
+        std::cout << message.toStdString() << std::endl;
+    }
+};
+
+void configureQuietRuntimeLogger()
+{
+    halionbridge::log::configure(halionbridge::log::Level::off);
+}
+
+class BridgeTests : public juce::UnitTest
+{
+  public:
+    BridgeTests() : juce::UnitTest("BridgeTests", "halionbridge") {}
+
+    void runTest() override
+    {
+        beginTest("Argument Parsing - Missing build directory");
+        {
+            std::vector<std::string> args;
+            auto options = halionbridge::Bridge::parseArguments(args);
+            expect(!options.has_value());
+
+            halionbridge::Bridge bridge;
+            expect(bridge.runDetailed(halionbridge::AppOptions{}) == halionbridge::RunResult::invalidOptions);
+        }
+
+        beginTest("Bridge Run - Moved-from bridge reports invalid bridge");
+        {
+            halionbridge::Bridge source;
+            halionbridge::Bridge moved{std::move(source)};
+            juce::ignoreUnused(moved);
+
+            expect(source.runDetailed(halionbridge::AppOptions{}) == halionbridge::RunResult::invalidBridge);
+        }
+
+        beginTest("Argument Parsing - Positional build directory");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_build_dir");
+            expect(tempDir.createDirectory());
+            auto buildFile = tempDir.getChildFile("halionbridge_build.lua");
+            expect(buildFile.replaceWithText("return {}"));
+
+            auto options = halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString()});
+            expect(options.has_value());
+            if (options)
+            {
+                expect(options->buildDirectory.has_value());
+                expect(*options->buildDirectory == halionbridge::detail::toStdPath(tempDir));
+                expectEquals(options->timeoutSeconds, 0);
+                expect(!options->noKill);
+                expect(!options->forceScan);
+            }
+
+            buildFile.deleteFile();
+            expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString()}).has_value());
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Argument Parsing - Multiple positional directories");
+        {
+            auto firstDir = cleanTempDirectory("halionbridge_first_build_dir");
+            auto secondDir = cleanTempDirectory("halionbridge_second_build_dir");
+            firstDir.createDirectory();
+            secondDir.createDirectory();
+            firstDir.getChildFile("halionbridge_build.lua").replaceWithText("return {}");
+            secondDir.getChildFile("halionbridge_build.lua").replaceWithText("return {}");
+
+            auto options =
+                halionbridge::Bridge::parseArguments({firstDir.getFullPathName().toStdString(), secondDir.getFullPathName().toStdString()});
+            expect(!options.has_value());
+
+            firstDir.deleteRecursively();
+            secondDir.deleteRecursively();
+        }
+
+        beginTest("Argument Parsing - Missing directory");
+        {
+            auto missingDirectory = cleanTempDirectory("nonexistent_halionbridge_build_dir");
+            missingDirectory.deleteRecursively();
+
+            std::vector<std::string> args = {missingDirectory.getFullPathName().toStdString()};
+            auto options = halionbridge::Bridge::parseArguments(args);
+            expect(!options.has_value());
+        }
+
+        beginTest("Argument Parsing - Timeout seconds");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_timeout_build_dir");
+            tempDir.createDirectory();
+            tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return {}");
+
+            {
+                std::vector<std::string> args = {tempDir.getFullPathName().toStdString(), "--timeout-seconds", "0"};
+                auto options = halionbridge::Bridge::parseArguments(args);
+                expect(options.has_value());
+                if (options)
+                    expectEquals(options->timeoutSeconds, 0);
+            }
+
+            {
+                std::vector<std::string> args = {tempDir.getFullPathName().toStdString(), "--timeout-seconds", "45"};
+                auto options = halionbridge::Bridge::parseArguments(args);
+                expect(options.has_value());
+                if (options)
+                    expectEquals(options->timeoutSeconds, 45);
+            }
+
+            {
+                std::vector<std::string> args = {tempDir.getFullPathName().toStdString(), "--timeout-seconds", "abc"};
+                auto options = halionbridge::Bridge::parseArguments(args);
+                expect(!options.has_value());
+            }
+
+            {
+                std::vector<std::string> args = {tempDir.getFullPathName().toStdString(), "--timeout-seconds", "99999999999999999999"};
+                auto options = halionbridge::Bridge::parseArguments(args);
+                expect(!options.has_value());
+            }
+
+            {
+                std::vector<std::string> args = {tempDir.getFullPathName().toStdString(), "--timeout-seconds"};
+                auto options = halionbridge::Bridge::parseArguments(args);
+                expect(!options.has_value());
+            }
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Argument Parsing - No-kill inspection hold");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_nokill_build_dir");
+            tempDir.createDirectory();
+            tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return {}");
+
+            auto options = halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--nokill"});
+            expect(options.has_value());
+            if (options)
+                expect(options->noKill);
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Argument Parsing - Forced plugin scan");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_force_scan_build_dir");
+            tempDir.createDirectory();
+            tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return {}");
+
+            auto options = halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--force-scan"});
+            expect(options.has_value());
+            if (options)
+                expect(options->forceScan);
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Bridge Run - Concurrent runtime staging is rejected");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_lock_build_dir");
+            tempDir.createDirectory();
+            tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return {}");
+
+            auto lockHolderDir = cleanTempDirectory("halionbridge_lock_holder");
+            expect(lockHolderDir.createDirectory());
+            const auto readyFile = lockHolderDir.getChildFile("ready.txt");
+            const auto releaseFile = lockHolderDir.getChildFile("release.txt");
+
+            juce::ChildProcess lockHolder;
+            const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+            const auto childStarted = lockHolder.start(juce::StringArray{executable.getFullPathName(), kHoldScriptLockArgument,
+                                                                         readyFile.getFullPathName(), releaseFile.getFullPathName()});
+            expect(childStarted);
+            expect(childStarted && waitForFileToExist(readyFile, 5000));
+
+            halionbridge::AppOptions options;
+            options.buildDirectory = halionbridge::detail::toStdPath(tempDir);
+
+            halionbridge::Bridge bridge;
+            expect(bridge.runDetailed(options) == halionbridge::RunResult::anotherInstanceRunning);
+
+            expect(releaseFile.replaceWithText("release"));
+            if (childStarted)
+            {
+                expect(lockHolder.waitForProcessToFinish(5000));
+                expectEquals(static_cast<int>(lockHolder.getExitCode()), 0);
+                if (lockHolder.isRunning())
+                    lockHolder.kill();
+            }
+
+            lockHolderDir.deleteRecursively();
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Argument Parsing - Missing values and unknown arguments");
+        {
+            expect(!halionbridge::Bridge::parseArguments({"--plugin"}).has_value());
+            expect(!halionbridge::Bridge::parseArguments({"--unknown"}).has_value());
+            expect(!halionbridge::Bridge::parseArguments({"--build-dir"}).has_value());
+            expect(!halionbridge::Bridge::parseArguments({"--state"}).has_value());
+            expect(!halionbridge::Bridge::parseArguments({"--vstpreset"}).has_value());
+            expect(!halionbridge::Bridge::parseArguments({"--plugin-only"}).has_value());
+            expect(!halionbridge::Bridge::parseArguments({"--plugin-class-id"}).has_value());
+        }
+
+        beginTest("Build File Module Name Parsing");
+        {
+            auto names = halionbridge::Bridge::parseBuildFileModuleNames(R"(
+                local ignored = "not_a_build_entry"
+                -- "commented_module"
+                --[[
+                    "block_commented_module"
+                ]]
+                return {
+                    "jad_kick_builder",
+                    'snare_builder.lua',
+                    nested = { "nested_module" },
+                    label = "metadata literal",
+                    "jad_kick_builder"
+                }
+            )");
+
+            expectEquals(static_cast<int>(names.size()), 2);
+            expect(contains(names, "jad_kick_builder"));
+            expect(contains(names, "snare_builder.lua"));
+            expect(!contains(names, "not_a_build_entry"));
+            expect(!contains(names, "commented_module"));
+            expect(!contains(names, "block_commented_module"));
+            expect(!contains(names, "nested_module"));
+            expect(!contains(names, "metadata literal"));
+        }
+
+        beginTest("Progress Marker Text Decoding");
+        {
+            expectEquals(juce::String(halionbridge::detail::decodeProgressMarkerText("50726f677265737320312f32202835302529")),
+                         juce::String("Progress 1/2 (50%)"));
+            expectEquals(juce::String(halionbridge::detail::decodeProgressMarkerText("")), juce::String("HALion Lua progress"));
+            expectEquals(juce::String(halionbridge::detail::decodeProgressMarkerText("abc")), juce::String("abc"));
+            expectEquals(juce::String(halionbridge::detail::decodeProgressMarkerText("zz")), juce::String("zz"));
+            expectEquals(juce::String(halionbridge::detail::decodeProgressMarkerText("old_style-message")),
+                         juce::String("old style message"));
+            expectEquals(juce::String(halionbridge::detail::decodeProgressMarkerText("deadbeef")), juce::String("deadbeef"));
+        }
+
+        beginTest("Progress Marker Cleanup - deletes compact and legacy stale markers");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_progress_cleanup");
+            expect(tempDir.createDirectory());
+
+            auto compactMarker = tempDir.getChildFile("hbp_000001_i_50726F6772657373.vstpreset");
+            auto legacyMarker = tempDir.getChildFile("halionbridge_progress_000001_info_50726F6772657373.vstpreset");
+            expect(compactMarker.replaceWithText("marker"));
+            expect(legacyMarker.replaceWithText("marker"));
+
+            auto result = halionbridge::detail::deleteProgressMarkers(tempDir, "test progress marker");
+            expectEquals(result.found, 2);
+            expectEquals(result.failed, 0);
+            expect(result.remainingNames.empty());
+            expect(!compactMarker.existsAsFile());
+            expect(!legacyMarker.existsAsFile());
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Progress Marker Cleanup - deletes malformed compact markers after polling");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_progress_malformed");
+            expect(tempDir.createDirectory());
+
+            auto marker = tempDir.getChildFile("hbp_malformed.vstpreset");
+            expect(marker.replaceWithText("marker"));
+
+            auto seenMarkers = std::set<std::string>();
+            halionbridge::detail::logNewProgressMarkers(tempDir, seenMarkers);
+
+            expect(!marker.existsAsFile());
+            expect(contains(std::vector<std::string>(seenMarkers.begin(), seenMarkers.end()), marker.getFileName().toStdString()));
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Progress Marker Cleanup - pre-seen stale markers are suppressed");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_progress_seen");
+            expect(tempDir.createDirectory());
+
+            auto marker = tempDir.getChildFile("hbp_000002_i_50726F6772657373.vstpreset");
+            expect(marker.replaceWithText("marker"));
+
+            auto seenMarkers = std::set<std::string>{marker.getFileName().toStdString()};
+            halionbridge::detail::logNewProgressMarkers(tempDir, seenMarkers);
+            expect(marker.existsAsFile());
+
+            auto result = halionbridge::detail::deleteProgressMarkers(tempDir, "test progress marker");
+            expectEquals(result.found, 1);
+            expectEquals(result.failed, 0);
+            expect(result.remainingNames.empty());
+            expect(!marker.existsAsFile());
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Path Normalization");
+        {
+            auto quoted = halionbridge::detail::normalizeCliPath("\"relative-folder///\"");
+            expect(quoted.getFullPathName().endsWith("relative-folder"));
+
+            auto rootDirectory = juce::File::getCurrentWorkingDirectory();
+            while (!rootDirectory.isRoot())
+                rootDirectory = rootDirectory.getParentDirectory();
+
+            auto root = halionbridge::detail::normalizeCliPath(rootDirectory.getFullPathName());
+            expect(root.isRoot());
+        }
+
+        beginTest("Build Status Marker Paths - Build Directory");
+        {
+            auto buildDirectory = cleanTempDirectory("halionbridge_marker_test");
+
+            auto markerFiles = halionbridge::Bridge::getBuildStatusMarkerFilesForDirectory(halionbridge::detail::toStdPath(buildDirectory));
+            expect(markerFiles.okFile.filename() == "halionbridge_status_ok.vstpreset");
+            expect(markerFiles.failedFile.filename() == "halionbridge_status_failed.vstpreset");
+            expect(markerFiles.okFile.parent_path() == halionbridge::detail::toStdPath(buildDirectory));
+            expect(markerFiles.failedFile.parent_path() == halionbridge::detail::toStdPath(buildDirectory));
+        }
+
+        beginTest("Child Process Output - split UTF-8 and final partial line");
+        {
+            halionbridge::detail::ChildProcessOutputBuffer output;
+
+            auto firstChunk = std::string("first ");
+            firstChunk.push_back(static_cast<char>(0xC3));
+
+            auto lines = output.append(firstChunk);
+            expect(lines.empty());
+
+            auto secondChunk = std::string();
+            secondChunk.push_back(static_cast<char>(0xB6));
+            secondChunk += "\r\nsecond";
+
+            lines = output.append(secondChunk);
+            expectEquals(static_cast<int>(lines.size()), 1);
+
+            auto expectedFirstLine = std::string("first ");
+            expectedFirstLine.push_back(static_cast<char>(0xC3));
+            expectedFirstLine.push_back(static_cast<char>(0xB6));
+
+            if (!lines.empty())
+                expectEquals(juce::String(lines[0]),
+                             juce::String::fromUTF8(expectedFirstLine.data(), static_cast<int>(expectedFirstLine.size())));
+
+            auto finalLine = output.flush();
+            expect(finalLine.has_value());
+            if (finalLine)
+                expectEquals(juce::String(*finalLine), juce::String("second"));
+
+            expect(!output.flush().has_value());
+        }
+
+        beginTest("Runtime Module Text");
+        {
+            auto buildDirectory = std::filesystem::path("C:\\test\\halion build");
+            auto text = halionbridge::Bridge::createRuntimeModuleText(buildDirectory);
+            expect(text.find("HALIONBRIDGE_RUNTIME_ROOT") != std::string::npos);
+            expect(text.find("C:/test/halion build") != std::string::npos);
+            expect(text.find("halionbridge_builder") != std::string::npos);
+            expect(text.find("runtimePathPrefix") != std::string::npos);
+        }
+
+        beginTest("VST3 Preset Inspection - embedded HALion bootstrap preset source");
+        {
+            auto presetFile =
+                juce::File::getCurrentWorkingDirectory().getChildFile("halion-lua").getChildFile("builder_bootstrap.vstpreset");
+
+            expect(presetFile.existsAsFile());
+
+            juce::MemoryBlock presetData;
+            expect(presetFile.loadFileAsData(presetData));
+
+            auto info = halionbridge::Bridge::inspectVstPresetContainer(asBytes(presetData));
+            expect(info.has_value());
+
+            if (info)
+            {
+                expectEquals(juce::String(info->classId), juce::String("3B63D74130B34AE397AF92A9659137D5"));
+                expect(!info->hasComponentState);
+                expect(!info->hasControllerState);
+                expect(info->hasProgramData);
+                expect(info->programOrUnitId.has_value());
+                expectEquals(*info->programOrUnitId, 0);
+            }
+        }
+
+        beginTest("Plugin Description - embedded class ID synthesis");
+        {
+            auto pluginFile = juce::File::getCurrentWorkingDirectory().getChildFile("HALion 7.vst3");
+            auto description = halionbridge::detail::makeHalionDescriptionFromClassId(pluginFile, "3B63D74130B34AE397AF92A9659137D5");
+            expect(description.has_value());
+            if (description)
+            {
+                expect(description->isInstrument);
+                expectEquals(description->name, juce::String("HALion 7"));
+                expectEquals(description->pluginFormatName, juce::String("VST3"));
+            }
+        }
+
+        beginTest("Build Info - generated metadata");
+        {
+            const auto buildInfo = halionbridge::getBuildInfo();
+            expect(juce::String(buildInfo.versionString).isNotEmpty());
+            expect(juce::String(buildInfo.packageBasename).startsWith("halionbridge-"));
+            expect(juce::String(buildInfo.gitShaShort).isNotEmpty());
+            expect(juce::String(buildInfo.buildTimestampUtc).isNotEmpty());
+        }
+
+        beginTest("Log Level Parsing");
+        {
+            auto parsed = halionbridge::log::parseLevel("debug");
+            expect(parsed.valid);
+            expect(parsed.level == halionbridge::log::Level::debug);
+
+            parsed = halionbridge::log::parseLevel(" WARNING ");
+            expect(parsed.valid);
+            expect(parsed.level == halionbridge::log::Level::warn);
+
+            parsed = halionbridge::log::parseLevel("silent");
+            expect(parsed.valid);
+            expect(parsed.level == halionbridge::log::Level::off);
+
+            parsed = halionbridge::log::parseLevel("nope");
+            expect(!parsed.valid);
+            expect(parsed.level == halionbridge::log::Level::info);
+        }
+    }
+};
+
+static BridgeTests bridgeTests;
+
+int main(int argc, char* argv[])
+{
+    if (argc == 4 && juce::String(argv[1]) == kHoldScriptLockArgument)
+        return runScriptLockHolder(argv[2], argv[3]);
+
+    juce::ScopedJuceInitialiser_GUI juceInitialiser;
+
+    ConsoleLogger logger;
+    juce::Logger::setCurrentLogger(&logger);
+    configureQuietRuntimeLogger();
+    gTestTempRoot = juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("halionbridge_tests", "", false);
+    gTestTempRoot.createDirectory();
+
+    juce::UnitTestRunner runner;
+    runner.setAssertOnFailure(false);
+    runner.setPassesAreLogged(true);
+    runner.runTestsInCategory("halionbridge");
+
+    int failures = 0;
+    for (int i = 0; i < runner.getNumResults(); ++i)
+    {
+        failures += runner.getResult(i)->failures;
+    }
+
+    juce::Logger::setCurrentLogger(nullptr);
+    gTestTempRoot.deleteRecursively();
+
+    return failures == 0 ? 0 : 1;
+}

@@ -1,0 +1,397 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_debug:
+        description: Build Debug
+        type: boolean
+        default: false
+      build_release:
+        description: Build Release
+        type: boolean
+        default: true
+      notarize_macos:
+        description: Notarize macOS release zip
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debug:
+    name: Debug ${{ matrix.name }}
+    if: ${{ inputs.build_debug }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            runner: windows-2025-vs2026
+          - name: macOS
+            runner: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up MSVC developer environment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installPath) {
+            Write-Error "Could not locate a Visual Studio installation with C++ tools."
+            exit 1
+          }
+
+          $vsDevCmd = Join-Path $installPath "Common7\Tools\VsDevCmd.bat"
+          if (-not (Test-Path $vsDevCmd)) {
+            Write-Error "Could not find VsDevCmd.bat at $vsDevCmd"
+            exit 1
+          }
+
+          cmd /s /c "`"$vsDevCmd`" -arch=x64 -host_arch=x64 && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              $name = $matches[1]
+              if ($name -notmatch '^(GITHUB_|RUNNER_|ACTIONS_|CI$)') {
+                "$name=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              }
+            }
+          }
+
+      - name: Install macOS formatting tools
+        if: runner.os == 'macOS'
+        shell: bash
+        run: brew install clang-format
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          cmake --version
+          ninja --version
+          clang-format --version
+
+      - name: Check first-party C++ formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          files="$(git ls-files '*.cpp' '*.h' ':!:external/*')"
+          clang-format --dry-run --Werror $files
+
+      - name: Configure
+        run: cmake --preset debug
+
+      - name: Build
+        run: cmake --build --preset debug
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  release:
+    name: Release ${{ matrix.name }}
+    if: ${{ inputs.build_release }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            runner: windows-2025-vs2026
+          - name: macOS
+            runner: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up MSVC developer environment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installPath) {
+            Write-Error "Could not locate a Visual Studio installation with C++ tools."
+            exit 1
+          }
+
+          $vsDevCmd = Join-Path $installPath "Common7\Tools\VsDevCmd.bat"
+          if (-not (Test-Path $vsDevCmd)) {
+            Write-Error "Could not find VsDevCmd.bat at $vsDevCmd"
+            exit 1
+          }
+
+          cmd /s /c "`"$vsDevCmd`" -arch=x64 -host_arch=x64 && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              $name = $matches[1]
+              if ($name -notmatch '^(GITHUB_|RUNNER_|ACTIONS_|CI$)') {
+                "$name=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              }
+            }
+          }
+
+      - name: Install macOS formatting tools
+        if: runner.os == 'macOS'
+        shell: bash
+        run: brew install clang-format
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          cmake --version
+          ninja --version
+          clang-format --version
+
+      - name: Check first-party C++ formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          files="$(git ls-files '*.cpp' '*.h' ':!:external/*')"
+          clang-format --dry-run --Werror $files
+
+      - name: Configure Windows
+        if: runner.os == 'Windows'
+        run: cmake --preset release
+
+      - name: Configure macOS universal
+        if: runner.os == 'macOS'
+        run: cmake --preset release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Read package metadata
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          basename="$(tr -d '\r\n' < build-release/halionbridge_package_basename.txt)"
+
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME:-}" =~ ^v?[0-9]+(\.[0-9]+){1,2}([-.][0-9A-Za-z.]+)?$ ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            artifact_base="halionbridge-${version}"
+          else
+            artifact_base="$basename"
+          fi
+
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            artifact_name="${artifact_base}-windows-x64"
+            staging_dir="dist/windows-x64"
+          else
+            artifact_name="${artifact_base}-macos-universal"
+            staging_dir="dist/macos-universal"
+          fi
+
+          echo "basename=$basename" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "staging_dir=$staging_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Test
+        run: ctest --test-dir build-release --output-on-failure
+
+      - name: Verify Windows release runtime dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = "build-release\halionbridge_artefacts\Release\halionbridge.exe"
+          if (-not (Test-Path $binary)) {
+            Write-Error "Expected Windows CLI not found: $binary"
+            exit 1
+          }
+
+          $dump = & dumpbin /DEPENDENTS $binary
+          $dump | Write-Host
+
+          $unexpected = $dump | Select-String -Pattern 'VCRUNTIME|MSVCP|CONCRT|UCRTBASE|api-ms-win-crt' -CaseSensitive:$false
+          if ($unexpected) {
+            Write-Error "Windows release binary depends on the dynamic MSVC runtime. Build should use the static MSVC runtime."
+            $unexpected | ForEach-Object { Write-Error $_.Line }
+            exit 1
+          }
+
+      - name: Verify macOS release runtime dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          binary="build-release/halionbridge_artefacts/Release/halionbridge"
+          if [ ! -f "$binary" ]; then
+            echo "Expected macOS CLI not found: $binary" >&2
+            exit 1
+          fi
+
+          lipo -info "$binary"
+          otool -L "$binary"
+
+          deps="$(otool -L "$binary" | awk '/^[[:space:]]+\// { print $1 }')"
+          if [ -z "$deps" ]; then
+            echo "Could not parse macOS runtime dependencies from otool output." >&2
+            exit 1
+          fi
+
+          bad_deps="$(printf "%s\n" "$deps" | grep -Ev '^(/usr/lib/|/System/Library/Frameworks/)' || true)"
+
+          if [ -n "$bad_deps" ]; then
+            echo "macOS release binary has unexpected non-system dynamic dependencies:" >&2
+            printf "%s\n" "$bad_deps" >&2
+            exit 1
+          fi
+
+      - name: Import macOS code signing certificate
+        if: runner.os == 'macOS'
+        uses: apple-actions/import-codesign-certs@v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.P12_BASE64 }}
+          p12-password: ${{ secrets.P12_PASSWORD }}
+
+      - name: Sign macOS CLI
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOS_DEV_ID_CERT_NAME: ${{ secrets.MACOS_DEV_ID_CERT_NAME }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$MACOS_DEV_ID_CERT_NAME" ]; then
+            echo "MACOS_DEV_ID_CERT_NAME secret is required for macOS signing." >&2
+            exit 1
+          fi
+
+          binary="build-release/halionbridge_artefacts/Release/halionbridge"
+          if [ ! -f "$binary" ]; then
+            echo "Expected macOS CLI not found: $binary" >&2
+            exit 1
+          fi
+
+          lipo -info "$binary"
+          xattr -cr "$binary"
+          codesign --force --verify --timestamp --options runtime --sign "$MACOS_DEV_ID_CERT_NAME" "$binary"
+          codesign -vvv --strict "$binary"
+
+      - name: Stage Windows CLI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ steps.package.outputs.staging_dir }}" | Out-Null
+          Copy-Item -LiteralPath "build-release\halionbridge_artefacts\Release\halionbridge.exe" -Destination "${{ steps.package.outputs.staging_dir }}\halionbridge.exe"
+
+      - name: Stage macOS CLI
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ steps.package.outputs.staging_dir }}"
+          cp build-release/halionbridge_artefacts/Release/halionbridge "${{ steps.package.outputs.staging_dir }}/halionbridge"
+
+      - name: Stage examples
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ steps.package.outputs.staging_dir }}"
+          git archive --format=tar HEAD examples | tar -x -C "${{ steps.package.outputs.staging_dir }}"
+
+      - name: Notarize macOS release zip
+        if: runner.os == 'macOS' && inputs.notarize_macos
+        shell: bash
+        env:
+          APPLE_NOTARY_USER: ${{ secrets.APPLE_NOTARY_USER }}
+          APPLE_NOTARY_APP_PASSWORD: ${{ secrets.APPLE_NOTARY_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for name in APPLE_NOTARY_USER APPLE_NOTARY_APP_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "$name secret is required for macOS notarization." >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+          mkdir -p dist/notary
+          notary_zip="dist/notary/${{ steps.package.outputs.artifact_name }}.zip"
+          rm -f "$notary_zip"
+          ditto -c -k --keepParent "${{ steps.package.outputs.staging_dir }}/halionbridge" "$notary_zip"
+
+          xcrun notarytool submit "$notary_zip" \
+            --apple-id "$APPLE_NOTARY_USER" \
+            --password "$APPLE_NOTARY_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+      - name: Verify staged release artifact contents
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          staging_dir="${{ steps.package.outputs.staging_dir }}"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cli_name="halionbridge.exe"
+          else
+            cli_name="halionbridge"
+          fi
+
+          if [ ! -f "$staging_dir/$cli_name" ]; then
+            echo "Expected CLI not found: $staging_dir/$cli_name" >&2
+            find "$staging_dir" -maxdepth 2 -print >&2
+            exit 1
+          fi
+
+          if [ ! -d "$staging_dir/examples" ]; then
+            echo "Expected examples directory not found: $staging_dir/examples" >&2
+            find "$staging_dir" -maxdepth 2 -print >&2
+            exit 1
+          fi
+
+          if ! find "$staging_dir/examples" -name halionbridge_build.lua -type f | grep -q .; then
+            echo "Expected at least one halionbridge_build.lua under staged examples." >&2
+            find "$staging_dir/examples" -maxdepth 3 -type f >&2
+            exit 1
+          fi
+
+          unexpected="$(find "$staging_dir" \
+            \( -path '*/build/*' \
+               -o -path '*/build-*/*' \
+               -o -name 'halionbridge_tests*' \
+               -o -name '*.lib' \
+               -o -name '*.dll' \
+               -o -name '*.dylib' \
+               -o -name '*.a' \
+               -o -name '*.exp' \
+               -o -name '*.pdb' \) \
+            -print)"
+
+          if [ -n "$unexpected" ]; then
+            echo "Release artifact contains unexpected build/test/library files:" >&2
+            printf "%s\n" "$unexpected" >&2
+            exit 1
+          fi
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ steps.package.outputs.staging_dir }}/*

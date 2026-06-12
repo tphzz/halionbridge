@@ -1,0 +1,20 @@
+#include "halionbridge/BuildInfo.h"
+
+namespace halionbridge
+{
+
+BuildInfo getBuildInfo() noexcept
+{
+    return {
+        "@HALIONBRIDGE_VERSION_STRING@",
+        "@HALIONBRIDGE_PACKAGE_BASENAME@",
+        "@HALIONBRIDGE_GIT_TAG@",
+        "@HALIONBRIDGE_GIT_BRANCH@",
+        "@HALIONBRIDGE_GIT_SHA_SHORT@",
+        "@HALIONBRIDGE_BUILD_TIMESTAMP_UTC@",
+        @HALIONBRIDGE_IS_TAGGED_RELEASE_CPP@,
+        @HALIONBRIDGE_GIT_DIRTY_CPP@
+    };
+}
+
+} // namespace halionbridge
