@@ -510,11 +510,18 @@ class BridgeTests : public juce::UnitTest
             expect(source.contains("function hb.warn"));
             expect(source.contains("function hb.unsupported"));
             expect(source.contains("function hb.path_join"));
+            expect(source.contains("function hb.sample_path"));
+            expect(source.contains("function hb.region_mapping"));
+            expect(source.contains("function hb.region_label"));
             expect(source.contains("function hb.set_parameter_required"));
             expect(source.contains("function hb.set_parameter_if_available"));
             expect(source.contains("function hb.assign_field_required"));
             expect(source.contains("function hb.create_layer"));
             expect(source.contains("function hb.create_sample_zone"));
+            expect(source.contains("pcall(function()\n        return Layer()"));
+            expect(source.contains("pcall(function()\n        return Zone()"));
+            expect(!source.contains("type(Layer) ~= \"function\""));
+            expect(!source.contains("type(Zone) ~= \"function\""));
             expect(source.contains("function hb.set_amp_envelope_required"));
             expect(source.contains("function hb.append_sample_zone"));
             expect(source.contains("function hb.save_layer_preset"));
@@ -720,12 +727,12 @@ class BridgeTests : public juce::UnitTest
             expect(result.succeeded);
 
             const auto lua = outputDir.getChildFile("000_velocity.lua").loadFileAsString();
-            expect(lua.contains("lovel = 0"));
-            expect(lua.contains("hivel = 1"));
-            expect(lua.contains("lovel = 63"));
-            expect(lua.contains("hivel = 64"));
-            expect(lua.contains("lovel = 126"));
-            expect(lua.contains("hivel = 127"));
+            expect(lua.contains("velocity_low = 0"));
+            expect(lua.contains("velocity_high = 1"));
+            expect(lua.contains("velocity_low = 63"));
+            expect(lua.contains("velocity_high = 64"));
+            expect(lua.contains("velocity_low = 126"));
+            expect(lua.contains("velocity_high = 127"));
 
             sourceDir.deleteRecursively();
             outputDir.deleteRecursively();
@@ -758,7 +765,8 @@ class BridgeTests : public juce::UnitTest
             expect(lua.contains("{ level = 0.400000006, duration = 0.300000012, curve = 0 }"));
             expect(lua.contains("{ level = 0, duration = 0, curve = 0 }"));
             expect(lua.contains("sustain_index = 5"));
-            expect(lua.contains("setAmpEnvelopeRequired(zone, region.amp_envelope)"));
+            expect(lua.contains("hb.append_sample_zone(ctx, layer, region)"));
+            expect(!lua.contains("setAmpEnvelopeRequired"));
 
             sourceDir.deleteRecursively();
             outputDir.deleteRecursively();
@@ -846,34 +854,42 @@ class BridgeTests : public juce::UnitTest
             const auto firstLua = firstOutput.getChildFile("000_000_synth_single_cycle_six_regions.lua").loadFileAsString();
             const auto secondLua = secondOutput.getChildFile("000_000_synth_single_cycle_six_regions.lua").loadFileAsString();
             expectEquals(firstLua, secondLua);
+            expect(firstLua.contains("local hb = require(\"halionbridge-sfz\")"));
+            expect(firstLua.contains("sample_playback = {"));
+            expect(firstLua.contains("mapping = {"));
             expect(firstLua.contains("saw_A3_single_cycle.wav"));
             expect(firstLua.contains("name = \"additive_organ_A3_si\""));
             expect(!firstLua.contains("Region 2"));
-            expect(firstLua.contains("lokey = 36"));
-            expect(firstLua.contains("hikey = 43"));
-            expect(firstLua.contains("lokey = 44"));
-            expect(firstLua.contains("hikey = 51"));
-            expect(firstLua.contains("hivel = 127"));
-            expect(firstLua.contains("pitch_keycenter = 57"));
-            expect(firstLua.contains("loop_start = 0"));
-            expect(firstLua.contains("loop_end = 199"));
-            expect(!firstLua.contains("loop_start = 14"));
-            expect(!firstLua.contains("loop_start = 86"));
+            expect(firstLua.contains("key_low = 36"));
+            expect(firstLua.contains("key_high = 43"));
+            expect(firstLua.contains("key_low = 44"));
+            expect(firstLua.contains("key_high = 51"));
+            expect(firstLua.contains("velocity_high = 127"));
+            expect(firstLua.contains("root_key = 57"));
+            expect(firstLua.contains("loop = {"));
+            expect(firstLua.contains("start = 0"));
+            expect(firstLua.contains("finish = 199"));
+            expect(!firstLua.contains("start = 14"));
+            expect(!firstLua.contains("start = 86"));
             expect(firstLua.contains("amp_velocity_to_level = 100"));
-            expect(firstLua.contains("filter_cutoff = 4978"));
-
-            const auto filenameAssignment = firstLua.indexOf("SampleOsc.Filename");
-            const auto rootKeyAssignment = firstLua.indexOf("SampleOsc.Rootkey");
-            const auto keyLowAssignment = firstLua.indexOf("assignFieldRequired(zone, \"keyLow\"");
-            expect(filenameAssignment >= 0);
-            expect(rootKeyAssignment > filenameAssignment);
-            expect(keyLowAssignment > rootKeyAssignment);
+            expect(firstLua.contains("filter = {"));
+            expect(firstLua.contains("cutoff = 4978"));
+            expect(firstLua.contains("hb.create_layer(ctx, layerName)"));
+            expect(firstLua.contains("hb.append_sample_zone(ctx, layer, region)"));
+            expect(firstLua.contains("hb.save_layer_preset(ctx, layer, outputFile)"));
+            expect(!firstLua.contains("local function setNameIfAvailable"));
+            expect(!firstLua.contains("local function setParameterRequired"));
+            expect(!firstLua.contains("local function setParameterIfAvailable"));
+            expect(!firstLua.contains("local function assignFieldRequired"));
+            expect(!firstLua.contains("local function appendSampleZone"));
+            expect(!firstLua.contains("SampleOsc.Filename"));
+            expect(!firstLua.contains("SampleOsc.Rootkey"));
 
             const auto velocityLua =
                 firstOutput.getChildFile("001_001_synth_single_cycle_three_regions_three_velocity_layers.lua").loadFileAsString();
-            expect(velocityLua.contains("lovel = 64"));
-            expect(velocityLua.contains("hivel = 63"));
-            expect(velocityLua.contains("hivel = 127"));
+            expect(velocityLua.contains("velocity_low = 64"));
+            expect(velocityLua.contains("velocity_high = 63"));
+            expect(velocityLua.contains("velocity_high = 127"));
 
             firstOutput.deleteRecursively();
             secondOutput.deleteRecursively();

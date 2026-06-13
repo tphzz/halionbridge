@@ -55,14 +55,6 @@ local function call_with_error(prefix, fn)
     return false, prefix .. ": " .. tostring(err)
 end
 
-local function sfz_loop_end_to_halion_marker(loop_end)
-    if type(loop_end) == "number" then
-        return loop_end + 1
-    end
-
-    return loop_end
-end
-
 function hb.ok(message, saved)
     return {
         ok = true,
@@ -323,9 +315,7 @@ function hb.apply_optional_sample_fields(ctx, zone, region)
     if loop_start and loop_end then
         hb.set_parameter_if_available(ctx, zone, "SampleOsc.SustainLoopModeA", 1)
         hb.set_parameter_if_available(ctx, zone, "SampleOsc.SustainLoopStartA", loop_start)
-        -- SFZ `loop_end` is inclusive, while HALion's loop end is a marker
-        -- position where playback jumps back to the loop start.
-        hb.set_parameter_if_available(ctx, zone, "SampleOsc.SustainLoopEndA", sfz_loop_end_to_halion_marker(loop_end))
+        hb.set_parameter_if_available(ctx, zone, "SampleOsc.SustainLoopEndA", loop_end)
     end
 
     local gain = region and region.gain or nil
