@@ -216,10 +216,11 @@ if(HALIONBRIDGE_BUILD_CLI)
     if(HALIONBRIDGE_ENABLE_CONVERTERS)
         target_sources(halionbridge PRIVATE "${HALIONBRIDGE_CONVERTER_REGISTRATIONS_CPP}")
         target_compile_definitions(halionbridge PRIVATE HALIONBRIDGE_ENABLE_CONVERTERS=1)
-        target_link_libraries(halionbridge PRIVATE
-            "${HALIONBRIDGE_CONVERTER_COMMON_TARGET}"
-            ${HALIONBRIDGE_CONVERTER_TARGETS}
-        )
+        if(HALIONBRIDGE_CONVERTER_TARGETS)
+            target_link_libraries(halionbridge PRIVATE ${HALIONBRIDGE_CONVERTER_TARGETS})
+        else()
+            target_link_libraries(halionbridge PRIVATE "${HALIONBRIDGE_CONVERTER_COMMON_TARGET}")
+        endif()
     endif()
 endif()
 
@@ -260,10 +261,11 @@ if(HALIONBRIDGE_BUILD_TESTS)
     if(HALIONBRIDGE_ENABLE_CONVERTERS)
         target_sources(halionbridge_tests PRIVATE "${HALIONBRIDGE_CONVERTER_REGISTRATIONS_CPP}")
         target_compile_definitions(halionbridge_tests PRIVATE HALIONBRIDGE_ENABLE_CONVERTERS=1)
-        target_link_libraries(halionbridge_tests PRIVATE
-            "${HALIONBRIDGE_CONVERTER_COMMON_TARGET}"
-            ${HALIONBRIDGE_CONVERTER_TARGETS}
-        )
+        if(HALIONBRIDGE_CONVERTER_TARGETS)
+            target_link_libraries(halionbridge_tests PRIVATE ${HALIONBRIDGE_CONVERTER_TARGETS})
+        else()
+            target_link_libraries(halionbridge_tests PRIVATE "${HALIONBRIDGE_CONVERTER_COMMON_TARGET}")
+        endif()
     endif()
 
     if(BUILD_TESTING)

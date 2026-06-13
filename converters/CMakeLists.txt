@@ -47,6 +47,8 @@ enable_halionbridge_strict_warnings(${HALIONBRIDGE_CONVERTER_COMMON_SOURCES})
 if(HALIONBRIDGE_ENABLE_CONVERTER_SFZ)
     function(halionbridge_add_sfizz_dependency)
         set(HALIONBRIDGE_RESTORE_BUILD_TESTING "${BUILD_TESTING}")
+        set(HALIONBRIDGE_RESTORE_C_FLAGS "${CMAKE_C_FLAGS}")
+        set(HALIONBRIDGE_RESTORE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
         if(DEFINED CACHE{CMAKE_DISABLE_FIND_PACKAGE_Qt5})
             set(HALIONBRIDGE_RESTORE_DISABLE_FIND_QT5_DEFINED TRUE)
             set(HALIONBRIDGE_RESTORE_DISABLE_FIND_QT5 "$CACHE{CMAKE_DISABLE_FIND_PACKAGE_Qt5}")
@@ -92,10 +94,24 @@ if(HALIONBRIDGE_ENABLE_CONVERTER_SFZ)
         set(CMAKE_WARN_DEPRECATED OFF CACHE BOOL "Suppress vendored CMake deprecation warnings while configuring sfizz." FORCE)
         if(MSVC)
             string(APPEND CMAKE_CXX_FLAGS " /D_SILENCE_CXX23_ALIGNED_STORAGE_DEPRECATION_WARNING /D_SILENCE_CXX23_DENORM_DEPRECATION_WARNING")
+        elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang")
+            if(CMAKE_C_COMPILER_ID MATCHES "Clang|AppleClang")
+                string(APPEND CMAKE_C_FLAGS " -w -Qunused-arguments")
+            endif()
+            string(APPEND CMAKE_CXX_FLAGS
+                " -w"
+                " -Qunused-arguments"
+                " -Wno-deprecated-builtins"
+                " -Wno-deprecated-declarations"
+                " -Wno-missing-template-arg-list-after-template-kw"
+                " -Wno-nan-infinity-disabled"
+            )
         endif()
         list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/sfizz-overrides")
 
         add_subdirectory(${CMAKE_SOURCE_DIR}/external/sfizz ${CMAKE_BINARY_DIR}/external/sfizz EXCLUDE_FROM_ALL)
+        set(CMAKE_C_FLAGS "${HALIONBRIDGE_RESTORE_C_FLAGS}")
+        set(CMAKE_CXX_FLAGS "${HALIONBRIDGE_RESTORE_CXX_FLAGS}")
         set(BUILD_TESTING "${HALIONBRIDGE_RESTORE_BUILD_TESTING}" CACHE BOOL "Build halionbridge tests." FORCE)
 
         if(HALIONBRIDGE_RESTORE_DISABLE_FIND_QT5_DEFINED)
@@ -144,10 +160,13 @@ if(HALIONBRIDGE_ENABLE_CONVERTER_SFZ)
         _SILENCE_CXX23_DENORM_DEPRECATION_WARNING
     )
     target_link_libraries(halionbridge_converter_sfz_static
-        PUBLIC
-            halionbridge_converter_common_static
         PRIVATE
+            halionbridge_converter_common_static
             sfizz::sfizz
+    )
+    target_include_directories(halionbridge_converter_sfz_static
+        PUBLIC
+            ${CMAKE_SOURCE_DIR}/converters/common/include
     )
     enable_halionbridge_strict_warnings(${HALIONBRIDGE_CONVERTER_SFZ_SOURCES})
 
