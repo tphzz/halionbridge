@@ -1,5 +1,6 @@
 #include "halionbridge/Bridge.h"
 #include "halionbridge/BuildInfo.h"
+#include "BuildFile.h"
 #include "Log.h"
 #include "ChildProcessOutput.h"
 #include "PathUtils.h"
@@ -314,6 +315,80 @@ class BridgeTests : public juce::UnitTest
             expect(!contains(names, "block_commented_module"));
             expect(!contains(names, "nested_module"));
             expect(!contains(names, "metadata literal"));
+        }
+
+        beginTest("Build File Generation - creates sorted top-level index");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_build_file_generation");
+            expect(tempDir.createDirectory());
+            expect(tempDir.getChildFile("002_second.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("001_first.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("halionbridge_runtime.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("halionbridge_builder.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("builder_bootstrap.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("nested").createDirectory());
+            expect(tempDir.getChildFile("nested").getChildFile("000_nested.lua").replaceWithText("return {}"));
+
+            const auto result = halionbridge::detail::generateBuildFile(tempDir, false);
+            expect(result.succeeded);
+            expectEquals(static_cast<int>(result.moduleNames.size()), 2);
+            if (result.moduleNames.size() == 2)
+            {
+                expectEquals(result.moduleNames[0], juce::String("001_first.lua"));
+                expectEquals(result.moduleNames[1], juce::String("002_second.lua"));
+            }
+
+            const auto generatedNames = halionbridge::Bridge::parseBuildFileModuleNames(result.buildFile.loadFileAsString().toStdString());
+            expectEquals(static_cast<int>(generatedNames.size()), 2);
+            expect(contains(generatedNames, "001_first.lua"));
+            expect(contains(generatedNames, "002_second.lua"));
+            expect(!contains(generatedNames, "halionbridge_runtime.lua"));
+            expect(!contains(generatedNames, "halionbridge_builder.lua"));
+            expect(!contains(generatedNames, "builder_bootstrap.lua"));
+            expect(!contains(generatedNames, "000_nested.lua"));
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Build File Generation - refuses and overwrites existing file explicitly");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_build_file_overwrite");
+            expect(tempDir.createDirectory());
+            const auto buildFile = tempDir.getChildFile("halionbridge_build.lua");
+            expect(tempDir.getChildFile("001_first.lua").replaceWithText("return {}"));
+            expect(buildFile.replaceWithText("return { \"manual.lua\" }\n"));
+
+            auto result = halionbridge::detail::generateBuildFile(tempDir, false);
+            expect(!result.succeeded);
+            expect(buildFile.loadFileAsString().contains("manual.lua"));
+
+            result = halionbridge::detail::generateBuildFile(tempDir, true);
+            expect(result.succeeded);
+            expect(buildFile.loadFileAsString().contains("001_first.lua"));
+            expect(!buildFile.loadFileAsString().contains("manual.lua"));
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Build File Generation - missing index with Lua files fails normal build parsing");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_missing_build_file_with_lua");
+            expect(tempDir.createDirectory());
+            expect(tempDir.getChildFile("001_first.lua").replaceWithText("return {}"));
+            expect(halionbridge::detail::hasTopLevelLuaBuildScripts(tempDir));
+            expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString()}).has_value());
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Build File Generation - empty directory has no Lua build scripts");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_missing_build_file_empty");
+            expect(tempDir.createDirectory());
+            expect(!halionbridge::detail::hasTopLevelLuaBuildScripts(tempDir));
+            expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString()}).has_value());
+
+            tempDir.deleteRecursively();
         }
 
         beginTest("Progress Marker Text Decoding");

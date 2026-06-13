@@ -1,12 +1,14 @@
 #include "halionbridge/Bridge.h"
 #include "halionbridge/BuildInfo.h"
 #include "halionbridge/CrashDiagnostics.h"
+#include "BuildFile.h"
 #include "Log.h"
 #include "PathUtils.h"
 #include "PluginScan.h"
 #include <juce_events/juce_events.h>
 #include <csignal>
 #include <iostream>
+#include <optional>
 #include <vector>
 
 #if JUCE_WINDOWS
@@ -58,9 +60,14 @@ void printHelp()
               << "\n"
               << "Usage:\n"
               << "  halionbridge <build-directory> [options]\n"
+              << "  halionbridge init <build-directory> [--overwrite]\n"
               << "\n"
               << "Required argument:\n"
               << "  <build-directory>        Directory containing halionbridge_build.lua and build script Lua files.\n"
+              << "\n"
+              << "Setup command:\n"
+              << "  init <build-directory>   Generate halionbridge_build.lua from top-level Lua files and exit.\n"
+              << "  --overwrite              Replace an existing halionbridge_build.lua when used with init.\n"
               << "\n"
               << "Plugin selection:\n"
               << "  --plugin <path>          Override the HALion 7 VST3 path.\n"
@@ -79,6 +86,54 @@ void printHelp()
               << "\n"
               << "Default behavior:\n"
               << "  Without --gui, halionbridge uses JUCE's headless VST3 host format and does not open an audio device.\n";
+}
+
+int runInitCommand(const juce::StringArray& args)
+{
+    std::optional<juce::File> buildDirectory;
+    auto overwrite = false;
+
+    for (int i = 1; i < args.size(); ++i)
+    {
+        const auto arg = args[i];
+
+        if (arg == "--overwrite")
+        {
+            overwrite = true;
+        }
+        else if (arg.startsWith("-"))
+        {
+            halionbridge::log::error("Unknown init argument: {}", arg.toStdString());
+            halionbridge::log::error("Run halionbridge --help to see available options.");
+            return 1;
+        }
+        else
+        {
+            if (buildDirectory)
+            {
+                halionbridge::log::error("Provide exactly one build directory for halionbridge init.");
+                return 1;
+            }
+
+            buildDirectory = halionbridge::detail::normalizeCliPath(arg);
+        }
+    }
+
+    if (!buildDirectory)
+    {
+        halionbridge::log::error("halionbridge init requires a build directory.");
+        return 1;
+    }
+
+    const auto result = halionbridge::detail::generateBuildFile(*buildDirectory, overwrite);
+    if (!result.succeeded)
+    {
+        halionbridge::log::error("{}", result.message.toStdString());
+        return 1;
+    }
+
+    halionbridge::log::info("{} with {} Lua build script file(s).", result.message.toStdString(), result.moduleNames.size());
+    return 0;
 }
 
 void printVersion()
@@ -150,6 +205,10 @@ int main(int argc, char* argv[])
     }
 
     halionbridge::log::configureFromEnvironment();
+
+    if (juceArgs.size() > 0 && juceArgs[0] == "init")
+        return runInitCommand(juceArgs);
+
     halionbridge::installCrashDiagnostics();
     installStopHandlers();
 

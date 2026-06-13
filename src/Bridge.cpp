@@ -2,6 +2,7 @@
 #include "halionbridge/CrashDiagnostics.h"
 #include "halionbridge/BuildInfo.h"
 #include "halionbridge_assets.h"
+#include "BuildFile.h"
 #include "Log.h"
 #include "PathUtils.h"
 #include "PluginScan.h"
@@ -785,6 +786,12 @@ std::optional<AppOptions> Bridge::parseArguments(const std::vector<std::string>&
     const auto buildFile = positionalBuildDirectory->getChildFile(kBuildFileName);
     if (!buildFile.existsAsFile())
     {
+        if (detail::hasTopLevelLuaBuildScripts(*positionalBuildDirectory))
+        {
+            log::warn("No {} was found, but Lua files exist in this directory. Run \"halionbridge init {}\" to generate one.",
+                      kBuildFileName, positionalBuildDirectory->getFullPathName().toStdString());
+        }
+
         log::error("Build directory must contain {} at {}", kBuildFileName, buildFile.getFullPathName().toStdString());
         return std::nullopt;
     }
@@ -881,6 +888,12 @@ RunResult Bridge::Impl::runDetailed(const AppOptions& options)
     const auto buildFile = runtimeRoot.getChildFile(kBuildFileName);
     if (!buildFile.existsAsFile())
     {
+        if (detail::hasTopLevelLuaBuildScripts(runtimeRoot))
+        {
+            log::warn("No {} was found, but Lua files exist in this directory. Run \"halionbridge init {}\" to generate one.",
+                      kBuildFileName, runtimeRoot.getFullPathName().toStdString());
+        }
+
         log::error("Build directory must contain {} at {}", kBuildFileName, buildFile.getFullPathName().toStdString());
         return RunResult::invalidOptions;
     }

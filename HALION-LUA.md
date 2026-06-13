@@ -15,6 +15,8 @@ return {
 
 Module names may be listed with or without `.lua`. They are loaded with `require`, so they must be resolvable from the build directory passed to halionbridge. The host-side helper `Bridge::parseBuildFileModuleNames()` inspects the common top-level list shape `return { "module_a", "module_b" }`; it is not a full Lua parser, and it ignores quoted strings in comments, nested tables, local variables, and metadata fields.
 
+`halionbridge init <build-directory>` can generate a simple `halionbridge_build.lua` from top-level `.lua` files. It sorts filenames, keeps the `.lua` suffix in each entry, and excludes halionbridge infrastructure files such as `halionbridge_runtime.lua`, `halionbridge_builder.lua`, `halionbridge_build.lua`, and `builder_bootstrap.lua`. It does not recurse into subdirectories and does not launch HALion.
+
 ## Runtime Root
 
 When halionbridge runs, it applies the embedded bootstrap vstpreset and writes temporary `halionbridge_runtime.lua` and `halionbridge_builder.lua` modules into HALion's user script library. This is why this must be configured in HALion in the library search paths in Options / Scripting Section. The vstpreset's inline bootstrap loads `halionbridge_runtime` with `require("halionbridge_runtime")`. The generated runtime module sets the Lua global `HALIONBRIDGE_RUNTIME_ROOT`, prepends the build directory to `package.path`, and then loads the embedded builder module as `halionbridge_builder`.

@@ -48,7 +48,7 @@ Before running the generic builder, open HALion's **Options Editor**, go to **Sc
 - Windows: `C:\Users\<username>\Documents\Steinberg\HALion\Library\scripts`
 - macOS: `/Users/<username>/Documents/Steinberg/HALion/Library/scripts`
 
-The build directory must contain `halionbridge_build.lua` and the Lua build script files referenced from that file. You can find examples in `examples`.
+The build directory must contain `halionbridge_build.lua` and the Lua build script files referenced from that file. You can find examples in `examples`. If you already have Lua build scripts in a directory, run `halionbridge init <directory>` to create a simple sorted `halionbridge_build.lua` for them.
 
 ```bash
 # Show command-line help
@@ -56,6 +56,9 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 
 # Show the CMake/Git-derived build version
 ./halionbridge --version
+
+# Generate halionbridge_build.lua from top-level Lua files and exit
+./halionbridge init /path/to/build-directory
 
 # Run the generic HALion Lua builder against a build directory
 ./halionbridge /path/to/build-directory

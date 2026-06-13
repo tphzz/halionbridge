@@ -148,7 +148,7 @@ The workflow validates compilation and unit tests only. It does not install, lau
 - `src/CrashDiagnostics.cpp`: Windows crash-dump support for failures that occur inside JUCE or a hosted VST3 before normal error reporting can run.
 - `src/ChildProcessOutput.cpp`: Byte-buffered subprocess output forwarding. It preserves split UTF-8 sequences across reads before logging scan-worker output.
 - `src/Log.cpp`: Private spdlog setup and log-level parsing. spdlog must not appear in the public `include/halionbridge` API.
-- `src/BuildFile.cpp`: Host-side build file inspection for the top-level string list returned by `halionbridge_build.lua`.
+- `src/BuildFile.cpp`: Host-side build file inspection for the top-level string list returned by `halionbridge_build.lua`, plus deterministic generation of a simple build file for `halionbridge init`.
 - `src/PathUtils.cpp`: Private JUCE/std filesystem conversion and CLI path normalization helpers shared by the library, CLI, and tests.
 - `src/PluginScan.cpp`: HALion plugin-description construction, in-process plugin scanning, and isolated scan-worker implementation.
 - `src/ProgressMarkers.cpp`: Host-side progress marker decoding, logging, cleanup, and filename codec behavior shared by the processing loop and tests.
@@ -213,7 +213,8 @@ cd halion-lua
 ## Preset Loading Notes
 - Generic VST3 component/controller-state presets are applied through JUCE's VST3 client preset API.
 - HALion program/layer presets may contain `Prog` program-data chunks without `Comp`/`Cont` state chunks. These are applied through Steinberg VST3 program/unit data interfaces exposed by HALion.
-- halionbridge is a single-purpose builder host. Users call `halionbridge <build-directory>`. The directory must contain `halionbridge_build.lua`; build script modules may create and save program presets, layer presets, or other HALion artifacts independently.
+- halionbridge is a single-purpose builder host. Users call `halionbridge <build-directory>`. The directory must contain `halionbridge_build.lua`; build script modules may create and save program presets, layer presets, or other HALion artifacts independently. Users can run `halionbridge init <build-directory>` to generate a simple sorted `halionbridge_build.lua` from top-level Lua files before running the build.
+- `halionbridge init` is a setup command, not a build command. It does not initialize JUCE's plugin-host path or launch HALion. It refuses to replace an existing build file unless `--overwrite` is passed. Normal build mode emits a warning pointing to `halionbridge init <directory>` when the build file is missing but top-level Lua files are present.
 - Raw `.vstpreset` bytes must not be passed to `setStateInformation()` as a fallback; that API expects JUCE's hosted-plugin state representation, not a Steinberg preset container.
 - The bridge drives HALion with `prepareToPlay()` and manual `processBlock()` calls. It does not use `AudioDeviceManager` or open a system audio device.
 - Normal runs register JUCE's headless plugin formats with `addHeadlessDefaultFormatsToManager()`. `--gui` switches to JUCE's GUI-capable plugin formats with `addDefaultFormatsToManager()` and creates the HALion editor.

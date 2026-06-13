@@ -1,10 +1,133 @@
+#include "BuildFile.h"
+
 #include "halionbridge/Bridge.h"
 
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 
 namespace halionbridge
 {
+namespace
+{
+
+constexpr const char* kBuildFileName = "halionbridge_build.lua";
+constexpr const char* kRuntimeModuleFileName = "halionbridge_runtime.lua";
+constexpr const char* kBuilderModuleFileName = "halionbridge_builder.lua";
+constexpr const char* kBuilderBootstrapFileName = "builder_bootstrap.lua";
+
+bool isInfrastructureLuaFile(const juce::String& fileName)
+{
+    return fileName == kBuildFileName || fileName == kRuntimeModuleFileName || fileName == kBuilderModuleFileName ||
+           fileName == kBuilderBootstrapFileName;
+}
+
+std::string luaQuotedString(const juce::String& text)
+{
+    auto quoted = std::string("\"");
+
+    for (const auto c : text.toStdString())
+    {
+        switch (c)
+        {
+        case '\\':
+            quoted += "\\\\";
+            break;
+        case '"':
+            quoted += "\\\"";
+            break;
+        case '\r':
+            quoted += "\\r";
+            break;
+        case '\n':
+            quoted += "\\n";
+            break;
+        default:
+            quoted.push_back(c);
+            break;
+        }
+    }
+
+    quoted += "\"";
+    return quoted;
+}
+
+} // namespace
+
+namespace detail
+{
+
+std::vector<juce::File> findTopLevelLuaBuildScripts(const juce::File& directory)
+{
+    juce::Array<juce::File> files;
+    directory.findChildFiles(files, juce::File::findFiles, false, "*.lua");
+
+    std::vector<juce::File> scripts;
+    scripts.reserve(static_cast<size_t>(files.size()));
+
+    for (const auto& file : files)
+    {
+        if (!isInfrastructureLuaFile(file.getFileName()))
+            scripts.push_back(file);
+    }
+
+    std::sort(scripts.begin(), scripts.end(),
+              [](const juce::File& lhs, const juce::File& rhs) { return lhs.getFileName() < rhs.getFileName(); });
+    return scripts;
+}
+
+bool hasTopLevelLuaBuildScripts(const juce::File& directory)
+{
+    return !findTopLevelLuaBuildScripts(directory).empty();
+}
+
+BuildFileGenerationResult generateBuildFile(const juce::File& directory, const bool overwriteExisting)
+{
+    auto result = BuildFileGenerationResult{};
+    result.buildFile = directory.getChildFile(kBuildFileName);
+
+    if (!directory.isDirectory())
+    {
+        result.message = juce::String("Build directory does not exist at ") + directory.getFullPathName();
+        return result;
+    }
+
+    if (result.buildFile.existsAsFile() && !overwriteExisting)
+    {
+        result.message = result.buildFile.getFullPathName() + " already exists. Use --overwrite to replace it.";
+        return result;
+    }
+
+    const auto scripts = findTopLevelLuaBuildScripts(directory);
+    if (scripts.empty())
+    {
+        result.message = juce::String("No top-level Lua build script files were found in ") + directory.getFullPathName();
+        return result;
+    }
+
+    std::ostringstream text;
+    text << "return {\n";
+    for (const auto& script : scripts)
+    {
+        const auto moduleName = script.getFileName();
+        result.moduleNames.push_back(moduleName);
+        text << "    " << luaQuotedString(moduleName) << ",\n";
+    }
+    text << "}\n";
+
+    if (!result.buildFile.replaceWithText(juce::String(text.str()), false, false, "\n"))
+    {
+        result.message = "Failed to write " + result.buildFile.getFullPathName();
+        result.moduleNames.clear();
+        return result;
+    }
+
+    result.succeeded = true;
+    result.message = "Generated " + result.buildFile.getFullPathName();
+    return result;
+}
+
+} // namespace detail
 
 std::vector<std::string> Bridge::parseBuildFileModuleNames(std::string_view luaText)
 {
