@@ -4,3 +4,6 @@
 [submodule "external/spdlog"]
 	path = external/spdlog
 	url = https://github.com/gabime/spdlog.git
+[submodule "external/sfizz"]
+	path = external/sfizz
+	url = https://github.com/sfztools/sfizz.git

@@ -19,6 +19,9 @@ option(HALIONBRIDGE_BUILD_CLI "Build the halionbridge CLI executable." ON)
 option(HALIONBRIDGE_BUILD_TESTS "Build the halionbridge unit test executable." ${BUILD_TESTING})
 option(HALIONBRIDGE_ENABLE_DIAGNOSTICS "Enable verbose JUCE/VST3 diagnostic logging in this build." OFF)
 option(HALIONBRIDGE_ENABLE_CRASH_DUMPS "Write a Windows minidump when the bridge process crashes." ON)
+option(HALIONBRIDGE_ENABLE_CONVERTERS "Build converter support into the halionbridge CLI." ON)
+option(HALIONBRIDGE_ENABLE_CONVERTER_SFZ "Build the built-in SFZ converter." ON)
+set(HALIONBRIDGE_EXTRA_CONVERTER_DIRS "" CACHE STRING "Semicolon-separated extra converter source directories.")
 
 set(HALIONBRIDGE_GENERATED_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-src")
 set(HALIONBRIDGE_BUILD_INFO_CPP "${HALIONBRIDGE_GENERATED_SOURCE_DIR}/BuildInfo.cpp")
@@ -108,6 +111,10 @@ function(enable_halionbridge_strict_warnings)
 endfunction()
 
 enable_halionbridge_strict_warnings(${HALIONBRIDGE_LIBRARY_SOURCES})
+
+if(HALIONBRIDGE_ENABLE_CONVERTERS)
+    add_subdirectory(converters)
+endif()
 
 set(HALIONBRIDGE_LIBRARY_OUTPUT_DIRECTORY
     "${CMAKE_BINARY_DIR}/halionbridge_library_artefacts/$<CONFIG>"
@@ -205,6 +212,15 @@ if(HALIONBRIDGE_BUILD_CLI)
     target_compile_features(halionbridge PRIVATE cxx_std_23)
     configure_halionbridge_juce_consumer(halionbridge)
     target_link_libraries(halionbridge PRIVATE halionbridge_static)
+
+    if(HALIONBRIDGE_ENABLE_CONVERTERS)
+        target_sources(halionbridge PRIVATE "${HALIONBRIDGE_CONVERTER_REGISTRATIONS_CPP}")
+        target_compile_definitions(halionbridge PRIVATE HALIONBRIDGE_ENABLE_CONVERTERS=1)
+        target_link_libraries(halionbridge PRIVATE
+            "${HALIONBRIDGE_CONVERTER_COMMON_TARGET}"
+            ${HALIONBRIDGE_CONVERTER_TARGETS}
+        )
+    endif()
 endif()
 
 if(HALIONBRIDGE_BUILD_TESTS)
@@ -219,6 +235,14 @@ if(HALIONBRIDGE_BUILD_TESTS)
         ${CMAKE_CURRENT_BINARY_DIR}/generated
     )
 
+    if(HALIONBRIDGE_ENABLE_CONVERTERS)
+        target_compile_definitions(halionbridge_public_header_smoke PRIVATE HALIONBRIDGE_ENABLE_CONVERTERS=1)
+        target_include_directories(halionbridge_public_header_smoke PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/converters/common/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/converters/sfz/include
+        )
+    endif()
+
     # Create Unit Tests Executable
     juce_add_console_app(halionbridge_tests
         PRODUCT_NAME "halionbridge_tests")
@@ -232,6 +256,15 @@ if(HALIONBRIDGE_BUILD_TESTS)
     target_compile_definitions(halionbridge_tests PRIVATE JUCE_UNIT_TESTS=1)
     configure_halionbridge_juce_consumer(halionbridge_tests)
     target_link_libraries(halionbridge_tests PRIVATE halionbridge_static)
+
+    if(HALIONBRIDGE_ENABLE_CONVERTERS)
+        target_sources(halionbridge_tests PRIVATE "${HALIONBRIDGE_CONVERTER_REGISTRATIONS_CPP}")
+        target_compile_definitions(halionbridge_tests PRIVATE HALIONBRIDGE_ENABLE_CONVERTERS=1)
+        target_link_libraries(halionbridge_tests PRIVATE
+            "${HALIONBRIDGE_CONVERTER_COMMON_TARGET}"
+            ${HALIONBRIDGE_CONVERTER_TARGETS}
+        )
+    endif()
 
     if(BUILD_TESTING)
         add_test(NAME halionbridge_tests COMMAND halionbridge_tests)

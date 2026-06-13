@@ -5,9 +5,13 @@
 #include "Log.h"
 #include "PathUtils.h"
 #include "PluginScan.h"
+#if HALIONBRIDGE_ENABLE_CONVERTERS
+#include "halionbridge_converters/Converter.h"
+#endif
 #include <juce_events/juce_events.h>
 #include <csignal>
 #include <iostream>
+#include <span>
 #include <vector>
 
 #if JUCE_WINDOWS
@@ -60,6 +64,9 @@ void printHelp()
               << "Usage:\n"
               << "  halionbridge <build-directory> [options]\n"
               << "  halionbridge init <build-directory> [--overwrite]\n"
+#if HALIONBRIDGE_ENABLE_CONVERTERS
+              << "  halionbridge convert <converter-id> <source-directory> <output-directory> [converter-options]\n"
+#endif
               << "\n"
               << "Required argument:\n"
               << "  <build-directory>        Directory containing halionbridge_build.lua and build script Lua files.\n"
@@ -68,6 +75,12 @@ void printHelp()
               << "  init <build-directory>   Generate halionbridge_build.lua from top-level Lua files and exit.\n"
               << "  --overwrite              Replace an existing halionbridge_build.lua when used with init.\n"
               << "\n"
+#if HALIONBRIDGE_ENABLE_CONVERTERS
+              << "Converter command:\n"
+              << "  convert --list           List converter IDs compiled into this halionbridge binary.\n"
+              << "  convert <id> --help      Show converter-specific options.\n"
+              << "\n"
+#endif
               << "Plugin selection:\n"
               << "  --plugin <path>          Override the HALion 7 VST3 path.\n"
               << "\n"
@@ -98,6 +111,86 @@ void printVersion()
               << "ref: " << ref << "\n"
               << "source: " << (buildInfo.isDirty ? "modified" : "clean") << "\n";
 }
+
+#if HALIONBRIDGE_ENABLE_CONVERTERS
+void printConvertHelp()
+{
+    std::cout << "halionbridge convert\n"
+              << "\n"
+              << "Usage:\n"
+              << "  halionbridge convert <converter-id> <source-directory> <output-directory> [converter-options]\n"
+              << "  halionbridge convert --list\n"
+              << "  halionbridge convert <converter-id> --help\n";
+}
+
+void logDiagnostic(const halionbridge::converters::Diagnostic& diagnostic)
+{
+    const auto text = diagnostic.source.empty() ? diagnostic.message : diagnostic.source.string() + ": " + diagnostic.message;
+
+    switch (diagnostic.level)
+    {
+    case halionbridge::converters::DiagnosticLevel::info:
+        halionbridge::log::info("{}", text);
+        break;
+    case halionbridge::converters::DiagnosticLevel::warning:
+        halionbridge::log::warn("{}", text);
+        break;
+    case halionbridge::converters::DiagnosticLevel::error:
+        halionbridge::log::error("{}", text);
+        break;
+    }
+}
+
+int runConvertCommand(std::span<const std::string> args)
+{
+    halionbridge::converters::ConverterRegistry registry;
+    halionbridge::converters::registerCompiledConverters(registry);
+
+    if (args.empty() || args[0] == "--help" || args[0] == "-h")
+    {
+        printConvertHelp();
+        return 0;
+    }
+
+    if (args[0] == "--list")
+    {
+        const auto converters = registry.list();
+        if (converters.empty())
+        {
+            std::cout << "No converters are compiled into this halionbridge binary.\n";
+            return 0;
+        }
+
+        std::cout << "Available converters:\n";
+        for (const auto& converter : converters)
+            std::cout << "  " << converter.id << "  " << converter.summary << "\n";
+        return 0;
+    }
+
+    const auto* converter = registry.find(args[0]);
+    if (converter == nullptr)
+    {
+        halionbridge::log::error("Unknown converter '{}'. Run halionbridge convert --list to see available converters.", args[0]);
+        return 1;
+    }
+
+    if (args.size() == 2 && (args[1] == "--help" || args[1] == "-h"))
+    {
+        if (converter->helpText != nullptr)
+            std::cout << converter->helpText();
+        else
+            printConvertHelp();
+        return 0;
+    }
+
+    const auto converterArgs = std::span<const std::string>(args.data() + 1, args.size() - 1);
+    const auto result = converter->run(converterArgs);
+    for (const auto& diagnostic : result.diagnostics)
+        logDiagnostic(diagnostic);
+
+    return result.exitCode;
+}
+#endif
 
 } // namespace
 
@@ -139,14 +232,14 @@ int main(int argc, char* argv[])
         args.emplace_back(argv[i]);
     }
 
-    if ((juceArgs.isEmpty() || juceArgs.contains("--help") || juceArgs.contains("-h")) &&
+    if ((juceArgs.isEmpty() || juceArgs[0] == "--help" || juceArgs[0] == "-h") &&
         (juceArgs.size() == 0 || juceArgs[0] != "--halionbridge-scan-plugin"))
     {
         printHelp();
         return 0;
     }
 
-    if (juceArgs.contains("--version") && (juceArgs.size() == 1 || juceArgs[0] != "--halionbridge-scan-plugin"))
+    if (juceArgs[0] == "--version" && (juceArgs.size() == 1 || juceArgs[0] != "--halionbridge-scan-plugin"))
     {
         printVersion();
         return 0;
@@ -175,6 +268,14 @@ int main(int argc, char* argv[])
 
         return initResult.exitCode;
     }
+
+#if HALIONBRIDGE_ENABLE_CONVERTERS
+    if (juceArgs.size() > 0 && juceArgs[0] == "convert")
+    {
+        const auto convertArgs = std::span<const std::string>(args.data() + 1, args.size() - 1);
+        return runConvertCommand(convertArgs);
+    }
+#endif
 
     halionbridge::installCrashDiagnostics();
     installStopHandlers();

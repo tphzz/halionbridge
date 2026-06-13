@@ -76,6 +76,11 @@ CLAUDE.md
 # ignore documentation directories and test artifacts
 sampler-dev-docs
 halionbridge_private
-examples/**/*.vstpreset
+converters/private/
+converters.local.cmake
+scratch
+plans
 
+# ignore generated files in the example directories
+examples/**/*.vstpreset
 examples/synth-single-cycle-uninitialized/halionbridge_build.lua

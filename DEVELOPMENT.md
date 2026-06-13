@@ -85,8 +85,12 @@ On macOS, the same library artifact directory contains `libhalionbridge.dylib` a
 - `halionbridge`: The command-line frontend. It links against `halionbridge_static` so the CLI remains a self-contained executable and does not require the shared library beside it.
 - `halionbridge_tests`: The unit-test executable. It also links against `halionbridge_static`.
 - `halionbridge_public_header_smoke`: A compile-only object target that includes the public headers without any JUCE include paths. If a public header starts depending on JUCE again, this target should fail to compile.
+- `halionbridge_converter_common_static`: Shared first-party converter infrastructure for converter registration and deterministic halionbridge build-directory emission.
+- `halionbridge_converter_sfz_static`: Built-in SFZ converter. It links sfizz privately and generates normal Lua build directories consumed by the existing builder workflow.
 
 The public C++ headers live under `include/halionbridge` and must remain JUCE-free. Public API types use C++23/STL types such as `std::filesystem::path`, `std::string`, `std::vector`, `std::span`, and `std::optional`; JUCE is an implementation dependency only. The generated export header is written by CMake under the build directory and is included through `halionbridge/halionbridge_export.h`. Public headers use `HALIONBRIDGE_EXPORT` so the same declarations work for the shared library and for static consumers that define `HALIONBRIDGE_STATIC_DEFINE`.
+
+Converter public headers live under `converters/*/include` and must remain free of JUCE, spdlog, and parser implementation types such as sfizz classes. Converter modules describe the input format only; `sfz` means "SFZ to the standard halionbridge Lua build-directory shape" because the Lua destination is implied by halionbridge.
 
 The main public library entry point is `halionbridge::Bridge`. The CLI owns process signal handling and calls the public `requestStop()` / `resetStopRequest()` stop API; library processing loops poll `isStopRequested()` and leave through normal C++ control flow so temporary HALion script files, working-directory changes, and environment changes are cleaned up by RAII destructors.
 
@@ -140,10 +144,44 @@ macOS Release builds are configured as universal binaries with `CMAKE_OSX_ARCHIT
 
 The workflow validates compilation and unit tests only. It does not install, launch, or smoke-test HALion; HALion runtime testing still requires a licensed and activated local or self-hosted machine.
 
+## Converter Subsystem
+
+halionbridge supports setup-time converters through:
+
+```text
+halionbridge convert <converter-id> <source-directory> <output-directory> [converter-options]
+```
+
+Converters generate normal halionbridge build directories and then exit. They do not launch HALion. Users can inspect or edit the generated Lua and then run:
+
+```text
+halionbridge <output-directory>
+```
+
+The built-in `sfz` converter scans a source directory for `.sfz` files. It processes only top-level `.sfz` files by default and includes nested files only when `--recursive` is passed. Each `.sfz` file generates one Lua build script; one generated `halionbridge_build.lua` lists all generated scripts in deterministic order. `--overwrite` is required to replace existing generated files. `--name <name>` is accepted only when exactly one `.sfz` file is converted. Conversion fails before writing files if two SFZ inputs would generate the same output `.vstpreset` filename.
+
+`converters/common` owns reusable converter infrastructure: converter registration, build-directory writing, Lua string escaping, overwrite checks, and deterministic LF output. Format-specific converter modules should pass generated Lua scripts to this common emitter instead of rewriting build-file logic. The emitter accepts only flat relative generated Lua filenames, rejects absolute paths, root paths, `.`/`..`, nested paths, and duplicate module or filename entries, and therefore prevents converter output from escaping the requested output directory.
+
+`converters/sfz` owns all sfizz interaction. sfizz is an implementation dependency only; sfizz headers and types must not appear in public converter APIs. The v1 SFZ mapping creates one HALion layer preset per source SFZ and maps sample paths, key ranges, velocity ranges, root key, and sustain-loop fields into the tested HALion sample-zone Lua pattern. Generated Lua treats zone type, sample filename, key range, velocity range, and root key assignment as required; failure returns an unsuccessful build result before saving the preset. Optional naming and sustain-loop parameter assignment remain non-fatal and are logged by the generated build script when HALion rejects them.
+
+Converter CMake options:
+
+```text
+HALIONBRIDGE_ENABLE_CONVERTERS=ON|OFF
+HALIONBRIDGE_ENABLE_CONVERTER_SFZ=ON|OFF
+HALIONBRIDGE_EXTRA_CONVERTER_DIRS=<semicolon-separated converter dirs>
+```
+
+Private or release-only converters are build-time drop-ins. A private converter can live under gitignored `converters/private/<name>`, be listed in gitignored `converters.local.cmake`, or be passed through `HALIONBRIDGE_EXTRA_CONVERTER_DIRS`. Drop-ins are statically linked into the CLI and must call `halionbridge_register_converter_target(TARGET ... REGISTRATION_FUNCTION ... HEADER ...)` from their CMake. Registration data is collected through CMake global properties so converter targets registered from nested `add_subdirectory()` scopes are included in the generated registration source. Runtime converter DLL/plugin loading is intentionally not used because it would add ABI, signing, notarization, and deployment failure modes.
+
 ## Orientation in the Code Base
 - `CMakeLists.txt`: Main CMake configuration file linking the JUCE 8 submodule and defining the C++23 requirements.
 - `external/JUCE`: The JUCE 8 framework git submodule.
 - `external/spdlog`: The spdlog logging submodule, used privately by the implementation and CLI.
+- `external/sfizz`: The sfizz SFZ parser/synth library git submodule, used privately by the built-in `sfz` converter.
+- `converters/common`: First-party converter registry and generated build-directory emitter.
+- `converters/sfz`: First-party SFZ converter that uses sfizz privately and emits HALion Lua build scripts.
+- `converters/private`: Gitignored location for optional private converter drop-ins used by local or release-only builds.
 - `include/halionbridge/Bridge.h`: JUCE-free public library API for command-line option parsing, HALion plugin location, VST preset inspection, runtime module generation, status marker paths, and bridge execution. `Bridge::runDetailed()` returns a `RunResult` for embedding applications; `Bridge::run()` remains the bool convenience wrapper. A moved-from `Bridge` returns `RunResult::invalidBridge` so API misuse is distinguishable from invalid user options.
 - `include/halionbridge/CrashDiagnostics.h`: JUCE-free public crash-diagnostics entry points used by the CLI before JUCE/HALion startup.
 - `src/Bridge.cpp`: Core bridge orchestration for preparing the embedded bootstrap preset, hosting the HALion 7 VST3 format, applying preset data, and driving the processing loop.
@@ -210,6 +248,7 @@ cd halion-lua
 ## Dependencies
 - **JUCE 8:** Core implementation framework, handling VST3 plugin hosting and offline audio buffers. JUCE must not appear in public `include/halionbridge` interfaces.
 - **spdlog 1.17.0:** Private implementation dependency for timestamped console logging and log-level filtering. It is vendored as `external/spdlog` and linked through `spdlog::spdlog_header_only`.
+- **sfizz:** Private implementation dependency for the built-in SFZ converter. halionbridge initializes sfizz's nested submodules with normal Git submodule commands and disables sfizz's own test/demo/client targets in the halionbridge build.
 - **HALion 7 VST3:** The target plugin (must be installed on the host system to run the bridge).
 
 ## Preset Loading Notes

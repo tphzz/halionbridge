@@ -6,6 +6,11 @@
 #include "PathUtils.h"
 #include "PluginScan.h"
 #include "ProgressMarkers.h"
+#if HALIONBRIDGE_ENABLE_CONVERTERS
+#include "halionbridge_converters/BuildDirectoryEmitter.h"
+#include "halionbridge_converters/Converter.h"
+#include "halionbridge_converters/sfz/SfzConverter.h"
+#endif
 #include <juce_core/juce_core.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <algorithm>
@@ -14,6 +19,7 @@
 #include <filesystem>
 #include <iostream>
 #include <span>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -63,6 +69,14 @@ bool waitForFileToExist(const juce::File& file, const int timeoutMs)
 
     return file.existsAsFile();
 }
+
+#if HALIONBRIDGE_ENABLE_CONVERTERS
+bool containsDiagnosticCode(const std::vector<halionbridge::converters::Diagnostic>& diagnostics, const std::string_view code)
+{
+    return std::any_of(diagnostics.begin(), diagnostics.end(),
+                       [code](const halionbridge::converters::Diagnostic& diagnostic) { return diagnostic.code == code; });
+}
+#endif
 
 int runScriptLockHolder(const juce::String& readyFilePath, const juce::String& releaseFilePath)
 {
@@ -454,6 +468,247 @@ class BridgeTests : public juce::UnitTest
 
             tempDir.deleteRecursively();
         }
+
+#if HALIONBRIDGE_ENABLE_CONVERTERS
+        beginTest("Converter Registry - compiled converters are listed");
+        {
+            halionbridge::converters::ConverterRegistry registry;
+            halionbridge::converters::registerCompiledConverters(registry);
+
+            const auto converters = registry.list();
+            expect(!converters.empty());
+            expect(registry.find("sfz") != nullptr);
+            expect(registry.find("missing") == nullptr);
+
+            auto duplicate =
+                halionbridge::converters::ConverterDefinition{"sfz", "Duplicate", "Duplicate", converters.front().run, nullptr};
+            expect(!registry.registerConverter(duplicate));
+        }
+
+        beginTest("Converter Emitter - deterministic build directory output");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_converter_emitter");
+            const auto outputDirectory = halionbridge::detail::toStdPath(tempDir);
+
+            auto request = halionbridge::converters::BuildDirectoryRequest{};
+            request.outputDirectory = outputDirectory;
+            request.scripts.push_back(halionbridge::converters::GeneratedLuaScript{"001_a.lua", "001_a.lua", "return {}\n"});
+            request.scripts.push_back(
+                halionbridge::converters::GeneratedLuaScript{"002_quote\"name.lua", "002_quote.lua", "return \"quoted\"\n"});
+
+            auto result = halionbridge::converters::writeBuildDirectory(request);
+            expect(result.succeeded);
+            expectEquals(static_cast<int>(result.generatedLuaFiles.size()), 2);
+
+            const auto buildFile = tempDir.getChildFile("halionbridge_build.lua");
+            const auto buildText = buildFile.loadFileAsString();
+            expect(buildText.contains("\"001_a.lua\""));
+            expect(buildText.contains("\"002_quote\\\"name.lua\""));
+
+            auto refused = halionbridge::converters::writeBuildDirectory(request);
+            expect(!refused.succeeded);
+            expect(!refused.diagnostics.empty());
+
+            request.overwrite = true;
+            auto overwritten = halionbridge::converters::writeBuildDirectory(request);
+            expect(overwritten.succeeded);
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Converter Emitter - rejects unsafe and duplicate generated names");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_converter_emitter_invalid");
+            const auto outputDirectory = halionbridge::detail::toStdPath(tempDir);
+
+            auto request = halionbridge::converters::BuildDirectoryRequest{};
+            request.outputDirectory = outputDirectory;
+            request.scripts.push_back(halionbridge::converters::GeneratedLuaScript{"valid.lua", "valid.lua", "return {}\n"});
+
+            const auto expectRejectedFileName = [&](const std::string& fileName)
+            {
+                auto invalid = request;
+                invalid.scripts.front().fileName = fileName;
+                const auto result = halionbridge::converters::writeBuildDirectory(invalid);
+                expect(!result.succeeded);
+                expect(containsDiagnosticCode(result.diagnostics, "invalid-script-filename"));
+            };
+
+            expectRejectedFileName("");
+            expectRejectedFileName("../escape.lua");
+            expectRejectedFileName("nested/script.lua");
+            expectRejectedFileName("C:/escape.lua");
+
+            auto duplicateFile = request;
+            duplicateFile.scripts.push_back(halionbridge::converters::GeneratedLuaScript{"other.lua", "VALID.lua", "return {}\n"});
+            auto result = halionbridge::converters::writeBuildDirectory(duplicateFile);
+            expect(!result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "duplicate-script-filename"));
+
+            auto duplicateModule = request;
+            duplicateModule.scripts.push_back(halionbridge::converters::GeneratedLuaScript{"VALID.lua", "other.lua", "return {}\n"});
+            result = halionbridge::converters::writeBuildDirectory(duplicateModule);
+            expect(!result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "duplicate-module-name"));
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - validates source directories");
+        {
+            const auto tempDir = cleanTempDirectory("halionbridge_sfz_validation");
+            expect(tempDir.createDirectory());
+            const auto outputDirectory = halionbridge::detail::toStdPath(cleanTempDirectory("halionbridge_sfz_validation_out"));
+
+            auto missingOptions = halionbridge::converters::sfz::ConversionOptions{};
+            missingOptions.sourceDirectory = halionbridge::detail::toStdPath(tempDir.getChildFile("missing"));
+            missingOptions.outputDirectory = outputDirectory;
+            auto result = halionbridge::converters::sfz::convertDirectory(missingOptions);
+            expect(!result.succeeded);
+
+            const auto fileSource = tempDir.getChildFile("instrument.sfz");
+            expect(fileSource.replaceWithText("<region> sample=missing.wav\n"));
+            auto fileOptions = halionbridge::converters::sfz::ConversionOptions{};
+            fileOptions.sourceDirectory = halionbridge::detail::toStdPath(fileSource);
+            fileOptions.outputDirectory = outputDirectory;
+            result = halionbridge::converters::sfz::convertDirectory(fileOptions);
+            expect(!result.succeeded);
+
+            const auto emptyDirectory = cleanTempDirectory("halionbridge_sfz_empty");
+            expect(emptyDirectory.createDirectory());
+            auto emptyOptions = halionbridge::converters::sfz::ConversionOptions{};
+            emptyOptions.sourceDirectory = halionbridge::detail::toStdPath(emptyDirectory);
+            emptyOptions.outputDirectory = outputDirectory;
+            result = halionbridge::converters::sfz::convertDirectory(emptyOptions);
+            expect(!result.succeeded);
+
+            tempDir.deleteRecursively();
+            emptyDirectory.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - recursive discovery is explicit");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_recursive_source");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("nested").createDirectory());
+            expect(sourceDir.getChildFile("nested").getChildFile("instrument.sfz").replaceWithText("not an sfz region\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(cleanTempDirectory("halionbridge_sfz_recursive_out"));
+            auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(!result.succeeded);
+
+            options.recursive = true;
+            result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(!result.succeeded);
+            expect(!result.diagnostics.empty());
+
+            sourceDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - rejects duplicate preset output names");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_duplicate_presets");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_duplicate_presets_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("bass-one.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=60 hikey=60 lovel=0 hivel=127 pitch_keycenter=60\n"));
+            expect(sourceDir.getChildFile("bass_one.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=61 hikey=61 lovel=0 hivel=127 pitch_keycenter=61\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(!result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "duplicate-preset-name"));
+            expect(!outputDir.getChildFile("halionbridge_build.lua").existsAsFile());
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - preserves inclusive velocity boundaries");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_velocity_boundaries");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_velocity_boundaries_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("velocity.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=60 hikey=60 lovel=0 hivel=1 pitch_keycenter=60\n"
+                                        "<region> sample=sample.wav lokey=61 hikey=61 lovel=63 hivel=64 pitch_keycenter=61\n"
+                                        "<region> sample=sample.wav lokey=62 hikey=62 lovel=126 hivel=127 pitch_keycenter=62\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_velocity.lua").loadFileAsString();
+            expect(lua.contains("lovel = 0"));
+            expect(lua.contains("hivel = 1"));
+            expect(lua.contains("lovel = 63"));
+            expect(lua.contains("hivel = 64"));
+            expect(lua.contains("lovel = 126"));
+            expect(lua.contains("hivel = 127"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - converts synth single cycle fixture deterministically");
+        {
+            const auto fixtureDirectory =
+                juce::File::getCurrentWorkingDirectory().getChildFile("examples").getChildFile("synth-single-cycle-sfz");
+            expect(fixtureDirectory.isDirectory());
+
+            auto firstOutput = cleanTempDirectory("halionbridge_sfz_fixture_one");
+            auto secondOutput = cleanTempDirectory("halionbridge_sfz_fixture_two");
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(fixtureDirectory);
+            options.outputDirectory = halionbridge::detail::toStdPath(firstOutput);
+            auto firstResult = halionbridge::converters::sfz::convertDirectory(options);
+
+            options.outputDirectory = halionbridge::detail::toStdPath(secondOutput);
+            auto secondResult = halionbridge::converters::sfz::convertDirectory(options);
+
+            expect(firstResult.succeeded);
+            expect(secondResult.succeeded);
+            expectEquals(firstResult.sfzFilesConverted, 2);
+            expectEquals(firstResult.regionsConverted, 12);
+            expectEquals(static_cast<int>(firstResult.generatedLuaFiles.size()), 2);
+
+            const auto firstBuildText = firstOutput.getChildFile("halionbridge_build.lua").loadFileAsString();
+            const auto secondBuildText = secondOutput.getChildFile("halionbridge_build.lua").loadFileAsString();
+            expectEquals(firstBuildText, secondBuildText);
+
+            const auto firstLua = firstOutput.getChildFile("000_000_synth_single_cycle_six_regions.lua").loadFileAsString();
+            const auto secondLua = secondOutput.getChildFile("000_000_synth_single_cycle_six_regions.lua").loadFileAsString();
+            expectEquals(firstLua, secondLua);
+            expect(firstLua.contains("saw_A3_single_cycle.wav"));
+            expect(firstLua.contains("lokey = 36"));
+            expect(firstLua.contains("hikey = 43"));
+            expect(firstLua.contains("hivel = 127"));
+            expect(firstLua.contains("pitch_keycenter = 57"));
+            expect(firstLua.contains("loop_start = 0"));
+            expect(firstLua.contains("loop_end = 199"));
+
+            const auto velocityLua =
+                firstOutput.getChildFile("001_001_synth_single_cycle_three_regions_three_velocity_layers.lua").loadFileAsString();
+            expect(velocityLua.contains("lovel = 64"));
+            expect(velocityLua.contains("hivel = 63"));
+            expect(velocityLua.contains("hivel = 127"));
+
+            firstOutput.deleteRecursively();
+            secondOutput.deleteRecursively();
+        }
+#endif
 
         beginTest("Progress Marker Text Decoding");
         {

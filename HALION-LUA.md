@@ -159,3 +159,9 @@ end
 ```
 
 More examples can be found in `examples`.
+
+## Generated Converter Build Scripts
+
+Converters such as `halionbridge convert sfz` generate ordinary build directories that follow this same contract. The generated `halionbridge_build.lua` is just an ordered list of generated Lua build script modules, and each generated module returns a normal build script function. Generated scripts should remain readable source: comments should explain the HALion object assumptions, path handling, and parameter assignments so converter authors can inspect and adjust the output before running `halionbridge <build-directory>`.
+
+Generated build scripts must distinguish assignments that are essential to a correct preset from optional decoration. For the built-in SFZ converter, sample-zone type, sample filename, root key, key range, and velocity range are required assignments: if HALion rejects any of them, the generated build script returns `ok = false` before saving. Optional assignments such as display names and sustain-loop parameters may be attempted defensively and logged as skipped when HALion rejects them.
