@@ -522,6 +522,8 @@ class BridgeTests : public juce::UnitTest
             expect(source.contains("pcall(function()\n        return Zone()"));
             expect(!source.contains("type(Layer) ~= \"function\""));
             expect(!source.contains("type(Zone) ~= \"function\""));
+            expect(source.contains("function sfz_inclusive_end_to_halion_marker"));
+            expect(source.contains("return sample_index + 1"));
             expect(source.contains("function hb.set_amp_envelope_required"));
             expect(source.contains("function hb.append_sample_zone"));
             expect(source.contains("function hb.save_layer_preset"));
@@ -869,6 +871,8 @@ class BridgeTests : public juce::UnitTest
             expect(firstLua.contains("loop = {"));
             expect(firstLua.contains("start = 0"));
             expect(firstLua.contains("finish = 199"));
+            expect(helperLua.contains("\"SampleOsc.SampleEnd\", halion_loop_end"));
+            expect(helperLua.contains("\"SampleOsc.SustainLoopEndA\", halion_loop_end"));
             expect(!firstLua.contains("start = 14"));
             expect(!firstLua.contains("start = 86"));
             expect(firstLua.contains("amp_velocity_to_level = 100"));

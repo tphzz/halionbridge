@@ -28,5 +28,10 @@ Expected generated files:
 
 The expected result is one looping sine region mapped from C3 to C5, rooted at
 A3, with a short attack/release envelope and a low-pass filter. HALion should
-not need any inline helper functions in `000_000_probe.lua`; all HALion object
+not need any inline helper functions in `000_probe.lua`; all HALion object
 assignment should go through `halionbridge-sfz.lua`.
+
+The source declares `loop_end=199` for a 200-sample single-cycle WAV. Generated
+region data should preserve `finish = 199`, while `halionbridge-sfz.lua` should
+write HALion end marker `200` to both `SampleOsc.SampleEnd` and
+`SampleOsc.SustainLoopEndA`.
