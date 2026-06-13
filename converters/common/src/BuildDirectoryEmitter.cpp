@@ -5,6 +5,7 @@
 #include <fstream>
 #include <set>
 #include <sstream>
+#include <utility>
 
 namespace halionbridge::converters
 {
@@ -12,6 +13,7 @@ namespace
 {
 
 constexpr const char* kBuildFileName = "halionbridge_build.lua";
+constexpr const char* kSfzHelperFileName = "halionbridge-sfz.lua";
 
 Diagnostic makeError(const std::filesystem::path& source, std::string code, std::string message)
 {
@@ -52,6 +54,28 @@ bool isFlatRelativeFilename(const std::filesystem::path& fileName)
 
     const auto normalized = fileName.lexically_normal();
     return normalized == fileName && normalized.filename() == fileName;
+}
+
+bool hasLuaSuffix(const std::filesystem::path& fileName)
+{
+    auto extension = fileName.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return extension == ".lua";
+}
+
+std::string normalizedModuleNameKey(std::string text)
+{
+    auto key = normalizedKey(std::move(text));
+    constexpr auto luaSuffix = std::string_view{".lua"};
+    if (key.size() > luaSuffix.size() && key.ends_with(luaSuffix))
+        key.resize(key.size() - luaSuffix.size());
+    return key;
+}
+
+bool isReservedHelperEntrypointName(const GeneratedLuaScript& script)
+{
+    return normalizedKey(script.fileName) == kSfzHelperFileName || normalizedModuleNameKey(script.moduleName) == "halionbridge-sfz";
 }
 
 } // namespace
@@ -97,47 +121,23 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
         return result;
     }
 
-    std::error_code error;
-    if (!std::filesystem::exists(request.outputDirectory, error))
-        std::filesystem::create_directories(request.outputDirectory, error);
-
-    if (error || !std::filesystem::is_directory(request.outputDirectory, error))
-    {
-        result.diagnostics.push_back(makeError(request.outputDirectory, "output-directory",
-                                               "Could not create output directory: " + request.outputDirectory.string()));
-        return result;
-    }
-
     if (request.scripts.empty())
     {
         result.diagnostics.push_back(makeError(request.outputDirectory, "no-scripts", "No Lua build scripts were generated."));
         return result;
     }
 
+    auto buildEntrypointCount = 0;
     std::set<std::string> seenModuleNames;
     std::set<std::string> seenFileNames;
     for (const auto& script : request.scripts)
     {
-        if (script.moduleName.empty())
-        {
-            result.diagnostics.push_back(
-                makeError(request.outputDirectory, "invalid-module-name", "Generated Lua script module names must not be empty."));
-            return result;
-        }
-
-        const auto moduleKey = normalizedKey(script.moduleName);
-        if (!seenModuleNames.insert(moduleKey).second)
-        {
-            result.diagnostics.push_back(
-                makeError(request.outputDirectory, "duplicate-module-name", "Duplicate generated Lua module name: " + script.moduleName));
-            return result;
-        }
-
         const auto scriptFileName = std::filesystem::path(script.fileName);
-        if (!isFlatRelativeFilename(scriptFileName))
+        if (!isFlatRelativeFilename(scriptFileName) || !hasLuaSuffix(scriptFileName))
         {
             result.diagnostics.push_back(makeError(request.outputDirectory, "invalid-script-filename",
-                                                   "Generated Lua script filenames must be flat relative filenames: " + script.fileName));
+                                                   "Generated Lua script filenames must be flat relative .lua filenames: " +
+                                                       script.fileName));
             return result;
         }
 
@@ -148,6 +148,51 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
                                                    "Duplicate generated Lua script filename: " + script.fileName));
             return result;
         }
+
+        if (script.role != GeneratedLuaFileRole::buildEntrypoint)
+            continue;
+
+        ++buildEntrypointCount;
+        if (script.moduleName.empty())
+        {
+            result.diagnostics.push_back(
+                makeError(request.outputDirectory, "invalid-module-name", "Generated Lua build entrypoint module names must not be empty."));
+            return result;
+        }
+
+        if (isReservedHelperEntrypointName(script))
+        {
+            result.diagnostics.push_back(makeError(request.outputDirectory, "reserved-helper-entrypoint",
+                                                   "Generated helper module must not be listed as a build entrypoint: " +
+                                                       script.fileName));
+            return result;
+        }
+
+        const auto moduleKey = normalizedModuleNameKey(script.moduleName);
+        if (!seenModuleNames.insert(moduleKey).second)
+        {
+            result.diagnostics.push_back(makeError(request.outputDirectory, "duplicate-module-name",
+                                                   "Duplicate generated Lua build entrypoint module name: " + script.moduleName));
+            return result;
+        }
+    }
+
+    if (buildEntrypointCount == 0)
+    {
+        result.diagnostics.push_back(
+            makeError(request.outputDirectory, "no-build-entrypoints", "No Lua build entrypoint files were generated."));
+        return result;
+    }
+
+    std::error_code error;
+    if (!std::filesystem::exists(request.outputDirectory, error))
+        std::filesystem::create_directories(request.outputDirectory, error);
+
+    if (error || !std::filesystem::is_directory(request.outputDirectory, error))
+    {
+        result.diagnostics.push_back(makeError(request.outputDirectory, "output-directory",
+                                               "Could not create output directory: " + request.outputDirectory.string()));
+        return result;
     }
 
     std::vector<std::filesystem::path> outputFiles;
@@ -172,7 +217,10 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
     std::ostringstream buildFileText;
     buildFileText << "return {\n";
     for (const auto& script : request.scripts)
-        buildFileText << "    " << luaQuotedString(script.moduleName) << ",\n";
+    {
+        if (script.role == GeneratedLuaFileRole::buildEntrypoint)
+            buildFileText << "    " << luaQuotedString(script.moduleName) << ",\n";
+    }
     buildFileText << "}\n";
 
     if (!writeTextFile(result.buildFile, buildFileText.str()))

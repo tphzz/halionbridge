@@ -4,16 +4,24 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace halionbridge::converters
 {
+
+enum class GeneratedLuaFileRole
+{
+    buildEntrypoint,
+    helperModule
+};
 
 struct GeneratedLuaScript
 {
     std::string moduleName;
     std::string fileName;
     std::string luaSource;
+    GeneratedLuaFileRole role = GeneratedLuaFileRole::buildEntrypoint;
 };
 
 struct BuildDirectoryRequest

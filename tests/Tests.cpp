@@ -352,9 +352,11 @@ class BridgeTests : public juce::UnitTest
             expect(tempDir.getChildFile("halionbridge_runtime.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("halionbridge_builder.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("builder_bootstrap.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("halionbridge-sfz.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("HALIONBRIDGE_RUNTIME.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("HALIONBRIDGE_BUILDER.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("BUILDER_BOOTSTRAP.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("HALIONBRIDGE-SFZ.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("nested").createDirectory());
             expect(tempDir.getChildFile("nested").getChildFile("000_nested.lua").replaceWithText("return {}"));
 
@@ -374,9 +376,11 @@ class BridgeTests : public juce::UnitTest
             expect(!contains(generatedNames, "halionbridge_runtime.lua"));
             expect(!contains(generatedNames, "halionbridge_builder.lua"));
             expect(!contains(generatedNames, "builder_bootstrap.lua"));
+            expect(!contains(generatedNames, "halionbridge-sfz.lua"));
             expect(!contains(generatedNames, "HALIONBRIDGE_RUNTIME.lua"));
             expect(!contains(generatedNames, "HALIONBRIDGE_BUILDER.lua"));
             expect(!contains(generatedNames, "BUILDER_BOOTSTRAP.lua"));
+            expect(!contains(generatedNames, "HALIONBRIDGE-SFZ.lua"));
             expect(!contains(generatedNames, "000_nested.lua"));
 
             tempDir.deleteRecursively();
@@ -388,6 +392,7 @@ class BridgeTests : public juce::UnitTest
             expect(tempDir.createDirectory());
             expect(tempDir.getChildFile("001_first.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("helper.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("halionbridge-sfz.lua").replaceWithText("return {}"));
 
             auto result = halionbridge::detail::runInitCommand(juce::StringArray{"init"});
             expectEquals(result.exitCode, 1);
@@ -414,6 +419,7 @@ class BridgeTests : public juce::UnitTest
             expect(result.warning.contains("helper modules"));
             expect(tempDir.getChildFile("halionbridge_build.lua").existsAsFile());
             expect(tempDir.getChildFile("halionbridge_build.lua").loadFileAsString().contains("helper.lua"));
+            expect(!tempDir.getChildFile("halionbridge_build.lua").loadFileAsString().contains("halionbridge-sfz.lua"));
 
             result = halionbridge::detail::runInitCommand(juce::StringArray{"init", tempDir.getFullPathName()});
             expectEquals(result.exitCode, 1);
@@ -495,15 +501,19 @@ class BridgeTests : public juce::UnitTest
             request.scripts.push_back(halionbridge::converters::GeneratedLuaScript{"001_a.lua", "001_a.lua", "return {}\n"});
             request.scripts.push_back(
                 halionbridge::converters::GeneratedLuaScript{"002_quote\"name.lua", "002_quote.lua", "return \"quoted\"\n"});
+            request.scripts.push_back(halionbridge::converters::GeneratedLuaScript{
+                "", "halionbridge-sfz.lua", "return {}\n", halionbridge::converters::GeneratedLuaFileRole::helperModule});
 
             auto result = halionbridge::converters::writeBuildDirectory(request);
             expect(result.succeeded);
-            expectEquals(static_cast<int>(result.generatedLuaFiles.size()), 2);
+            expectEquals(static_cast<int>(result.generatedLuaFiles.size()), 3);
 
             const auto buildFile = tempDir.getChildFile("halionbridge_build.lua");
             const auto buildText = buildFile.loadFileAsString();
             expect(buildText.contains("\"001_a.lua\""));
             expect(buildText.contains("\"002_quote\\\"name.lua\""));
+            expect(!buildText.contains("halionbridge-sfz.lua"));
+            expect(tempDir.getChildFile("halionbridge-sfz.lua").existsAsFile());
 
             auto refused = halionbridge::converters::writeBuildDirectory(request);
             expect(!refused.succeeded);
@@ -535,9 +545,12 @@ class BridgeTests : public juce::UnitTest
             };
 
             expectRejectedFileName("");
+            expectRejectedFileName(".");
+            expectRejectedFileName("..");
             expectRejectedFileName("../escape.lua");
             expectRejectedFileName("nested/script.lua");
             expectRejectedFileName("C:/escape.lua");
+            expectRejectedFileName("script.txt");
 
             auto duplicateFile = request;
             duplicateFile.scripts.push_back(halionbridge::converters::GeneratedLuaScript{"other.lua", "VALID.lua", "return {}\n"});
@@ -550,6 +563,28 @@ class BridgeTests : public juce::UnitTest
             result = halionbridge::converters::writeBuildDirectory(duplicateModule);
             expect(!result.succeeded);
             expect(containsDiagnosticCode(result.diagnostics, "duplicate-module-name"));
+
+            auto duplicateEffectiveModule = request;
+            duplicateEffectiveModule.scripts.push_back(
+                halionbridge::converters::GeneratedLuaScript{"valid", "other.lua", "return {}\n"});
+            result = halionbridge::converters::writeBuildDirectory(duplicateEffectiveModule);
+            expect(!result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "duplicate-module-name"));
+
+            auto helperOnly = halionbridge::converters::BuildDirectoryRequest{};
+            helperOnly.outputDirectory = outputDirectory;
+            helperOnly.scripts.push_back(halionbridge::converters::GeneratedLuaScript{
+                "", "halionbridge-sfz.lua", "return {}\n", halionbridge::converters::GeneratedLuaFileRole::helperModule});
+            result = halionbridge::converters::writeBuildDirectory(helperOnly);
+            expect(!result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "no-build-entrypoints"));
+
+            auto reservedHelperEntrypoint = request;
+            reservedHelperEntrypoint.scripts.front().moduleName = "halionbridge-sfz.lua";
+            reservedHelperEntrypoint.scripts.front().fileName = "halionbridge-sfz.lua";
+            result = halionbridge::converters::writeBuildDirectory(reservedHelperEntrypoint);
+            expect(!result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "reserved-helper-entrypoint"));
 
             tempDir.deleteRecursively();
         }
