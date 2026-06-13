@@ -85,6 +85,7 @@ class HALIONBRIDGE_EXPORT Bridge
     // Falls back to standard OS locations if pluginPathOverride is empty.
     // Returns std::nullopt if the plugin cannot be found.
     static std::optional<std::filesystem::path> findHalionPlugin(const std::optional<std::filesystem::path>& pluginPathOverride);
+    static std::filesystem::path getDefaultHalionPluginPath();
 
     static std::optional<VstPresetContainerInfo> inspectVstPresetContainer(std::span<const std::byte> presetData);
     static BuildStatusMarkerFiles getBuildStatusMarkerFilesForDirectory(const std::filesystem::path& directory);

@@ -968,6 +968,18 @@ class BridgeTests : public juce::UnitTest
             expect(text.find("runtimePathPrefix") != std::string::npos);
         }
 
+        beginTest("Plugin Location - platform default path");
+        {
+            const auto defaultPath = halionbridge::Bridge::getDefaultHalionPluginPath();
+#if JUCE_WINDOWS
+            expect(defaultPath == std::filesystem::path(R"(C:\Program Files\Common Files\VST3\Steinberg\HALion 7.vst3)"));
+#elif JUCE_MAC
+            expect(defaultPath == std::filesystem::path("/Library/Audio/Plug-Ins/VST3/Steinberg/HALion 7.vst3"));
+#else
+            expect(defaultPath.empty());
+#endif
+        }
+
         beginTest("VST3 Preset Inspection - embedded HALion bootstrap preset source");
         {
             auto presetFile =

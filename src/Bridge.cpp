@@ -834,15 +834,7 @@ std::optional<std::filesystem::path> Bridge::findHalionPlugin(const std::optiona
         return *pluginPathOverride;
     }
 
-    // Default search paths for HALion 7.vst3
-#if JUCE_WINDOWS
-    juce::File standardPath(R"(C:\Program Files\Common Files\VST3\Steinberg\HALion 7.vst3)");
-#elif JUCE_MAC
-    juce::File standardPath("/Library/Audio/Plug-Ins/VST3/HALion 7.vst3");
-#else
-    juce::File standardPath("");
-#endif
-
+    auto standardPath = toJuceFile(getDefaultHalionPluginPath());
     if (standardPath.exists())
     {
         return toStdPath(standardPath);
@@ -850,6 +842,17 @@ std::optional<std::filesystem::path> Bridge::findHalionPlugin(const std::optiona
 
     log::error("HALion 7.vst3 could not be found at standard location: {}", standardPath.getFullPathName().toStdString());
     return std::nullopt;
+}
+
+std::filesystem::path Bridge::getDefaultHalionPluginPath()
+{
+#if JUCE_WINDOWS
+    return std::filesystem::path(R"(C:\Program Files\Common Files\VST3\Steinberg\HALion 7.vst3)");
+#elif JUCE_MAC
+    return std::filesystem::path("/Library/Audio/Plug-Ins/VST3/Steinberg/HALion 7.vst3");
+#else
+    return {};
+#endif
 }
 
 BuildStatusMarkerFiles Bridge::getBuildStatusMarkerFilesForDirectory(const std::filesystem::path& directory)

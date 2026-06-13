@@ -51,6 +51,11 @@ Before running the generic builder, open HALion's **Options Editor**, go to **Sc
 - Windows: `C:\Users\<username>\Documents\Steinberg\HALion\Library\scripts`
 - macOS: `/Users/<username>/Documents/Steinberg/HALion/Library/scripts`
 
+halionbridge looks for the HALion 7 VST3 plugin at the normal Steinberg install locations unless `--plugin` is provided:
+
+- Windows: `C:\Program Files\Common Files\VST3\Steinberg\HALion 7.vst3`
+- macOS: `/Library/Audio/Plug-Ins/VST3/Steinberg/HALion 7.vst3`
+
 The build directory must contain `halionbridge_build.lua` and the Lua build script files referenced from that file. You can find examples in `examples`. If you already have Lua build scripts in a directory, run `halionbridge init <directory>` to create a simple sorted `halionbridge_build.lua` for them. Review the generated file before building: `init` lists every top-level non-infrastructure `.lua` file, so helper modules that are required by build scripts but are not build entrypoints should be removed from the list.
 
 ```bash

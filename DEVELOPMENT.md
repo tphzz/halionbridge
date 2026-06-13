@@ -186,7 +186,7 @@ Private or release-only converters are build-time drop-ins. A private converter 
 - `converters/common`: First-party converter registry and generated build-directory emitter.
 - `converters/sfz`: First-party SFZ converter that uses sfizz privately and emits HALion Lua build scripts.
 - `converters/private`: Gitignored location for optional private converter drop-ins used by local or release-only builds.
-- `include/halionbridge/Bridge.h`: JUCE-free public library API for command-line option parsing, HALion plugin location, VST preset inspection, runtime module generation, status marker paths, and bridge execution. `Bridge::runDetailed()` returns a `RunResult` for embedding applications; `Bridge::run()` remains the bool convenience wrapper. A moved-from `Bridge` returns `RunResult::invalidBridge` so API misuse is distinguishable from invalid user options.
+- `include/halionbridge/Bridge.h`: JUCE-free public library API for command-line option parsing, HALion plugin location, VST preset inspection, runtime module generation, status marker paths, and bridge execution. `Bridge::getDefaultHalionPluginPath()` reports the platform default (`C:\Program Files\Common Files\VST3\Steinberg\HALion 7.vst3` on Windows, `/Library/Audio/Plug-Ins/VST3/Steinberg/HALion 7.vst3` on macOS), and `Bridge::findHalionPlugin()` applies the optional `--plugin` override before checking that default path exists. `Bridge::runDetailed()` returns a `RunResult` for embedding applications; `Bridge::run()` remains the bool convenience wrapper. A moved-from `Bridge` returns `RunResult::invalidBridge` so API misuse is distinguishable from invalid user options.
 - `include/halionbridge/CrashDiagnostics.h`: JUCE-free public crash-diagnostics entry points used by the CLI before JUCE/HALion startup.
 - `src/Bridge.cpp`: Core bridge orchestration for preparing the embedded bootstrap preset, hosting the HALion 7 VST3 format, applying preset data, and driving the processing loop.
 - `src/CrashDiagnostics.cpp`: Windows crash-dump support for failures that occur inside JUCE or a hosted VST3 before normal error reporting can run.
@@ -197,7 +197,7 @@ Private or release-only converters are build-time drop-ins. A private converter 
 - `src/PluginScan.cpp`: HALion plugin-description construction, in-process plugin scanning, and isolated scan-worker implementation.
 - `src/ProgressMarkers.cpp`: Host-side progress marker decoding, logging, cleanup, and filename codec behavior shared by the processing loop and tests.
 - `cli/Main.cpp`: Thin command-line frontend, usage text, console logging, process entry point, and dispatch into the private scan-worker mode.
-- `tests/Tests.cpp`: Unit tests executable to verify argument parsing, build-status paths, runtime module generation, build file parsing, progress marker decoding, subprocess output buffering, and VST3 preset-container inspection.
+- `tests/Tests.cpp`: Unit tests executable to verify argument parsing, HALion default plugin paths, build-status paths, runtime module generation, build file parsing, progress marker decoding, subprocess output buffering, and VST3 preset-container inspection.
 - `HALION-LUA.md`: Contract for the generic HALion Lua build script runner, build script modules, progress reporting, and status reporting.
 
 ## Code Quality Gates
