@@ -141,12 +141,23 @@ if(HALIONBRIDGE_ENABLE_CONVERTER_SFZ)
     set(HALIONBRIDGE_CONVERTER_SFZ_SOURCES
         ${CMAKE_SOURCE_DIR}/converters/sfz/src/SfzConverter.cpp
     )
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/converters/sfz/lua/halionbridge-sfz.lua"
+    )
+    file(READ "${CMAKE_SOURCE_DIR}/converters/sfz/lua/halionbridge-sfz.lua" HALIONBRIDGE_SFZ_HELPER_LUA)
+    configure_file(
+        "${CMAKE_SOURCE_DIR}/converters/sfz/src/SfzHelperLua.h.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated-src/SfzHelperLua.h"
+        @ONLY
+    )
 
     add_library(halionbridge_converter_sfz_static STATIC ${HALIONBRIDGE_CONVERTER_SFZ_SOURCES})
     target_compile_features(halionbridge_converter_sfz_static PUBLIC cxx_std_23)
     target_include_directories(halionbridge_converter_sfz_static
         PUBLIC
             ${CMAKE_SOURCE_DIR}/converters/sfz/include
+        PRIVATE
+            ${CMAKE_CURRENT_BINARY_DIR}/generated-src
     )
     target_include_directories(halionbridge_converter_sfz_static SYSTEM
         PRIVATE

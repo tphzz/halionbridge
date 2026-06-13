@@ -491,6 +491,41 @@ class BridgeTests : public juce::UnitTest
             expect(!registry.registerConverter(duplicate));
         }
 
+        beginTest("SFZ Helper Lua - exposes conservative v1 API");
+        {
+            const auto helperFile = juce::File::getCurrentWorkingDirectory()
+                                        .getChildFile("converters")
+                                        .getChildFile("sfz")
+                                        .getChildFile("lua")
+                                        .getChildFile("halionbridge-sfz.lua");
+            expect(helperFile.existsAsFile());
+
+            const auto source = helperFile.loadFileAsString();
+            expect(source.contains("hb.version = 1"));
+            expect(source.contains("hb.capabilities = {"));
+            expect(source.contains("sample_zones = true"));
+            expect(source.contains("crossfade = false"));
+            expect(source.contains("function hb.ok"));
+            expect(source.contains("function hb.fail"));
+            expect(source.contains("function hb.warn"));
+            expect(source.contains("function hb.unsupported"));
+            expect(source.contains("function hb.path_join"));
+            expect(source.contains("function hb.set_parameter_required"));
+            expect(source.contains("function hb.set_parameter_if_available"));
+            expect(source.contains("function hb.assign_field_required"));
+            expect(source.contains("function hb.create_layer"));
+            expect(source.contains("function hb.create_sample_zone"));
+            expect(source.contains("function hb.set_amp_envelope_required"));
+            expect(source.contains("function hb.append_sample_zone"));
+            expect(source.contains("function hb.save_layer_preset"));
+
+            juce::MemoryBlock data;
+            expect(helperFile.loadFileAsData(data));
+            const auto bytes = asBytes(data);
+            expect(std::none_of(bytes.begin(), bytes.end(),
+                                [](const std::byte value) { return value == std::byte{static_cast<unsigned char>('\r')}; }));
+        }
+
         beginTest("Converter Emitter - deterministic build directory output");
         {
             auto tempDir = cleanTempDirectory("halionbridge_converter_emitter");
@@ -796,11 +831,17 @@ class BridgeTests : public juce::UnitTest
             expect(secondResult.succeeded);
             expectEquals(firstResult.sfzFilesConverted, 2);
             expectEquals(firstResult.regionsConverted, 12);
-            expectEquals(static_cast<int>(firstResult.generatedLuaFiles.size()), 2);
+            expectEquals(static_cast<int>(firstResult.generatedLuaFiles.size()), 3);
 
             const auto firstBuildText = firstOutput.getChildFile("halionbridge_build.lua").loadFileAsString();
             const auto secondBuildText = secondOutput.getChildFile("halionbridge_build.lua").loadFileAsString();
             expectEquals(firstBuildText, secondBuildText);
+            expect(!firstBuildText.contains("halionbridge-sfz.lua"));
+            expect(firstOutput.getChildFile("halionbridge-sfz.lua").existsAsFile());
+
+            const auto helperLua = firstOutput.getChildFile("halionbridge-sfz.lua").loadFileAsString();
+            expect(helperLua.contains("hb.version = 1"));
+            expect(helperLua.contains("function hb.append_sample_zone"));
 
             const auto firstLua = firstOutput.getChildFile("000_000_synth_single_cycle_six_regions.lua").loadFileAsString();
             const auto secondLua = secondOutput.getChildFile("000_000_synth_single_cycle_six_regions.lua").loadFileAsString();

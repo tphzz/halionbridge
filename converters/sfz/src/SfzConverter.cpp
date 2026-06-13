@@ -1,6 +1,7 @@
 #include "halionbridge_converters/sfz/SfzConverter.h"
 
 #include "halionbridge_converters/BuildDirectoryEmitter.h"
+#include "SfzHelperLua.h"
 
 #include <sfizz/Defaults.h>
 #include <sfizz/Opcode.h>
@@ -25,6 +26,8 @@ namespace halionbridge::converters::sfz
 {
 namespace
 {
+
+constexpr const char* kSfzHelperLuaFileName = "halionbridge-sfz.lua";
 
 struct ConvertedRegion
 {
@@ -832,7 +835,8 @@ ConverterResult runConverter(std::span<const std::string> args)
     {
         result.diagnostics.push_back(Diagnostic{DiagnosticLevel::info, conversion.buildFile, 0, "generated",
                                                 "Generated " + std::to_string(conversion.generatedLuaFiles.size()) +
-                                                    " Lua build script(s) from " + std::to_string(conversion.sfzFilesConverted) +
+                                                    " Lua file(s), including " + std::to_string(conversion.sfzFilesConverted) +
+                                                    " build script(s), from " + std::to_string(conversion.sfzFilesConverted) +
                                                     " SFZ file(s)."});
     }
 
@@ -917,7 +921,9 @@ ConversionResult convertDirectory(const ConversionOptions& options)
     }
 
     std::vector<GeneratedLuaScript> scripts;
-    scripts.reserve(convertedFiles.size());
+    scripts.reserve(convertedFiles.size() + 1);
+    scripts.push_back(GeneratedLuaScript{"", kSfzHelperLuaFileName, std::string{detail::kSfzHelperLuaSource},
+                                         GeneratedLuaFileRole::helperModule});
 
     for (size_t i = 0; i < convertedFiles.size(); ++i)
     {
