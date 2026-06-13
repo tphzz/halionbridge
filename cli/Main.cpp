@@ -8,8 +8,6 @@
 #include <juce_events/juce_events.h>
 #include <csignal>
 #include <iostream>
-#include <optional>
-#include <string_view>
 #include <vector>
 
 #if JUCE_WINDOWS
@@ -89,54 +87,6 @@ void printHelp()
               << "  Without --gui, halionbridge uses JUCE's headless VST3 host format and does not open an audio device.\n";
 }
 
-int runInitCommand(const juce::StringArray& args)
-{
-    std::optional<juce::File> buildDirectory;
-    auto overwrite = false;
-
-    for (int i = 1; i < args.size(); ++i)
-    {
-        const auto arg = args[i];
-
-        if (arg == "--overwrite")
-        {
-            overwrite = true;
-        }
-        else if (arg.startsWith("-"))
-        {
-            halionbridge::log::error("Unknown init argument: {}", arg.toStdString());
-            halionbridge::log::error("Run halionbridge --help to see available options.");
-            return 1;
-        }
-        else
-        {
-            if (buildDirectory)
-            {
-                halionbridge::log::error("Provide exactly one build directory for halionbridge init.");
-                return 1;
-            }
-
-            buildDirectory = halionbridge::detail::normalizeCliPath(arg);
-        }
-    }
-
-    if (!buildDirectory)
-    {
-        halionbridge::log::error("halionbridge init requires a build directory.");
-        return 1;
-    }
-
-    const auto result = halionbridge::detail::generateBuildFile(*buildDirectory, overwrite);
-    if (!result.succeeded)
-    {
-        halionbridge::log::error("{}", result.message.toStdString());
-        return 1;
-    }
-
-    halionbridge::log::info("{} with {} Lua build script file(s).", result.message.toStdString(), result.moduleNames.size());
-    return 0;
-}
-
 void printVersion()
 {
     const auto buildInfo = halionbridge::getBuildInfo();
@@ -147,9 +97,6 @@ void printVersion()
               << "git: " << buildInfo.gitShaShort << "\n"
               << "ref: " << ref << "\n"
               << "source: " << (buildInfo.isDirty ? "modified" : "clean") << "\n";
-
-    if (buildInfo.buildTimestampUtc != nullptr && std::string_view(buildInfo.buildTimestampUtc).size() > 0)
-        std::cout << "built: " << buildInfo.buildTimestampUtc << "\n";
 }
 
 } // namespace
@@ -208,7 +155,26 @@ int main(int argc, char* argv[])
     halionbridge::log::configureFromEnvironment();
 
     if (juceArgs.size() > 0 && juceArgs[0] == "init")
-        return runInitCommand(juceArgs);
+    {
+        const auto initResult = halionbridge::detail::runInitCommand(juceArgs);
+        if (initResult.exitCode == 0)
+        {
+            halionbridge::log::info("{} with {} Lua build script file(s).", initResult.message.toStdString(),
+                                    initResult.moduleNames.size());
+            if (initResult.warning.isNotEmpty())
+                halionbridge::log::warn("{}", initResult.warning.toStdString());
+        }
+        else
+        {
+            for (const auto& line : juce::StringArray::fromLines(initResult.message))
+            {
+                if (line.isNotEmpty())
+                    halionbridge::log::error("{}", line.toStdString());
+            }
+        }
+
+        return initResult.exitCode;
+    }
 
     halionbridge::installCrashDiagnostics();
     installStopHandlers();

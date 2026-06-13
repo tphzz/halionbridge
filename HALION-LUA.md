@@ -13,9 +13,9 @@ return {
 }
 ```
 
-Module names may be listed with or without `.lua`. They are loaded with `require`, so they must be resolvable from the build directory passed to halionbridge. The host-side helper `Bridge::parseBuildFileModuleNames()` inspects the common top-level list shape `return { "module_a", "module_b" }`; it is not a full Lua parser, and it ignores quoted strings in comments, nested tables, local variables, and metadata fields.
+Module names may be listed with or without `.lua`. They are loaded with `require`, so they must be resolvable from the build directory passed to halionbridge. The host-side helper `Bridge::parseBuildFileModuleNames()` inspects the common top-level list shape `return { "module_a", "module_b" }`; it is not a full Lua parser, and it ignores quoted strings in line comments, Lua long comments, nested tables, local variables, and metadata fields.
 
-`halionbridge init <build-directory>` can generate a simple `halionbridge_build.lua` from top-level `.lua` files. It sorts filenames, keeps the `.lua` suffix in each entry, and excludes halionbridge infrastructure files such as `halionbridge_runtime.lua`, `halionbridge_builder.lua`, `halionbridge_build.lua`, and `builder_bootstrap.lua`. It does not recurse into subdirectories and does not launch HALion.
+`halionbridge init <build-directory>` can generate a simple `halionbridge_build.lua` from top-level `.lua` files. It sorts filenames, keeps the `.lua` suffix in each entry, and excludes halionbridge infrastructure files such as `halionbridge_runtime.lua`, `halionbridge_builder.lua`, `halionbridge_build.lua`, and `builder_bootstrap.lua`. It does not recurse into subdirectories and does not launch HALion. Review the generated list before building: helper modules such as `helpers.lua` or `shared_mapping.lua` are still top-level Lua files, but they should be removed from `halionbridge_build.lua` unless they return a valid build script entrypoint.
 
 ## Runtime Root
 
