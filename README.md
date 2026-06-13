@@ -54,7 +54,7 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 # Show command-line help
 ./halionbridge --help
 
-# Show the CMake/Git-derived build version
+# Show the Git-derived build version
 ./halionbridge --version
 
 # Generate halionbridge_build.lua from top-level Lua files and exit

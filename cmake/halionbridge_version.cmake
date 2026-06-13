@@ -10,21 +10,20 @@ function(halionbridge_sanitize_ref_name input output_var)
     set(${output_var} "${sanitized}" PARENT_SCOPE)
 endfunction()
 
-function(halionbridge_configure_git_version)
-    string(TIMESTAMP build_timestamp_utc "%Y%m%dT%H%M%SZ" UTC)
-
+function(halionbridge_configure_git_version source_dir)
     set(git_tag "")
     set(git_branch "")
     set(git_sha_short "unknown")
     set(is_tagged_release OFF)
     set(is_dirty OFF)
+    set(ref_name "local")
 
     find_package(Git QUIET)
 
     if(Git_FOUND)
         execute_process(
             COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            WORKING_DIRECTORY "${source_dir}"
             RESULT_VARIABLE git_sha_result
             OUTPUT_VARIABLE git_sha_output
             ERROR_QUIET
@@ -36,22 +35,8 @@ function(halionbridge_configure_git_version)
         endif()
 
         execute_process(
-            COMMAND "${GIT_EXECUTABLE}" describe --tags --exact-match HEAD
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            RESULT_VARIABLE git_tag_result
-            OUTPUT_VARIABLE git_tag_output
-            ERROR_QUIET
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
-
-        if(git_tag_result EQUAL 0 AND NOT git_tag_output STREQUAL "")
-            set(git_tag "${git_tag_output}")
-            set(is_tagged_release ON)
-        endif()
-
-        execute_process(
             COMMAND "${GIT_EXECUTABLE}" rev-parse --abbrev-ref HEAD
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            WORKING_DIRECTORY "${source_dir}"
             RESULT_VARIABLE git_branch_result
             OUTPUT_VARIABLE git_branch_output
             ERROR_QUIET
@@ -59,48 +44,72 @@ function(halionbridge_configure_git_version)
         )
 
         if(git_branch_result EQUAL 0 AND NOT git_branch_output STREQUAL "" AND NOT git_branch_output STREQUAL "HEAD")
+            set(ref_name "${git_branch_output}")
             set(git_branch "${git_branch_output}")
-        elseif(DEFINED ENV{GITHUB_REF_NAME} AND NOT "$ENV{GITHUB_REF_NAME}" STREQUAL "")
-            set(git_branch "$ENV{GITHUB_REF_NAME}")
+        elseif(DEFINED ENV{GITHUB_REF_TYPE} AND "$ENV{GITHUB_REF_TYPE}" STREQUAL "tag" AND DEFINED ENV{GITHUB_REF_NAME} AND NOT "$ENV{GITHUB_REF_NAME}" STREQUAL "")
+            set(ref_name "$ENV{GITHUB_REF_NAME}")
+            set(git_tag "$ENV{GITHUB_REF_NAME}")
+            set(is_tagged_release ON)
         else()
-            set(git_branch "detached")
+            execute_process(
+                COMMAND "${GIT_EXECUTABLE}" describe --tags --exact-match HEAD
+                WORKING_DIRECTORY "${source_dir}"
+                RESULT_VARIABLE git_tag_result
+                OUTPUT_VARIABLE git_tag_output
+                ERROR_QUIET
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+
+            if(git_tag_result EQUAL 0 AND NOT git_tag_output STREQUAL "")
+                set(ref_name "${git_tag_output}")
+                set(git_tag "${git_tag_output}")
+                set(is_tagged_release ON)
+            else()
+                set(ref_name "detached")
+                set(git_branch "detached")
+            endif()
         endif()
 
         execute_process(
-            COMMAND "${GIT_EXECUTABLE}" diff-index --quiet HEAD --
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=normal
+            WORKING_DIRECTORY "${source_dir}"
             RESULT_VARIABLE git_dirty_result
-            OUTPUT_QUIET
+            OUTPUT_VARIABLE git_dirty_output
             ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE
         )
 
-        if(NOT git_dirty_result EQUAL 0)
+        if(git_dirty_result EQUAL 0 AND NOT git_dirty_output STREQUAL "")
             set(is_dirty ON)
         endif()
-    else()
-        set(git_branch "local")
     endif()
 
-    if(is_tagged_release)
-        halionbridge_sanitize_ref_name("${git_tag}" sanitized_ref)
-        set(version_string "${sanitized_ref}")
-        set(package_basename "halionbridge-${sanitized_ref}-${build_timestamp_utc}")
+    halionbridge_sanitize_ref_name("${ref_name}" sanitized_ref)
+    set(version_string "${sanitized_ref}-${git_sha_short}")
+    set(package_basename "halionbridge-${version_string}")
+
+    if(git_branch STREQUAL "")
+        set(git_branch "${sanitized_ref}")
     else()
-        halionbridge_sanitize_ref_name("${git_branch}" sanitized_ref)
-        set(version_string "${sanitized_ref}-${build_timestamp_utc}-${git_sha_short}")
-        set(package_basename "halionbridge-${sanitized_ref}-${build_timestamp_utc}-${git_sha_short}")
+        halionbridge_sanitize_ref_name("${git_branch}" git_branch)
+    endif()
+
+    if(git_tag STREQUAL "" AND is_tagged_release)
+        set(git_tag "${sanitized_ref}")
+    elseif(NOT git_tag STREQUAL "")
+        halionbridge_sanitize_ref_name("${git_tag}" git_tag)
     endif()
 
     if(is_dirty)
-        string(APPEND version_string "-dirty")
-        string(APPEND package_basename "-dirty")
+        string(APPEND version_string "-mod")
+        string(APPEND package_basename "-mod")
     endif()
 
     set(HALIONBRIDGE_GIT_TAG "${git_tag}" PARENT_SCOPE)
     set(HALIONBRIDGE_GIT_BRANCH "${git_branch}" PARENT_SCOPE)
     set(HALIONBRIDGE_GIT_SHA_SHORT "${git_sha_short}" PARENT_SCOPE)
     set(HALIONBRIDGE_GIT_DIRTY "${is_dirty}" PARENT_SCOPE)
-    set(HALIONBRIDGE_BUILD_TIMESTAMP_UTC "${build_timestamp_utc}" PARENT_SCOPE)
+    set(HALIONBRIDGE_BUILD_TIMESTAMP_UTC "" PARENT_SCOPE)
     set(HALIONBRIDGE_VERSION_STRING "${version_string}" PARENT_SCOPE)
     set(HALIONBRIDGE_PACKAGE_BASENAME "${package_basename}" PARENT_SCOPE)
     set(HALIONBRIDGE_IS_TAGGED_RELEASE "${is_tagged_release}" PARENT_SCOPE)

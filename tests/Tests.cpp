@@ -568,10 +568,14 @@ class BridgeTests : public juce::UnitTest
         beginTest("Build Info - generated metadata");
         {
             const auto buildInfo = halionbridge::getBuildInfo();
-            expect(juce::String(buildInfo.versionString).isNotEmpty());
-            expect(juce::String(buildInfo.packageBasename).startsWith("halionbridge-"));
+            const auto version = juce::String(buildInfo.versionString);
+            const auto packageBasename = juce::String(buildInfo.packageBasename);
+
+            expect(version.isNotEmpty());
+            expect(packageBasename.startsWith("halionbridge-"));
+            expectEquals(packageBasename, "halionbridge-" + version);
             expect(juce::String(buildInfo.gitShaShort).isNotEmpty());
-            expect(juce::String(buildInfo.buildTimestampUtc).isNotEmpty());
+            expect(version.endsWith("-mod") == buildInfo.isDirty);
         }
 
         beginTest("Log Level Parsing");

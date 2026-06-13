@@ -100,17 +100,17 @@ macOS builds keep Apple system libraries and frameworks dynamically linked, whic
 
 ## Build Versioning
 
-CMake computes the build version from Git during configure. Developers do not pass version variables manually. Local builds and GitHub Actions builds use the same `cmake/halionbridge_version.cmake` logic.
+CMake computes the build version from Git. Developers do not pass version variables manually. Local builds and GitHub Actions builds use the same `cmake/halionbridge_version.cmake` logic.
 
-Release tags should use the `v0.5.0` style. When `HEAD` is exactly on a tag, the version is based on that tag. Otherwise the version uses the current branch name, UTC configure timestamp, short Git hash, and `-dirty` when tracked files are modified.
+Versions are intentionally source-identification strings, not calendar build IDs. A named branch checkout uses the active branch name even when `HEAD` also happens to point at a tag. Detached checkouts use an exact tag when one exists, otherwise `detached`. The short Git hash is always included. Modified worktrees append `-mod`; this includes tracked modifications and untracked, non-ignored files.
 
 Examples:
 
 ```text
-halionbridge-main-20260612T153045Z-a1b2c3d
-halionbridge-feature-lua-api-20260612T153045Z-a1b2c3d
-halionbridge-v0.5.0-20260612T153045Z
-halionbridge-feature-lua-api-20260612T153045Z-a1b2c3d-dirty
+halionbridge-main-a1b2c3d
+halionbridge-feature-lua-api-a1b2c3d
+halionbridge-v0.5.0-a1b2c3d
+halionbridge-feature-lua-api-a1b2c3d-mod
 ```
 
 CMake writes the package basename to:
@@ -125,6 +125,8 @@ The CLI exposes the same metadata with:
 ```powershell
 build-release\halionbridge_artefacts\Release\halionbridge.exe --version
 ```
+
+`BuildInfo.cpp` is generated during configure so the build tree has a source file, and regenerated during every normal `cmake --build` via `halionbridge_generate_build_info`. The generator rewrites the file only when the Git metadata changes, so switching branches or changing files only requires the normal build command to refresh `--version`.
 
 ## GitHub Actions
 

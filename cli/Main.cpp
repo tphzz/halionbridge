@@ -9,6 +9,7 @@
 #include <csignal>
 #include <iostream>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 #if JUCE_WINDOWS
@@ -145,10 +146,10 @@ void printVersion()
               << "package: " << buildInfo.packageBasename << "\n"
               << "git: " << buildInfo.gitShaShort << "\n"
               << "ref: " << ref << "\n"
-              << "built: " << buildInfo.buildTimestampUtc << "\n";
+              << "source: " << (buildInfo.isDirty ? "modified" : "clean") << "\n";
 
-    if (buildInfo.isDirty)
-        std::cout << "dirty: yes\n";
+    if (buildInfo.buildTimestampUtc != nullptr && std::string_view(buildInfo.buildTimestampUtc).size() > 0)
+        std::cout << "built: " << buildInfo.buildTimestampUtc << "\n";
 }
 
 } // namespace
