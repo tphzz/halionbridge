@@ -204,7 +204,7 @@ Private or release-only converters are build-time drop-ins. A private converter 
 
 First-party C++ source files are compiled with warnings as errors: `/W4 /WX` on MSVC and `-Wall -Wextra -Wpedantic -Werror` on Clang/GCC-style compilers. Do not suppress warning classes globally to make the build pass; fix the warning or isolate an intentionally noisy platform boundary narrowly.
 
-The repository uses `.clang-format` for first-party C++ formatting. GitHub Actions runs `clang-format --dry-run --Werror` on tracked `.cpp` and `.h` files outside `external/`. Vendored JUCE and spdlog code is not reformatted and is not held to project warning settings.
+The repository uses `.clang-format` for first-party C++ formatting. GitHub Actions runs `clang-format --dry-run --Werror` on tracked `.cpp` and `.h` files outside `external/`. Vendored JUCE, spdlog, and sfizz code is not reformatted and is not held to project warning settings. sfizz is configured through a narrow CMake wrapper in `converters/CMakeLists.txt` which disables sfizz's unused tests, demos, clients, shared library, sndfile integration, Qt probe, and LTO path. The wrapper also scopes CMake developer/deprecation-warning suppression and MSVC C++23 STL deprecation macros to sfizz's bundled dependency tree, and prepends `cmake/sfizz-overrides` for first-party CMake shims required to keep vendored configure output quiet without editing `external/sfizz`.
 
 ## Console Logging
 
@@ -252,7 +252,7 @@ cd halion-lua
 ## Dependencies
 - **JUCE 8:** Core implementation framework, handling VST3 plugin hosting and offline audio buffers. JUCE must not appear in public `include/halionbridge` interfaces.
 - **spdlog 1.17.0:** Private implementation dependency for timestamped console logging and log-level filtering. It is vendored as `external/spdlog` and linked through `spdlog::spdlog_header_only`.
-- **sfizz:** Private implementation dependency for the built-in SFZ converter. halionbridge initializes sfizz's nested submodules with normal Git submodule commands and disables sfizz's own test/demo/client targets in the halionbridge build.
+- **sfizz:** Private implementation dependency for the built-in SFZ converter. halionbridge initializes sfizz's nested submodules with normal Git submodule commands and disables sfizz's own test/demo/client targets in the halionbridge build. sfizz and its nested vendored dependencies are read-only; CMake compatibility workarounds live in first-party configuration, including `cmake/sfizz-overrides`.
 - **HALion 7 VST3:** The target plugin (must be installed on the host system to run the bridge).
 
 ## Preset Loading Notes
