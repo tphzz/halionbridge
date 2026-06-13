@@ -18,12 +18,11 @@ hb.capabilities = {
     amp_envelope = true,
     amp_velocity_to_level = true,
     filter_cutoff = true,
-    transpose = true,
-    tune = true,
-    pitch_keytrack = true,
 
     sample_offset = false,
     sample_end = false,
+    transpose = false,
+    tune = false,
     volume = false,
     pan = false,
     pitch_bend = false,
@@ -346,16 +345,6 @@ function hb.apply_optional_sample_fields(ctx, zone, region)
         hb.set_parameter_if_available(ctx, zone, "Filter.Cutoff", filter_cutoff)
     end
 
-    local pitch = region and region.pitch or nil
-    if type(pitch) == "table" then
-        hb.set_parameter_if_available(ctx, zone, "SampleOsc.Tune", pitch.tune_cents)
-        if pitch.keytrack ~= nil then
-            local mapping = hb.region_mapping(region)
-            hb.set_parameter_if_available(ctx, zone, "Pitch.CenterKey", mapping.root_key)
-            hb.set_parameter_if_available(ctx, zone, "Pitch.KeyFollow", pitch.keytrack)
-        end
-    end
-
     return true
 end
 
@@ -423,7 +412,7 @@ function hb.apply_filter_envelope(ctx)
 end
 
 function hb.apply_pitch_features(ctx)
-    return hb.unsupported(ctx, "pitch", "dynamic pitch mapping behavior has not been verified")
+    return hb.unsupported(ctx, "pitch", "pitch mapping behavior has not been verified")
 end
 
 return hb

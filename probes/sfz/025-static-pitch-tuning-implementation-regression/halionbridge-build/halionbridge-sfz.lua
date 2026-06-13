@@ -349,11 +349,7 @@ function hb.apply_optional_sample_fields(ctx, zone, region)
     local pitch = region and region.pitch or nil
     if type(pitch) == "table" then
         hb.set_parameter_if_available(ctx, zone, "SampleOsc.Tune", pitch.tune_cents)
-        if pitch.keytrack ~= nil then
-            local mapping = hb.region_mapping(region)
-            hb.set_parameter_if_available(ctx, zone, "Pitch.CenterKey", mapping.root_key)
-            hb.set_parameter_if_available(ctx, zone, "Pitch.KeyFollow", pitch.keytrack)
-        end
+        hb.set_parameter_if_available(ctx, zone, "Pitch.KeyFollow", pitch.keytrack)
     end
 
     return true

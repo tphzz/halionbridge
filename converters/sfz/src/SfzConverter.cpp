@@ -38,6 +38,8 @@ struct ConvertedRegion
     int velocityLow = 0;
     int velocityHigh = 127;
     int rootKey = 60;
+    std::optional<float> tuneCents;
+    std::optional<float> pitchKeytrack;
     bool hasLoop = false;
     int64_t loopStart = 0;
     int64_t loopEnd = 0;
@@ -403,6 +405,39 @@ float decayDurationToSustain(const float decay, const float sustain, const int d
     return decay * std::clamp(1.0f - sustain, 0.0f, 1.0f);
 }
 
+bool differsFromDefault(const float value, const float defaultValue)
+{
+    return std::abs(value - defaultValue) > 0.0001f;
+}
+
+float clampPitchTuneCents(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
+                          std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= -1200.0f && value <= 1200.0f)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, -1200.0f, 1200.0f) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "pitch-tune-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " combined transpose/tune value " +
+                                          std::to_string(value) + " cents is outside HALion's SampleOsc.Tune -1200..1200 cent range; using " +
+                                          std::to_string(clamped) + "."));
+    return clamped;
+}
+
+float clampPitchKeytrack(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
+                         std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= -200.0f && value <= 200.0f)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, -200.0f, 200.0f) : 100.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "pitch-keytrack-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " pitch_keytrack value " +
+                                          std::to_string(value) + " is outside HALion's Pitch.KeyFollow -200..200 percent range; using " +
+                                          std::to_string(clamped) + "."));
+    return clamped;
+}
+
 std::vector<ExplicitRegionOpcodes> collectExplicitRegionOpcodes(const std::filesystem::path& sfzFile, std::vector<Diagnostic>& diagnostics)
 {
     auto collector = ExplicitRegionOpcodeCollector{};
@@ -440,6 +475,13 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
     converted.velocityLow = normalizedVelocityStartToMidi(region.velocityRange.getStart());
     converted.velocityHigh = normalizedVelocityEndToMidi(region.velocityRange.getEnd());
     converted.rootKey = clampMidi(static_cast<int>(region.pitchKeycenter));
+
+    const auto combinedTuneCents = region.pitch + (region.transpose * 100.0f);
+    if (differsFromDefault(combinedTuneCents, 0.0f))
+        converted.tuneCents = clampPitchTuneCents(sourceFile, regionIndex, combinedTuneCents, diagnostics);
+
+    if (differsFromDefault(region.pitchKeytrack, static_cast<float>(::sfz::Default::pitchKeytrack)))
+        converted.pitchKeytrack = clampPitchKeytrack(sourceFile, regionIndex, region.pitchKeytrack, diagnostics);
 
     converted.ampEnvelope.start = clampEnvelopeLevel(sourceFile, regionIndex, "ampeg_start", region.amplitudeEG.start, diagnostics);
     converted.ampEnvelope.delay = clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_delay", region.amplitudeEG.delay, diagnostics);
@@ -521,6 +563,16 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
         << "        },\n";
 
     appendAmpEnvelopeLua(lua, region);
+
+    if (region.tuneCents || region.pitchKeytrack)
+    {
+        lua << "        pitch = {\n";
+        if (region.tuneCents)
+            lua << "            tune_cents = " << luaNumber(*region.tuneCents) << ",\n";
+        if (region.pitchKeytrack)
+            lua << "            keytrack = " << luaNumber(*region.pitchKeytrack) << ",\n";
+        lua << "        },\n";
+    }
 
     if (region.hasLoop)
     {

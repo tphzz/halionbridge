@@ -740,6 +740,66 @@ class BridgeTests : public juce::UnitTest
             outputDir.deleteRecursively();
         }
 
+        beginTest("SFZ Converter - writes static pitch tuning fields");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_static_pitch");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_static_pitch_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("pitch.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=81 pitch_keycenter=57 tune=100\n"
+                                        "<region> sample=sample.wav lokey=57 hikey=81 pitch_keycenter=57 transpose=-12\n"
+                                        "<region> sample=sample.wav lokey=57 hikey=81 pitch_keycenter=57 pitch_keytrack=50\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_pitch.lua").loadFileAsString();
+            expect(lua.contains("pitch = {"));
+            expect(lua.contains("tune_cents = 100"));
+            expect(lua.contains("tune_cents = -1200"));
+            expect(lua.contains("keytrack = 50"));
+
+            const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
+            expect(helperLua.contains("\"SampleOsc.Tune\", pitch.tune_cents"));
+            expect(helperLua.contains("\"Pitch.CenterKey\", mapping.root_key"));
+            expect(helperLua.contains("\"Pitch.KeyFollow\", pitch.keytrack"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - clamps static pitch values to HALion ranges");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_static_pitch_clamped");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_static_pitch_clamped_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("pitch.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=81 pitch_keycenter=57 transpose=24 tune=100\n"
+                                        "<region> sample=sample.wav lokey=57 hikey=81 pitch_keycenter=57 pitch_keytrack=300\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "pitch-tune-clamped"));
+            expect(containsDiagnosticCode(result.diagnostics, "pitch-keytrack-clamped"));
+
+            const auto lua = outputDir.getChildFile("000_pitch.lua").loadFileAsString();
+            expect(lua.contains("tune_cents = 1200"));
+            expect(lua.contains("keytrack = 200"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
         beginTest("SFZ Converter - writes explicit static amp envelopes");
         {
             auto sourceDir = cleanTempDirectory("halionbridge_sfz_amp_envelope");
