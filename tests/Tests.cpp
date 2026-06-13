@@ -10,9 +10,11 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <algorithm>
 #include <cstddef>
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <span>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -472,8 +474,10 @@ class BridgeTests : public juce::UnitTest
 
             auto compactMarker = tempDir.getChildFile("hbp_000001_i_50726F6772657373.vstpreset");
             auto legacyMarker = tempDir.getChildFile("halionbridge_progress_000001_info_50726F6772657373.vstpreset");
+            auto failedStatusMarker = tempDir.getChildFile("halionbridge_status_failed.vstpreset");
             expect(compactMarker.replaceWithText("marker"));
             expect(legacyMarker.replaceWithText("marker"));
+            expect(failedStatusMarker.replaceWithText("marker"));
 
             auto result = halionbridge::detail::deleteProgressMarkers(tempDir, "test progress marker");
             expectEquals(result.found, 2);
@@ -481,6 +485,7 @@ class BridgeTests : public juce::UnitTest
             expect(result.remainingNames.empty());
             expect(!compactMarker.existsAsFile());
             expect(!legacyMarker.existsAsFile());
+            expect(failedStatusMarker.existsAsFile());
 
             tempDir.deleteRecursively();
         }
@@ -519,6 +524,30 @@ class BridgeTests : public juce::UnitTest
             expectEquals(result.failed, 0);
             expect(result.remainingNames.empty());
             expect(!marker.existsAsFile());
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Progress Marker Cleanup - drain deletes late progress markers");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_progress_drain");
+            expect(tempDir.createDirectory());
+
+            auto lateMarker = tempDir.getChildFile("hbp_000003_i_4C617465.vstpreset");
+            auto writer = std::thread(
+                [lateMarker]()
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                    lateMarker.replaceWithText("marker");
+                });
+
+            auto seenMarkers = std::set<std::string>();
+            auto result = halionbridge::detail::drainProgressMarkers(tempDir, seenMarkers, 500, 100);
+
+            writer.join();
+            expect(result.found >= 1);
+            expectEquals(result.failed, 0);
+            expect(!lateMarker.existsAsFile());
 
             tempDir.deleteRecursively();
         }

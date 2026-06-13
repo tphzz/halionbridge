@@ -18,7 +18,9 @@ struct ProgressMarkerCleanupResult
 };
 
 std::string decodeProgressMarkerText(std::string_view text);
-void logNewProgressMarkers(const juce::File& directory, std::set<std::string>& seenMarkers);
+ProgressMarkerCleanupResult logNewProgressMarkers(const juce::File& directory, std::set<std::string>& seenMarkers);
+ProgressMarkerCleanupResult drainProgressMarkers(const juce::File& directory, std::set<std::string>& seenMarkers, int maxDurationMs,
+                                                 int quietDurationMs);
 ProgressMarkerCleanupResult deleteProgressMarkers(const juce::File& directory, const char* description);
 
 } // namespace halionbridge::detail

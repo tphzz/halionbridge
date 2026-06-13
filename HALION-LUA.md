@@ -29,7 +29,7 @@ The builder treats the required positional build directory as the runtime root f
 - `ctx.sample_root`
 - generated vstpresets
 - `halionbridge_status_ok.vstpreset` and `halionbridge_status_failed.vstpreset`
-- temporary `hbp_*.vstpreset` files used to forward progress back to the halionbridge console; messages are hex-encoded in the marker filename so punctuation and paths round-trip, messages longer than 88 bytes are shortened with `...` inside that 88-byte budget before encoding, and consumed progress markers are deleted by the host immediately after logging
+- temporary `hbp_*.vstpreset` files used to forward progress back to the halionbridge console; messages are hex-encoded in the marker filename so punctuation and paths round-trip, messages longer than the marker filename budget are shortened with `...` before encoding, the budget is at most 88 bytes and shrinks for long build-directory paths, consumed progress markers are deleted by the host immediately after logging, and final cleanup retries progress-marker deletion after HALion resources are released
 
 The generic bootstrap vstpreset must contain inline Lua that calls `require("halionbridge_runtime")`. `halion-lua/builder_bootstrap.lua` is the reference source for the inline script embedded in `halion-lua/builder_bootstrap.vstpreset`; it is not a runtime module to load from the build directory.
 

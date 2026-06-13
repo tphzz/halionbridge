@@ -38,6 +38,8 @@ constexpr int kEditorMessagePumpMs = 100;
 constexpr int kProcessingDispatchMs = 10;
 constexpr int kAsyncInstantiationDispatchMs = 20;
 constexpr double kMarkerPollIntervalSeconds = 0.25;
+constexpr int kTerminalProgressDrainMaxMs = 1500;
+constexpr int kTerminalProgressDrainQuietMs = 300;
 constexpr double kBuildWaitProgressLogIntervalSeconds = 5.0;
 constexpr double kNoKillHeartbeatIntervalSeconds = 30.0;
 constexpr const char* kBuildStatusOkPresetFileName = "halionbridge_status_ok.vstpreset";
@@ -609,6 +611,11 @@ BuildWaitResult waitForBuildCompletion(juce::AudioPluginInstance& plugin, const 
             {
                 detail::logNewProgressMarkers(markers.builderRoot, seenProgressMarkers);
                 log::error("HALion build failure marker written: {}", markers.failedMarkerFile.getFullPathName().toStdString());
+                log::debug("Draining HALion Lua progress markers after terminal failure marker...");
+                auto drained = detail::drainProgressMarkers(markers.builderRoot, seenProgressMarkers, kTerminalProgressDrainMaxMs,
+                                                            kTerminalProgressDrainQuietMs);
+                if (drained.failed > 0)
+                    log::warn("HALion Lua progress marker drain left {} marker(s) behind.", drained.failed);
                 return {.succeeded = false, .completionReceived = true, .failureResult = RunResult::buildFailed};
             }
 
@@ -616,6 +623,11 @@ BuildWaitResult waitForBuildCompletion(juce::AudioPluginInstance& plugin, const 
             {
                 detail::logNewProgressMarkers(markers.builderRoot, seenProgressMarkers);
                 log::debug("HALion build completion marker written: {}", markers.okMarkerFile.getFullPathName().toStdString());
+                log::debug("Draining HALion Lua progress markers after terminal success marker...");
+                auto drained = detail::drainProgressMarkers(markers.builderRoot, seenProgressMarkers, kTerminalProgressDrainMaxMs,
+                                                            kTerminalProgressDrainQuietMs);
+                if (drained.failed > 0)
+                    log::warn("HALion Lua progress marker drain left {} marker(s) behind.", drained.failed);
                 log::info("HALion Lua build completed.");
                 return {.succeeded = true, .completionReceived = true, .failureResult = RunResult::success};
             }
@@ -653,8 +665,23 @@ bool cleanupSuccessfulBuildMarkers(const BuildMarkerSet& markers)
         !deleteFileIfExists(markers.failedMarkerFile, "failed build status marker"))
         return false;
 
-    detail::deleteProgressMarkers(markers.builderRoot, "HALion Lua progress marker");
     return true;
+}
+
+bool cleanupPostReleaseMarkers(const BuildMarkerSet& markers, const RunResult result)
+{
+    auto cleanupOk = true;
+    const auto progressCleanup = detail::deleteProgressMarkers(markers.builderRoot, "post-release HALion Lua progress marker");
+    if (progressCleanup.failed > 0)
+    {
+        cleanupOk = false;
+        log::warn("Post-release cleanup left {} HALion Lua progress marker(s) behind.", progressCleanup.failed);
+    }
+
+    if (result == RunResult::success && !cleanupSuccessfulBuildMarkers(markers))
+        cleanupOk = false;
+
+    return cleanupOk;
 }
 
 std::optional<juce::String> readVstPresetClassId(const juce::MemoryBlock& presetData)
@@ -1151,7 +1178,7 @@ RunResult Bridge::Impl::runProcessingLoop(const AppOptions& options, const juce:
         }
     }
 
-    auto finishProcessing = [&](const RunResult result)
+    auto finishProcessing = [&](const RunResult result, const BuildMarkerSet* markersToClean = nullptr)
     {
         if (window)
         {
@@ -1162,6 +1189,10 @@ RunResult Bridge::Impl::runProcessingLoop(const AppOptions& options, const juce:
 
         log::debug("Releasing plugin resources...");
         pluginInstance->releaseResources();
+
+        if (markersToClean != nullptr && !cleanupPostReleaseMarkers(*markersToClean, result) && result == RunResult::success)
+            return RunResult::cleanupFailed;
+
         return result;
     };
 
@@ -1174,7 +1205,7 @@ RunResult Bridge::Impl::runProcessingLoop(const AppOptions& options, const juce:
     if (stateApplied)
         log::info("State/Preset applied successfully.");
     else
-        return finishProcessing(RunResult::presetApplyFailed);
+        return finishProcessing(RunResult::presetApplyFailed, &*markers);
 
     log::info("Running HALion Lua build...");
     logBuildWaitConfiguration(*markers, options);
@@ -1188,10 +1219,7 @@ RunResult Bridge::Impl::runProcessingLoop(const AppOptions& options, const juce:
     if (options.noKill)
         holdPluginAliveForInspection(*pluginInstance, options, window.get(), closeRequested, buffer, midi);
 
-    if (waitResult.completionReceived && waitResult.succeeded && !cleanupSuccessfulBuildMarkers(*markers))
-        return finishProcessing(RunResult::cleanupFailed);
-
-    return finishProcessing(waitResult.succeeded ? RunResult::success : waitResult.failureResult);
+    return finishProcessing(waitResult.succeeded ? RunResult::success : waitResult.failureResult, &*markers);
 }
 
 } // namespace halionbridge

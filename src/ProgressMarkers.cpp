@@ -25,8 +25,56 @@ constexpr const char* kPresetFileExtension = ".vstpreset";
 constexpr int kDeleteRetryAttempts = 4;
 constexpr int kDeleteRetryDelayMs = 25;
 
+#if JUCE_WINDOWS
+juce::String makeExtendedLengthPath(juce::String path)
+{
+    path = path.replaceCharacter('/', '\\');
+
+    if (path.startsWith("\\\\?\\"))
+        return path;
+
+    if (path.startsWith("\\\\"))
+        return "\\\\?\\UNC\\" + path.substring(2);
+
+    return "\\\\?\\" + path;
+}
+
+bool fileExistsForProgressCleanup(const juce::File& file)
+{
+    const auto attributes = ::GetFileAttributesW(makeExtendedLengthPath(file.getFullPathName()).toWideCharPointer());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+void findProgressMarkerFilesWithPattern(const juce::File& directory, const juce::String& pattern, std::vector<juce::File>& files)
+{
+    auto searchPath = directory.getChildFile(pattern).getFullPathName();
+    WIN32_FIND_DATAW findData{};
+    const auto handle = ::FindFirstFileW(makeExtendedLengthPath(searchPath).toWideCharPointer(), &findData);
+    if (handle == INVALID_HANDLE_VALUE)
+        return;
+
+    do
+    {
+        if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            files.push_back(directory.getChildFile(juce::String(findData.cFileName)));
+    } while (::FindNextFileW(handle, &findData) != 0);
+
+    ::FindClose(handle);
+}
+#else
+bool fileExistsForProgressCleanup(const juce::File& file)
+{
+    return file.existsAsFile();
+}
+#endif
+
 std::vector<juce::File> findProgressMarkerFiles(const juce::File& directory)
 {
+#if JUCE_WINDOWS
+    std::vector<juce::File> sortedFiles;
+    findProgressMarkerFilesWithPattern(directory, juce::String(kCompactProgressMarkerPrefix) + "*" + kPresetFileExtension, sortedFiles);
+    findProgressMarkerFilesWithPattern(directory, juce::String(kLegacyProgressMarkerPrefix) + "*" + kPresetFileExtension, sortedFiles);
+#else
     juce::Array<juce::File> files;
     directory.findChildFiles(files, juce::File::findFiles, false, juce::String(kCompactProgressMarkerPrefix) + "*" + kPresetFileExtension);
     directory.findChildFiles(files, juce::File::findFiles, false, juce::String(kLegacyProgressMarkerPrefix) + "*" + kPresetFileExtension);
@@ -35,6 +83,7 @@ std::vector<juce::File> findProgressMarkerFiles(const juce::File& directory)
     sortedFiles.reserve(static_cast<size_t>(files.size()));
     for (const auto& file : files)
         sortedFiles.push_back(file);
+#endif
 
     std::sort(sortedFiles.begin(), sortedFiles.end(),
               [](const juce::File& lhs, const juce::File& rhs) { return lhs.getFileName() < rhs.getFileName(); });
@@ -90,34 +139,27 @@ bool logProgressMarker(const juce::File& file)
     return true;
 }
 
-#if JUCE_WINDOWS
-juce::String makeExtendedLengthPath(juce::String path)
-{
-    path = path.replaceCharacter('/', '\\');
-
-    if (path.startsWith("\\\\?\\"))
-        return path;
-
-    if (path.startsWith("\\\\"))
-        return "\\\\?\\UNC\\" + path.substring(2);
-
-    return "\\\\?\\" + path;
-}
-#endif
-
 void pauseBeforeRetry()
 {
     std::this_thread::sleep_for(std::chrono::milliseconds(kDeleteRetryDelayMs));
+}
+
+void mergeCleanupResult(ProgressMarkerCleanupResult& destination, const ProgressMarkerCleanupResult& source)
+{
+    destination.found += source.found;
+    destination.deleted += source.deleted;
+    destination.failed += source.failed;
+    destination.remainingNames.insert(source.remainingNames.begin(), source.remainingNames.end());
 }
 
 bool deleteProgressMarkerFile(const juce::File& file)
 {
     for (int attempt = 0; attempt < kDeleteRetryAttempts; ++attempt)
     {
-        if (!file.existsAsFile())
+        if (!fileExistsForProgressCleanup(file))
             return true;
 
-        if (file.deleteFile() || !file.existsAsFile())
+        if (file.deleteFile() || !fileExistsForProgressCleanup(file))
             return true;
 
         pauseBeforeRetry();
@@ -127,10 +169,10 @@ bool deleteProgressMarkerFile(const juce::File& file)
     const auto extendedPath = makeExtendedLengthPath(file.getFullPathName());
     for (int attempt = 0; attempt < kDeleteRetryAttempts; ++attempt)
     {
-        if (!file.existsAsFile())
+        if (!fileExistsForProgressCleanup(file))
             return true;
 
-        if (::DeleteFileW(extendedPath.toWideCharPointer()) != 0 || !file.existsAsFile())
+        if (::DeleteFileW(extendedPath.toWideCharPointer()) != 0 || !fileExistsForProgressCleanup(file))
             return true;
 
         const auto error = ::GetLastError();
@@ -141,7 +183,7 @@ bool deleteProgressMarkerFile(const juce::File& file)
     }
 #endif
 
-    return !file.existsAsFile();
+    return !fileExistsForProgressCleanup(file);
 }
 
 bool isValidUtf8(std::string_view text)
@@ -255,13 +297,17 @@ std::string decodeProgressMarkerText(std::string_view rawText)
     return (text.isEmpty() ? juce::String("HALion Lua progress") : text).toStdString();
 }
 
-void logNewProgressMarkers(const juce::File& directory, std::set<std::string>& seenMarkers)
+ProgressMarkerCleanupResult logNewProgressMarkers(const juce::File& directory, std::set<std::string>& seenMarkers)
 {
+    ProgressMarkerCleanupResult result;
+
     for (const auto& file : findProgressMarkerFiles(directory))
     {
         const auto name = file.getFileName().toStdString();
         if (!seenMarkers.insert(name).second)
             continue;
+
+        ++result.found;
 
         const auto path = file.getFullPathName().toStdString();
         log::debug("HALion Lua progress marker written: {}", path);
@@ -271,10 +317,52 @@ void logNewProgressMarkers(const juce::File& directory, std::set<std::string>& s
             log::debug("Ignoring malformed HALion Lua progress marker: {}", path);
 
         if (deleteProgressMarkerFile(file))
+        {
+            ++result.deleted;
             log::debug("Deleted consumed HALion Lua progress marker: {}", path);
+        }
         else
+        {
+            ++result.failed;
+            result.remainingNames.insert(name);
             log::warn("Failed to delete consumed HALion Lua progress marker: {}", path);
+        }
     }
+
+    return result;
+}
+
+ProgressMarkerCleanupResult drainProgressMarkers(const juce::File& directory, std::set<std::string>& seenMarkers, const int maxDurationMs,
+                                                 const int quietDurationMs)
+{
+    ProgressMarkerCleanupResult aggregate;
+    const auto start = std::chrono::steady_clock::now();
+    auto quietStart = start;
+
+    while (true)
+    {
+        auto result = logNewProgressMarkers(directory, seenMarkers);
+        if (result.found > 0)
+            quietStart = std::chrono::steady_clock::now();
+
+        mergeCleanupResult(aggregate, result);
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+        const auto quietMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - quietStart).count();
+
+        if (elapsedMs >= maxDurationMs || quietMs >= quietDurationMs)
+            break;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(kDeleteRetryDelayMs));
+    }
+
+    auto finalCleanup = deleteProgressMarkers(directory, "HALion Lua progress marker after progress drain");
+    aggregate.found += finalCleanup.found;
+    aggregate.deleted += finalCleanup.deleted;
+    aggregate.failed = finalCleanup.failed;
+    aggregate.remainingNames = std::move(finalCleanup.remainingNames);
+    return aggregate;
 }
 
 ProgressMarkerCleanupResult deleteProgressMarkers(const juce::File& directory, const char* description)
