@@ -1,5 +1,6 @@
 #include "halionbridge/Bridge.h"
 #include "halionbridge/BuildInfo.h"
+#include "BuildFile.h"
 #include "Log.h"
 #include "ChildProcessOutput.h"
 #include "PathUtils.h"
@@ -9,9 +10,11 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <algorithm>
 #include <cstddef>
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <span>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -297,23 +300,159 @@ class BridgeTests : public juce::UnitTest
                 --[[
                     "block_commented_module"
                 ]]
+                --[==[
+                    "leveled_block_commented_module"
+                ]==]
                 return {
                     "jad_kick_builder",
                     'snare_builder.lua',
+                    "escaped\\path.lua",
+                    "line\nbreak.lua",
+                    "quote\"module.lua",
                     nested = { "nested_module" },
                     label = "metadata literal",
                     "jad_kick_builder"
                 }
             )");
 
-            expectEquals(static_cast<int>(names.size()), 2);
+            expectEquals(static_cast<int>(names.size()), 5);
             expect(contains(names, "jad_kick_builder"));
             expect(contains(names, "snare_builder.lua"));
+            expect(contains(names, "escaped\\path.lua"));
+            expect(contains(names, "line\nbreak.lua"));
+            expect(contains(names, "quote\"module.lua"));
             expect(!contains(names, "not_a_build_entry"));
             expect(!contains(names, "commented_module"));
             expect(!contains(names, "block_commented_module"));
+            expect(!contains(names, "leveled_block_commented_module"));
             expect(!contains(names, "nested_module"));
             expect(!contains(names, "metadata literal"));
+        }
+
+        beginTest("Build File Generation - creates sorted top-level index");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_build_file_generation");
+            expect(tempDir.createDirectory());
+            expect(tempDir.getChildFile("002_second.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("001_first.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("halionbridge_runtime.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("halionbridge_builder.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("builder_bootstrap.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("HALIONBRIDGE_RUNTIME.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("HALIONBRIDGE_BUILDER.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("BUILDER_BOOTSTRAP.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("nested").createDirectory());
+            expect(tempDir.getChildFile("nested").getChildFile("000_nested.lua").replaceWithText("return {}"));
+
+            const auto result = halionbridge::detail::generateBuildFile(tempDir, false);
+            expect(result.succeeded);
+            expectEquals(static_cast<int>(result.moduleNames.size()), 2);
+            if (result.moduleNames.size() == 2)
+            {
+                expectEquals(result.moduleNames[0], juce::String("001_first.lua"));
+                expectEquals(result.moduleNames[1], juce::String("002_second.lua"));
+            }
+
+            const auto generatedNames = halionbridge::Bridge::parseBuildFileModuleNames(result.buildFile.loadFileAsString().toStdString());
+            expectEquals(static_cast<int>(generatedNames.size()), 2);
+            expect(contains(generatedNames, "001_first.lua"));
+            expect(contains(generatedNames, "002_second.lua"));
+            expect(!contains(generatedNames, "halionbridge_runtime.lua"));
+            expect(!contains(generatedNames, "halionbridge_builder.lua"));
+            expect(!contains(generatedNames, "builder_bootstrap.lua"));
+            expect(!contains(generatedNames, "HALIONBRIDGE_RUNTIME.lua"));
+            expect(!contains(generatedNames, "HALIONBRIDGE_BUILDER.lua"));
+            expect(!contains(generatedNames, "BUILDER_BOOTSTRAP.lua"));
+            expect(!contains(generatedNames, "000_nested.lua"));
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Init Command - validates arguments and warns about helper modules");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_init_command");
+            expect(tempDir.createDirectory());
+            expect(tempDir.getChildFile("001_first.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("helper.lua").replaceWithText("return {}"));
+
+            auto result = halionbridge::detail::runInitCommand(juce::StringArray{"init"});
+            expectEquals(result.exitCode, 1);
+            expect(result.message.contains("requires a build directory"));
+
+            result = halionbridge::detail::runInitCommand(juce::StringArray{"init", "--unknown"});
+            expectEquals(result.exitCode, 1);
+            expect(result.message.contains("Unknown init argument"));
+
+            result = halionbridge::detail::runInitCommand(juce::StringArray{
+                "init", tempDir.getFullPathName(), cleanTempDirectory("halionbridge_init_command_other").getFullPathName()});
+            expectEquals(result.exitCode, 1);
+            expect(result.message.contains("exactly one build directory"));
+
+            const auto missingDir = cleanTempDirectory("halionbridge_init_command_missing");
+            missingDir.deleteRecursively();
+            result = halionbridge::detail::runInitCommand(juce::StringArray{"init", missingDir.getFullPathName()});
+            expectEquals(result.exitCode, 1);
+            expect(result.message.contains("does not exist"));
+
+            result = halionbridge::detail::runInitCommand(juce::StringArray{"init", tempDir.getFullPathName()});
+            expectEquals(result.exitCode, 0);
+            expectEquals(static_cast<int>(result.moduleNames.size()), 2);
+            expect(result.warning.contains("helper modules"));
+            expect(tempDir.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(tempDir.getChildFile("halionbridge_build.lua").loadFileAsString().contains("helper.lua"));
+
+            result = halionbridge::detail::runInitCommand(juce::StringArray{"init", tempDir.getFullPathName()});
+            expectEquals(result.exitCode, 1);
+            expect(result.message.contains("already exists"));
+
+            expect(tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return { \"manual.lua\" }\n"));
+            result = halionbridge::detail::runInitCommand(juce::StringArray{"init", tempDir.getFullPathName(), "--overwrite"});
+            expectEquals(result.exitCode, 0);
+            expect(tempDir.getChildFile("halionbridge_build.lua").loadFileAsString().contains("001_first.lua"));
+            expect(!tempDir.getChildFile("halionbridge_build.lua").loadFileAsString().contains("manual.lua"));
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Build File Generation - refuses and overwrites existing file explicitly");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_build_file_overwrite");
+            expect(tempDir.createDirectory());
+            const auto buildFile = tempDir.getChildFile("halionbridge_build.lua");
+            expect(tempDir.getChildFile("001_first.lua").replaceWithText("return {}"));
+            expect(buildFile.replaceWithText("return { \"manual.lua\" }\n"));
+
+            auto result = halionbridge::detail::generateBuildFile(tempDir, false);
+            expect(!result.succeeded);
+            expect(buildFile.loadFileAsString().contains("manual.lua"));
+
+            result = halionbridge::detail::generateBuildFile(tempDir, true);
+            expect(result.succeeded);
+            expect(buildFile.loadFileAsString().contains("001_first.lua"));
+            expect(!buildFile.loadFileAsString().contains("manual.lua"));
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Build File Generation - missing index with Lua files fails normal build parsing");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_missing_build_file_with_lua");
+            expect(tempDir.createDirectory());
+            expect(tempDir.getChildFile("001_first.lua").replaceWithText("return {}"));
+            expect(halionbridge::detail::hasTopLevelLuaBuildScripts(tempDir));
+            expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString()}).has_value());
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Build File Generation - empty directory has no Lua build scripts");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_missing_build_file_empty");
+            expect(tempDir.createDirectory());
+            expect(!halionbridge::detail::hasTopLevelLuaBuildScripts(tempDir));
+            expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString()}).has_value());
+
+            tempDir.deleteRecursively();
         }
 
         beginTest("Progress Marker Text Decoding");
@@ -335,8 +474,10 @@ class BridgeTests : public juce::UnitTest
 
             auto compactMarker = tempDir.getChildFile("hbp_000001_i_50726F6772657373.vstpreset");
             auto legacyMarker = tempDir.getChildFile("halionbridge_progress_000001_info_50726F6772657373.vstpreset");
+            auto failedStatusMarker = tempDir.getChildFile("halionbridge_status_failed.vstpreset");
             expect(compactMarker.replaceWithText("marker"));
             expect(legacyMarker.replaceWithText("marker"));
+            expect(failedStatusMarker.replaceWithText("marker"));
 
             auto result = halionbridge::detail::deleteProgressMarkers(tempDir, "test progress marker");
             expectEquals(result.found, 2);
@@ -344,6 +485,7 @@ class BridgeTests : public juce::UnitTest
             expect(result.remainingNames.empty());
             expect(!compactMarker.existsAsFile());
             expect(!legacyMarker.existsAsFile());
+            expect(failedStatusMarker.existsAsFile());
 
             tempDir.deleteRecursively();
         }
@@ -382,6 +524,30 @@ class BridgeTests : public juce::UnitTest
             expectEquals(result.failed, 0);
             expect(result.remainingNames.empty());
             expect(!marker.existsAsFile());
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Progress Marker Cleanup - drain deletes late progress markers");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_progress_drain");
+            expect(tempDir.createDirectory());
+
+            auto lateMarker = tempDir.getChildFile("hbp_000003_i_4C617465.vstpreset");
+            auto writer = std::thread(
+                [lateMarker]()
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                    lateMarker.replaceWithText("marker");
+                });
+
+            auto seenMarkers = std::set<std::string>();
+            auto result = halionbridge::detail::drainProgressMarkers(tempDir, seenMarkers, 500, 100);
+
+            writer.join();
+            expect(result.found >= 1);
+            expectEquals(result.failed, 0);
+            expect(!lateMarker.existsAsFile());
 
             tempDir.deleteRecursively();
         }
@@ -493,10 +659,14 @@ class BridgeTests : public juce::UnitTest
         beginTest("Build Info - generated metadata");
         {
             const auto buildInfo = halionbridge::getBuildInfo();
-            expect(juce::String(buildInfo.versionString).isNotEmpty());
-            expect(juce::String(buildInfo.packageBasename).startsWith("halionbridge-"));
+            const auto version = juce::String(buildInfo.versionString);
+            const auto packageBasename = juce::String(buildInfo.packageBasename);
+
+            expect(version.isNotEmpty());
+            expect(packageBasename.startsWith("halionbridge-"));
+            expectEquals(packageBasename, "halionbridge-" + version);
             expect(juce::String(buildInfo.gitShaShort).isNotEmpty());
-            expect(juce::String(buildInfo.buildTimestampUtc).isNotEmpty());
+            expect(version.endsWith("-mod") == buildInfo.isDirty);
         }
 
         beginTest("Log Level Parsing");

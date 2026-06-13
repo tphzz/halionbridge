@@ -78,3 +78,4 @@ sampler-dev-docs
 halionbridge_private
 examples/**/*.vstpreset
 
+examples/synth-single-cycle-uninitialized/halionbridge_build.lua

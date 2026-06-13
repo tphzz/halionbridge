@@ -12,7 +12,6 @@ struct HALIONBRIDGE_EXPORT BuildInfo
     const char* gitTag;
     const char* gitBranch;
     const char* gitShaShort;
-    const char* buildTimestampUtc;
     bool isTaggedRelease;
     bool isDirty;
 };

@@ -100,17 +100,17 @@ macOS builds keep Apple system libraries and frameworks dynamically linked, whic
 
 ## Build Versioning
 
-CMake computes the build version from Git during configure. Developers do not pass version variables manually. Local builds and GitHub Actions builds use the same `cmake/halionbridge_version.cmake` logic.
+CMake computes the build version from Git. Developers do not pass version variables manually. Local builds and GitHub Actions builds use the same `cmake/halionbridge_version.cmake` logic.
 
-Release tags should use the `v0.5.0` style. When `HEAD` is exactly on a tag, the version is based on that tag. Otherwise the version uses the current branch name, UTC configure timestamp, short Git hash, and `-dirty` when tracked files are modified.
+Versions are intentionally source-identification strings, not calendar build IDs. A named branch checkout uses the active branch name even when `HEAD` also happens to point at a tag. Detached checkouts use an exact tag when one exists, otherwise `detached`. The short Git hash is always included. Modified worktrees append `-mod`; this includes tracked modifications and untracked, non-ignored files.
 
 Examples:
 
 ```text
-halionbridge-main-20260612T153045Z-a1b2c3d
-halionbridge-feature-lua-api-20260612T153045Z-a1b2c3d
-halionbridge-v0.5.0-20260612T153045Z
-halionbridge-feature-lua-api-20260612T153045Z-a1b2c3d-dirty
+halionbridge-main-a1b2c3d
+halionbridge-feature-lua-api-a1b2c3d
+halionbridge-v0.5.0-a1b2c3d
+halionbridge-feature-lua-api-a1b2c3d-mod
 ```
 
 CMake writes the package basename to:
@@ -125,6 +125,8 @@ The CLI exposes the same metadata with:
 ```powershell
 build-release\halionbridge_artefacts\Release\halionbridge.exe --version
 ```
+
+`BuildInfo.cpp` is generated during configure so the build tree has a source file, and regenerated during every normal `cmake --build` via `halionbridge_generate_build_info`. The generator rewrites the file only when the Git metadata changes, so switching branches or changing files only requires the normal build command to refresh `--version`.
 
 ## GitHub Actions
 
@@ -148,7 +150,7 @@ The workflow validates compilation and unit tests only. It does not install, lau
 - `src/CrashDiagnostics.cpp`: Windows crash-dump support for failures that occur inside JUCE or a hosted VST3 before normal error reporting can run.
 - `src/ChildProcessOutput.cpp`: Byte-buffered subprocess output forwarding. It preserves split UTF-8 sequences across reads before logging scan-worker output.
 - `src/Log.cpp`: Private spdlog setup and log-level parsing. spdlog must not appear in the public `include/halionbridge` API.
-- `src/BuildFile.cpp`: Host-side build file inspection for the top-level string list returned by `halionbridge_build.lua`.
+- `src/BuildFile.cpp`: Host-side build file inspection for the top-level string list returned by `halionbridge_build.lua`, plus deterministic generation of a simple build file for `halionbridge init`.
 - `src/PathUtils.cpp`: Private JUCE/std filesystem conversion and CLI path normalization helpers shared by the library, CLI, and tests.
 - `src/PluginScan.cpp`: HALion plugin-description construction, in-process plugin scanning, and isolated scan-worker implementation.
 - `src/ProgressMarkers.cpp`: Host-side progress marker decoding, logging, cleanup, and filename codec behavior shared by the processing loop and tests.
@@ -172,7 +174,7 @@ The default log level is `info`. Users can set `HALIONBRIDGE_LOGLEVEL` to `trace
 [YYYY-MM-DD HH:mm:ss.mmm] [level] message
 ```
 
-`trace`, `debug`, and `info` are routed to stdout. `warn` and `error` are routed to stderr. Logs flush at the configured minimum level so debug output remains visible during hangs. Host internals such as temporary runtime files, VST3 preset details, plugin scan details, marker paths, and cleanup are `debug`. Build script progress and batch summaries remain `info` so normal users can see build progress without enabling diagnostics. HALion Lua `print()` output is not treated as a reliable stdout transport; the embedded builder writes temporary `hbp_*.vstpreset` marker presets in the build directory, and the host polls those markers at a throttled interval to forward runner, `ctx.log`, and `ctx.progress` messages to the console. Marker filenames contain hex-encoded message bytes, so punctuation, paths, and percent signs round-trip in console output. Messages longer than 88 bytes are shortened with `...` inside that 88-byte budget before encoding to keep marker filenames within platform filename-component limits. Each consumed progress marker is deleted immediately after it is logged so long builds do not accumulate marker files. If stale progress markers cannot be deleted before a run, their filenames are suppressed from current-run logging and cleanup is retried later. The host also cleans up and parses legacy `halionbridge_progress_*.vstpreset` markers from earlier builds.
+`trace`, `debug`, and `info` are routed to stdout. `warn` and `error` are routed to stderr. Logs flush at the configured minimum level so debug output remains visible during hangs. Host internals such as temporary runtime files, VST3 preset details, plugin scan details, marker paths, and cleanup are `debug`. Build script progress and batch summaries remain `info` so normal users can see build progress without enabling diagnostics. HALion Lua `print()` output is not treated as a reliable stdout transport; the embedded builder writes temporary `hbp_*.vstpreset` marker presets in the build directory, and the host polls those markers at a throttled interval to forward runner, `ctx.log`, and `ctx.progress` messages to the console. Marker filenames contain hex-encoded message bytes, so punctuation, paths, and percent signs round-trip in console output. Marker messages use an 88-byte maximum budget on short paths and a smaller dynamic budget on long build-directory paths so progress marker paths stay below a conservative Windows path-length boundary; shortened messages include `...` inside the available budget. Each consumed progress marker is deleted immediately after it is logged so long builds do not accumulate marker files. When a terminal OK or failed status marker appears, the host drains progress markers for a short quiet period, then retries deletion again after HALion plugin resources are released. If stale progress markers cannot be deleted before a run, their filenames are suppressed from current-run logging and cleanup is retried later. The host also cleans up and parses legacy `halionbridge_progress_*.vstpreset` markers from earlier builds.
 
 ## Diagnostic Builds
 
@@ -213,7 +215,8 @@ cd halion-lua
 ## Preset Loading Notes
 - Generic VST3 component/controller-state presets are applied through JUCE's VST3 client preset API.
 - HALion program/layer presets may contain `Prog` program-data chunks without `Comp`/`Cont` state chunks. These are applied through Steinberg VST3 program/unit data interfaces exposed by HALion.
-- halionbridge is a single-purpose builder host. Users call `halionbridge <build-directory>`. The directory must contain `halionbridge_build.lua`; build script modules may create and save program presets, layer presets, or other HALion artifacts independently.
+- halionbridge is a single-purpose builder host. Users call `halionbridge <build-directory>`. The directory must contain `halionbridge_build.lua`; build script modules may create and save program presets, layer presets, or other HALion artifacts independently. Users can run `halionbridge init <build-directory>` to generate a simple sorted `halionbridge_build.lua` from top-level Lua files before running the build.
+- `halionbridge init` is a setup command, not a build command. It does not initialize JUCE's plugin-host path or launch HALion. It refuses to replace an existing build file unless `--overwrite` is passed. Normal build mode emits a warning pointing to `halionbridge init <directory>` when the build file is missing but top-level Lua files are present. The generated list includes every top-level non-infrastructure `.lua` file, so users must review it and remove helper modules that are not build entrypoints.
 - Raw `.vstpreset` bytes must not be passed to `setStateInformation()` as a fallback; that API expects JUCE's hosted-plugin state representation, not a Steinberg preset container.
 - The bridge drives HALion with `prepareToPlay()` and manual `processBlock()` calls. It does not use `AudioDeviceManager` or open a system audio device.
 - Normal runs register JUCE's headless plugin formats with `addHeadlessDefaultFormatsToManager()`. `--gui` switches to JUCE's GUI-capable plugin formats with `addDefaultFormatsToManager()` and creates the HALion editor.
@@ -223,8 +226,8 @@ cd halion-lua
 - The compile-time assets are `halion-lua/builder_bootstrap.vstpreset` and `halion-lua/builder.lua`, embedded through the `halionbridge_assets` binary-data target. The checked-in `halion-lua/builder_bootstrap.lua` is the canonical source text for the inline Lua saved inside `builder_bootstrap.vstpreset`; it should call `require("halionbridge_runtime")`.
 - For builder runs, the bridge writes temporary `halionbridge_runtime.lua` and `halionbridge_builder.lua` files into the HALion user scripts directory under `Documents/Steinberg/HALion/Library/scripts`. HALion Lua does not reliably expose the host process environment or current working directory to `require()`, so this generated runtime module is the authoritative handoff. It sets the Lua global `HALIONBRIDGE_RUNTIME_ROOT`, prepends the build directory to `package.path` if needed, and then loads the temporary embedded builder module. Previous files with the same names are restored after the run; otherwise the temporary files are deleted. Because these filenames and the working directory/environment handoff are shared process/user state, halionbridge acquires a fail-fast inter-process lock for the whole runtime-staging lifetime and rejects overlapping runs.
 - Running `halionbridge` without arguments is equivalent to `halionbridge --help` and exits successfully after printing usage.
-- For HALion batch builds, `halion-lua/builder.lua` is a neutral build script runner. It loads build script modules listed in `halionbridge_build.lua`, passes each module a documented `ctx` API, forwards file-level progress through temporary `hbp_*.vstpreset` marker presets, aggregates build script results, and writes `halionbridge_status_ok.vstpreset` or `halionbridge_status_failed.vstpreset` in the build directory using HALion's `savePreset()` API. The bridge deletes stale status/progress files before applying the preset, deletes each consumed progress marker immediately after logging it, and deletes successful completion status files after observing success; failed status markers remain after failed runs for diagnostics.
+- For HALion batch builds, `halion-lua/builder.lua` is a neutral build script runner. It loads build script modules listed in `halionbridge_build.lua`, passes each module a documented `ctx` API, forwards file-level progress through temporary `hbp_*.vstpreset` marker presets, aggregates build script results, and writes `halionbridge_status_ok.vstpreset` or `halionbridge_status_failed.vstpreset` in the build directory using HALion's `savePreset()` API. The bridge deletes stale status/progress files before applying the preset, deletes each consumed progress marker immediately after logging it, drains late progress markers when a terminal status marker appears, and performs one final progress-marker sweep after releasing HALion plugin resources. Successful OK status markers are deleted; failed status markers remain after failed runs for diagnostics.
 - Build script modules own all HALion-specific build behavior: program presets, layer presets, zones, samples, and output filenames. Keep the build script API documented in `HALION-LUA.md` when changing builder or build script behavior.
 - Generic build script modules are arbitrary code, so `halionbridge_build.lua` entries are not treated as expected output preset names. Build completion is reported only through HALion-written `.vstpreset` marker files.
 - The default build timeout is `0`, which waits forever and emits a startup warning. Set `--timeout-seconds <n>` only when a finite build timeout is desired.
-- `--nokill` is a diagnostics switch for inspecting HALion after the runtime and builder pipeline has run. When the bridge observes an OK marker, failed marker, timeout, or another processing-loop exit, it keeps the plugin instance alive instead of immediately hiding the GUI and releasing plugin resources. On successful completion, output marker cleanup happens after the hold exits. In headless mode the process remains alive until Ctrl+C requests a graceful stop. With `--gui`, closing the GUI window leaves the inspection hold and then the bridge shuts down normally. In both cases normal C++ cleanup still runs, so temporary HALion runtime files are restored or deleted.
+- `--nokill` is a diagnostics switch for inspecting HALion after the runtime and builder pipeline has run. When the bridge observes an OK marker, failed marker, timeout, or another processing-loop exit, it keeps the plugin instance alive instead of immediately hiding the GUI and releasing plugin resources. Terminal progress-marker draining still happens before the inspection hold, and final status/progress cleanup happens after the hold exits and HALion resources are released. In headless mode the process remains alive until Ctrl+C requests a graceful stop. With `--gui`, closing the GUI window leaves the inspection hold and then the bridge shuts down normally. In both cases normal C++ cleanup still runs, so temporary HALion runtime files are restored or deleted.

@@ -103,6 +103,7 @@ local STATUS_FAILED_PATH = scriptDir .. "halionbridge_status_failed.vstpreset"
 local PROGRESS_SEQUENCE = 0
 local PROGRESS_WRITE_FAILURES = 0
 local MAX_PROGRESS_MESSAGE_BYTES = 88
+local MAX_PROGRESS_MARKER_PATH_BYTES = 240
 local TRUNCATION_SUFFIX = "..."
 
 if scriptDir ~= "" then
@@ -151,14 +152,48 @@ local function progressLevel(value)
     return "i"
 end
 
-local function encodeProgressMessage(message)
+local function progressMessageByteBudget()
+    -- Progress text is carried in the marker filename. The budget shrinks when
+    -- the build directory path is long so Windows hosts do not have to delete
+    -- marker paths that exceed the traditional MAX_PATH boundary.
+    local markerOverheadBytes = #"hbp_000000_i_" + #".vstpreset"
+    local availableBytes = MAX_PROGRESS_MARKER_PATH_BYTES - #scriptDir - markerOverheadBytes
+    local encodedBudget = math.floor(availableBytes / 2)
+
+    if encodedBudget < 0 then
+        return 0
+    end
+
+    if encodedBudget > MAX_PROGRESS_MESSAGE_BYTES then
+        return MAX_PROGRESS_MESSAGE_BYTES
+    end
+
+    return encodedBudget
+end
+
+local function encodeProgressMessage(message, byteBudget)
     message = tostring(message or "")
-    if #message > MAX_PROGRESS_MESSAGE_BYTES then
-        message = message:sub(1, MAX_PROGRESS_MESSAGE_BYTES - #TRUNCATION_SUFFIX)
+    byteBudget = byteBudget or MAX_PROGRESS_MESSAGE_BYTES
+
+    if byteBudget <= 0 then
+        message = ""
+    elseif #message > byteBudget then
+        local contentBudget = byteBudget - #TRUNCATION_SUFFIX
+        if contentBudget > 0 then
+            message = message:sub(1, contentBudget)
+        else
+            message = ""
+        end
+
         while #message > 0 and string.byte(message, #message) >= 128 do
             message = message:sub(1, #message - 1)
         end
-        message = message .. TRUNCATION_SUFFIX
+
+        if byteBudget >= #TRUNCATION_SUFFIX then
+            message = message .. TRUNCATION_SUFFIX
+        else
+            message = TRUNCATION_SUFFIX:sub(1, byteBudget)
+        end
     end
 
     return (message:gsub(".", function(char)
@@ -178,7 +213,7 @@ local function writeProgress(kind, message)
 
     local markerLayer = Layer()
     local markerLevel = progressLevel(kind)
-    local markerMessage = encodeProgressMessage(message)
+    local markerMessage = encodeProgressMessage(message, progressMessageByteBudget())
     local markerName = string.format("hbp_%06d_%s_%s", PROGRESS_SEQUENCE, markerLevel, markerMessage)
     local markerPath = scriptDir .. markerName .. ".vstpreset"
 

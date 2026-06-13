@@ -20,37 +20,38 @@ option(HALIONBRIDGE_BUILD_TESTS "Build the halionbridge unit test executable." $
 option(HALIONBRIDGE_ENABLE_DIAGNOSTICS "Enable verbose JUCE/VST3 diagnostic logging in this build." OFF)
 option(HALIONBRIDGE_ENABLE_CRASH_DUMPS "Write a Windows minidump when the bridge process crashes." ON)
 
-halionbridge_configure_git_version()
-
-if(HALIONBRIDGE_IS_TAGGED_RELEASE)
-    set(HALIONBRIDGE_IS_TAGGED_RELEASE_CPP "true")
-else()
-    set(HALIONBRIDGE_IS_TAGGED_RELEASE_CPP "false")
-endif()
-
-if(HALIONBRIDGE_GIT_DIRTY)
-    set(HALIONBRIDGE_GIT_DIRTY_CPP "true")
-else()
-    set(HALIONBRIDGE_GIT_DIRTY_CPP "false")
-endif()
-
 set(HALIONBRIDGE_GENERATED_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-src")
-# BuildInfo.cpp is generated at CMake configure time. Re-run configure after a
-# commit/tag change when an already-configured build tree needs fresh --version
-# metadata without changing other inputs.
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildInfo.cpp.in"
-    "${HALIONBRIDGE_GENERATED_SOURCE_DIR}/BuildInfo.cpp"
-    @ONLY
+set(HALIONBRIDGE_BUILD_INFO_CPP "${HALIONBRIDGE_GENERATED_SOURCE_DIR}/BuildInfo.cpp")
+set(HALIONBRIDGE_PACKAGE_BASENAME_FILE "${CMAKE_CURRENT_BINARY_DIR}/halionbridge_package_basename.txt")
+set(HALIONBRIDGE_GENERATE_BUILD_INFO_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_build_info.cmake")
+set(HALIONBRIDGE_BUILD_INFO_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildInfo.cpp.in")
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+        "-DHALIONBRIDGE_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DHALIONBRIDGE_TEMPLATE=${HALIONBRIDGE_BUILD_INFO_TEMPLATE}"
+        "-DHALIONBRIDGE_OUTPUT_CPP=${HALIONBRIDGE_BUILD_INFO_CPP}"
+        "-DHALIONBRIDGE_OUTPUT_PACKAGE=${HALIONBRIDGE_PACKAGE_BASENAME_FILE}"
+        -P "${HALIONBRIDGE_GENERATE_BUILD_INFO_SCRIPT}"
+    RESULT_VARIABLE HALIONBRIDGE_GENERATE_BUILD_INFO_RESULT
 )
 
-file(WRITE
-    "${CMAKE_CURRENT_BINARY_DIR}/halionbridge_package_basename.txt"
-    "${HALIONBRIDGE_PACKAGE_BASENAME}\n"
-)
+if(NOT HALIONBRIDGE_GENERATE_BUILD_INFO_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to generate halionbridge build metadata.")
+endif()
 
-message(STATUS "halionbridge version: ${HALIONBRIDGE_VERSION_STRING}")
-message(STATUS "halionbridge package basename: ${HALIONBRIDGE_PACKAGE_BASENAME}")
+add_custom_target(halionbridge_generate_build_info ALL
+    COMMAND "${CMAKE_COMMAND}"
+        "-DHALIONBRIDGE_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DHALIONBRIDGE_TEMPLATE=${HALIONBRIDGE_BUILD_INFO_TEMPLATE}"
+        "-DHALIONBRIDGE_OUTPUT_CPP=${HALIONBRIDGE_BUILD_INFO_CPP}"
+        "-DHALIONBRIDGE_OUTPUT_PACKAGE=${HALIONBRIDGE_PACKAGE_BASENAME_FILE}"
+        -P "${HALIONBRIDGE_GENERATE_BUILD_INFO_SCRIPT}"
+    BYPRODUCTS
+        "${HALIONBRIDGE_BUILD_INFO_CPP}"
+        "${HALIONBRIDGE_PACKAGE_BASENAME_FILE}"
+    VERBATIM
+)
 
 # Add JUCE submodule
 add_subdirectory(external/JUCE)
@@ -88,7 +89,7 @@ set(HALIONBRIDGE_LIBRARY_SOURCES
     src/PathUtils.cpp
     src/PluginScan.cpp
     src/ProgressMarkers.cpp
-    "${HALIONBRIDGE_GENERATED_SOURCE_DIR}/BuildInfo.cpp"
+    "${HALIONBRIDGE_BUILD_INFO_CPP}"
 )
 
 set(HALIONBRIDGE_STRICT_WARNING_OPTIONS)
@@ -167,6 +168,7 @@ function(configure_halionbridge_juce_consumer target_name)
 endfunction()
 
 add_library(halionbridge_shared SHARED ${HALIONBRIDGE_LIBRARY_SOURCES})
+add_dependencies(halionbridge_shared halionbridge_generate_build_info)
 set_target_properties(halionbridge_shared PROPERTIES
     OUTPUT_NAME halionbridge
     ARCHIVE_OUTPUT_DIRECTORY "${HALIONBRIDGE_LIBRARY_OUTPUT_DIRECTORY}"
@@ -180,6 +182,7 @@ generate_export_header(halionbridge_shared
 )
 
 add_library(halionbridge_static STATIC ${HALIONBRIDGE_LIBRARY_SOURCES})
+add_dependencies(halionbridge_static halionbridge_generate_build_info)
 set_target_properties(halionbridge_static PROPERTIES
     OUTPUT_NAME halionbridge_static
     ARCHIVE_OUTPUT_DIRECTORY "${HALIONBRIDGE_LIBRARY_OUTPUT_DIRECTORY}"

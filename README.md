@@ -48,14 +48,17 @@ Before running the generic builder, open HALion's **Options Editor**, go to **Sc
 - Windows: `C:\Users\<username>\Documents\Steinberg\HALion\Library\scripts`
 - macOS: `/Users/<username>/Documents/Steinberg/HALion/Library/scripts`
 
-The build directory must contain `halionbridge_build.lua` and the Lua build script files referenced from that file. You can find examples in `examples`.
+The build directory must contain `halionbridge_build.lua` and the Lua build script files referenced from that file. You can find examples in `examples`. If you already have Lua build scripts in a directory, run `halionbridge init <directory>` to create a simple sorted `halionbridge_build.lua` for them. Review the generated file before building: `init` lists every top-level non-infrastructure `.lua` file, so helper modules that are required by build scripts but are not build entrypoints should be removed from the list.
 
 ```bash
 # Show command-line help
 ./halionbridge --help
 
-# Show the CMake/Git-derived build version
+# Show the Git-derived build version
 ./halionbridge --version
+
+# Generate halionbridge_build.lua from top-level Lua files and exit
+./halionbridge init /path/to/build-directory
 
 # Run the generic HALion Lua builder against a build directory
 ./halionbridge /path/to/build-directory
@@ -83,6 +86,6 @@ Only one halionbridge build can run at a time for a user account. HALion resolve
 - **Embedded Bootstrap VSTPreset:** Applies the bundled HALion bootstrap preset internally; users only pass a build directory.
 - **Offline Processing Loop:** Runs a manual processing loop without opening an audio device, to keep HALion alive while LUA instrument scripts execute.
 - **Generic HALion Lua Build Scripts:** The embedded builder loads build script modules listed in `halionbridge_build.lua`; the build script modules decide what to build.
-- **Build Completion Detection:** Waits for HALion-written `.vstpreset` status marker presets in the build directory in order to know when halion is finished.
+- **Build Completion Detection:** Waits for HALion-written `.vstpreset` status marker presets in the build directory in order to know when HALion is finished. Temporary progress marker presets are cleaned after logging; failed status markers may remain after failed builds for diagnostics.
 
 See `HALION-LUA.md` for the Lua build script API used by the generic builder workflow.

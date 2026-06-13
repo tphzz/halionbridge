@@ -1,6 +1,7 @@
 #include "halionbridge/Bridge.h"
 #include "halionbridge/BuildInfo.h"
 #include "halionbridge/CrashDiagnostics.h"
+#include "BuildFile.h"
 #include "Log.h"
 #include "PathUtils.h"
 #include "PluginScan.h"
@@ -58,9 +59,14 @@ void printHelp()
               << "\n"
               << "Usage:\n"
               << "  halionbridge <build-directory> [options]\n"
+              << "  halionbridge init <build-directory> [--overwrite]\n"
               << "\n"
               << "Required argument:\n"
               << "  <build-directory>        Directory containing halionbridge_build.lua and build script Lua files.\n"
+              << "\n"
+              << "Setup command:\n"
+              << "  init <build-directory>   Generate halionbridge_build.lua from top-level Lua files and exit.\n"
+              << "  --overwrite              Replace an existing halionbridge_build.lua when used with init.\n"
               << "\n"
               << "Plugin selection:\n"
               << "  --plugin <path>          Override the HALion 7 VST3 path.\n"
@@ -90,10 +96,7 @@ void printVersion()
               << "package: " << buildInfo.packageBasename << "\n"
               << "git: " << buildInfo.gitShaShort << "\n"
               << "ref: " << ref << "\n"
-              << "built: " << buildInfo.buildTimestampUtc << "\n";
-
-    if (buildInfo.isDirty)
-        std::cout << "dirty: yes\n";
+              << "source: " << (buildInfo.isDirty ? "modified" : "clean") << "\n";
 }
 
 } // namespace
@@ -150,6 +153,29 @@ int main(int argc, char* argv[])
     }
 
     halionbridge::log::configureFromEnvironment();
+
+    if (juceArgs.size() > 0 && juceArgs[0] == "init")
+    {
+        const auto initResult = halionbridge::detail::runInitCommand(juceArgs);
+        if (initResult.exitCode == 0)
+        {
+            halionbridge::log::info("{} with {} Lua build script file(s).", initResult.message.toStdString(),
+                                    initResult.moduleNames.size());
+            if (initResult.warning.isNotEmpty())
+                halionbridge::log::warn("{}", initResult.warning.toStdString());
+        }
+        else
+        {
+            for (const auto& line : juce::StringArray::fromLines(initResult.message))
+            {
+                if (line.isNotEmpty())
+                    halionbridge::log::error("{}", line.toStdString());
+            }
+        }
+
+        return initResult.exitCode;
+    }
+
     halionbridge::installCrashDiagnostics();
     installStopHandlers();
 
