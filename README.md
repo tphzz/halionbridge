@@ -86,7 +86,7 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 ./halionbridge /path/to/build-directory --gui --nokill
 ```
 
-The SFZ converter fails before writing the build directory if two source files would generate the same output preset name. Generated Lua treats required HALion sample-zone assignments as build failures, while optional decoration such as names and loop parameters can be skipped by HALion without reporting a successful preset as corrupted.
+The SFZ converter fails before writing the build directory if two source files would generate the same output preset name. Generated Lua treats required HALion sample-zone assignments as build failures, while optional decoration such as names, loop parameters, and simple tone parameters can be skipped by HALion without reporting a successful preset as corrupted. Sample zones are named from the source sample filename without its extension.
 
 halionbridge prints timestamped console logs. The default log level is `info`, which keeps build script progress and important state changes visible while hiding host internals. Set `HALIONBRIDGE_LOGLEVEL=debug` when you need plugin loading, VST3 preset, and cleanup diagnostics. Supported values are `trace`, `debug`, `info`, `warn`, `error`, and `off`.
 

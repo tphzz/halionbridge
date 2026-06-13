@@ -3,16 +3,21 @@
 #include "halionbridge_converters/BuildDirectoryEmitter.h"
 
 #include <sfizz/Defaults.h>
+#include <sfizz/Opcode.h>
 #include <sfizz/Region.h>
 #include <sfizz/Synth.h>
+#include <sfizz/parser/Parser.h>
+#include <sfizz/parser/ParserListener.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <map>
-#include <sstream>
+#include <optional>
 #include <set>
+#include <sstream>
 
 namespace halionbridge::converters::sfz
 {
@@ -31,6 +36,8 @@ struct ConvertedRegion
     bool hasLoop = false;
     int64_t loopStart = 0;
     int64_t loopEnd = 0;
+    std::optional<float> ampVelocityToLevel;
+    std::optional<float> filterCutoff;
 };
 
 struct ConvertedSfz
@@ -45,6 +52,72 @@ struct SfzFileSearchResult
 {
     std::vector<std::filesystem::path> files;
     std::vector<Diagnostic> diagnostics;
+};
+
+struct ExplicitRegionOpcodes
+{
+    std::optional<int64_t> loopStart;
+    std::optional<int64_t> loopEnd;
+};
+
+class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
+{
+  public:
+    void onParseFullBlock(const std::string& header, const std::vector<::sfz::Opcode>& opcodes) override
+    {
+        if (header == "global")
+        {
+            globalOpcodes = opcodes;
+            masterOpcodes.clear();
+            groupOpcodes.clear();
+            return;
+        }
+
+        if (header == "master")
+        {
+            masterOpcodes = opcodes;
+            groupOpcodes.clear();
+            return;
+        }
+
+        if (header == "group")
+        {
+            groupOpcodes = opcodes;
+            return;
+        }
+
+        if (header == "region")
+            regions.push_back(collectEffectiveRegionOpcodes(opcodes));
+    }
+
+    std::vector<ExplicitRegionOpcodes> regions;
+
+  private:
+    ExplicitRegionOpcodes collectEffectiveRegionOpcodes(const std::vector<::sfz::Opcode>& regionOpcodes) const
+    {
+        auto explicitOpcodes = ExplicitRegionOpcodes{};
+        applyOpcodes(globalOpcodes, explicitOpcodes);
+        applyOpcodes(masterOpcodes, explicitOpcodes);
+        applyOpcodes(groupOpcodes, explicitOpcodes);
+        applyOpcodes(regionOpcodes, explicitOpcodes);
+        return explicitOpcodes;
+    }
+
+    static void applyOpcodes(const std::vector<::sfz::Opcode>& opcodes, ExplicitRegionOpcodes& explicitOpcodes)
+    {
+        for (const auto& rawOpcode : opcodes)
+        {
+            const auto opcode = rawOpcode.cleanUp(::sfz::kOpcodeScopeRegion);
+            if (opcode.name == "loop_start")
+                explicitOpcodes.loopStart = opcode.read(::sfz::Default::loopStart);
+            else if (opcode.name == "loop_end")
+                explicitOpcodes.loopEnd = opcode.read(::sfz::Default::loopEnd);
+        }
+    }
+
+    std::vector<::sfz::Opcode> globalOpcodes;
+    std::vector<::sfz::Opcode> masterOpcodes;
+    std::vector<::sfz::Opcode> groupOpcodes;
 };
 
 Diagnostic makeDiagnostic(DiagnosticLevel level, const std::filesystem::path& source, std::string code, std::string message)
@@ -233,12 +306,37 @@ int normalizedVelocityEndToMidi(const float value)
     return clampMidi(static_cast<int>(std::floor((static_cast<double>(value) * 128.0) + 0.000001)) - 1);
 }
 
-ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const ::sfz::Region& region, const int regionIndex)
+std::vector<ExplicitRegionOpcodes> collectExplicitRegionOpcodes(const std::filesystem::path& sfzFile, std::vector<Diagnostic>& diagnostics)
+{
+    auto collector = ExplicitRegionOpcodeCollector{};
+    auto parser = ::sfz::Parser{};
+    parser.setListener(&collector);
+    parser.parseFile(::fs::path(sfzFile.string()));
+
+    if (parser.getErrorCount() > 0)
+    {
+        diagnostics.push_back(makeWarning(sfzFile, "source-opcode-overlay",
+                                          "Could not fully inspect explicit SFZ opcodes; falling back to sfizz's resolved region model."));
+        return {};
+    }
+
+    return collector.regions;
+}
+
+std::string luaNumber(const float value)
+{
+    auto stream = std::ostringstream{};
+    stream << std::setprecision(9) << value;
+    return stream.str();
+}
+
+ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const ::sfz::Region& region,
+                              const ExplicitRegionOpcodes& explicitOpcodes)
 {
     const auto samplePath = absoluteNormalizedPath(sourceFile.parent_path() / std::filesystem::path(region.sampleId->filename()));
 
     auto converted = ConvertedRegion{};
-    converted.name = sourceFile.stem().string() + " Region " + std::to_string(regionIndex + 1);
+    converted.name = samplePath.stem().string();
     converted.samplePath = samplePath;
     converted.keyLow = clampMidi(static_cast<int>(region.keyRange.getStart()));
     converted.keyHigh = clampMidi(static_cast<int>(region.keyRange.getEnd()));
@@ -249,9 +347,13 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const ::s
     if (region.loopMode && (*region.loopMode == ::sfz::LoopMode::loop_continuous || *region.loopMode == ::sfz::LoopMode::loop_sustain))
     {
         converted.hasLoop = true;
-        converted.loopStart = region.loopRange.getStart();
-        converted.loopEnd = region.loopRange.getEnd();
+        converted.loopStart = explicitOpcodes.loopStart.value_or(region.loopRange.getStart());
+        converted.loopEnd = explicitOpcodes.loopEnd.value_or(region.loopRange.getEnd());
     }
+
+    converted.ampVelocityToLevel = ::sfz::Default::ampVeltrack.denormalizeInput(region.ampVeltrack);
+    if (!region.filters.empty())
+        converted.filterCutoff = ::sfz::Default::filterCutoff.denormalizeInput(region.filters.front().cutoff);
 
     return converted;
 }
@@ -277,6 +379,12 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
         lua << "        loop_start = " << luaInteger(region.loopStart) << ",\n"
             << "        loop_end = " << luaInteger(region.loopEnd) << ",\n";
     }
+
+    if (region.ampVelocityToLevel)
+        lua << "        amp_velocity_to_level = " << luaNumber(*region.ampVelocityToLevel) << ",\n";
+
+    if (region.filterCutoff)
+        lua << "        filter_cutoff = " << luaNumber(*region.filterCutoff) << ",\n";
 
     lua << "    },\n";
 }
@@ -344,14 +452,6 @@ std::string buildLuaSource(const ConvertedSfz& converted)
         << "        return false, err\n"
         << "    end\n\n"
         << "    layer:appendZone(zone)\n\n"
-        << "    ok, err = assignFieldRequired(zone, \"keyLow\", region.lokey)\n"
-        << "    if not ok then return false, err end\n"
-        << "    ok, err = assignFieldRequired(zone, \"keyHigh\", region.hikey)\n"
-        << "    if not ok then return false, err end\n"
-        << "    ok, err = assignFieldRequired(zone, \"velLow\", region.lovel)\n"
-        << "    if not ok then return false, err end\n"
-        << "    ok, err = assignFieldRequired(zone, \"velHigh\", region.hivel)\n"
-        << "    if not ok then return false, err end\n\n"
         << "    ok, err = setParameterRequired(zone, \"SampleOsc.Filename\", region.sample)\n"
         << "    if not ok then return false, err end\n"
         << "    ok, err = setParameterRequired(zone, \"SampleOsc.Rootkey\", region.pitch_keycenter)\n"
@@ -360,7 +460,24 @@ std::string buildLuaSource(const ConvertedSfz& converted)
         << "        setParameterIfAvailable(ctx, zone, \"SampleOsc.SustainLoopModeA\", 1)\n"
         << "        setParameterIfAvailable(ctx, zone, \"SampleOsc.SustainLoopStartA\", region.loop_start)\n"
         << "        setParameterIfAvailable(ctx, zone, \"SampleOsc.SustainLoopEndA\", region.loop_end)\n"
-        << "    end\n"
+        << "    end\n\n"
+        << "    if region.amp_velocity_to_level then\n"
+        << "        setParameterIfAvailable(ctx, zone, \"Amp Env.VelocityToLevel\", region.amp_velocity_to_level)\n"
+        << "    end\n\n"
+        << "    if region.filter_cutoff then\n"
+        << "        setParameterIfAvailable(ctx, zone, \"Filter.Cutoff\", region.filter_cutoff)\n"
+        << "    end\n\n"
+        << "    -- HALion can read sampler metadata while assigning SampleOsc.Filename.\n"
+        << "    -- Writing the playable ranges last keeps the generated SFZ mapping in\n"
+        << "    -- control even when the audio file carries its own sampler chunk.\n"
+        << "    ok, err = assignFieldRequired(zone, \"keyLow\", region.lokey)\n"
+        << "    if not ok then return false, err end\n"
+        << "    ok, err = assignFieldRequired(zone, \"keyHigh\", region.hikey)\n"
+        << "    if not ok then return false, err end\n"
+        << "    ok, err = assignFieldRequired(zone, \"velLow\", region.lovel)\n"
+        << "    if not ok then return false, err end\n"
+        << "    ok, err = assignFieldRequired(zone, \"velHigh\", region.hivel)\n"
+        << "    if not ok then return false, err end\n"
         << "    return true\n"
         << "end\n\n"
         << "return function(ctx)\n"
@@ -417,6 +534,8 @@ std::optional<ConvertedSfz> loadSfz(const std::filesystem::path& sfzFile, const 
     for (const auto& opcode : synth.getUnknownOpcodes())
         diagnostics.push_back(makeWarning(sfzFile, "unsupported-opcode", "sfizz reported unsupported opcode: " + opcode));
 
+    const auto explicitRegionOpcodes = collectExplicitRegionOpcodes(sfzFile, diagnostics);
+
     auto converted = ConvertedSfz{};
     converted.sourceFile = sfzFile;
     converted.layerName = nameOverride ? *nameOverride : displayNameFromStem(sfzFile.stem().string());
@@ -442,7 +561,9 @@ std::optional<ConvertedSfz> loadSfz(const std::filesystem::path& sfzFile, const 
             continue;
         }
 
-        converted.regions.push_back(convertRegion(sfzFile, *region, i));
+        const auto explicitOpcodes =
+            static_cast<size_t>(i) < explicitRegionOpcodes.size() ? explicitRegionOpcodes[static_cast<size_t>(i)] : ExplicitRegionOpcodes{};
+        converted.regions.push_back(convertRegion(sfzFile, *region, explicitOpcodes));
     }
 
     if (converted.regions.empty())

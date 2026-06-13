@@ -692,12 +692,27 @@ class BridgeTests : public juce::UnitTest
             const auto secondLua = secondOutput.getChildFile("000_000_synth_single_cycle_six_regions.lua").loadFileAsString();
             expectEquals(firstLua, secondLua);
             expect(firstLua.contains("saw_A3_single_cycle.wav"));
+            expect(firstLua.contains("name = \"additive_organ_A3_si\""));
+            expect(!firstLua.contains("Region 2"));
             expect(firstLua.contains("lokey = 36"));
             expect(firstLua.contains("hikey = 43"));
+            expect(firstLua.contains("lokey = 44"));
+            expect(firstLua.contains("hikey = 51"));
             expect(firstLua.contains("hivel = 127"));
             expect(firstLua.contains("pitch_keycenter = 57"));
             expect(firstLua.contains("loop_start = 0"));
             expect(firstLua.contains("loop_end = 199"));
+            expect(!firstLua.contains("loop_start = 14"));
+            expect(!firstLua.contains("loop_start = 86"));
+            expect(firstLua.contains("amp_velocity_to_level = 100"));
+            expect(firstLua.contains("filter_cutoff = 4978"));
+
+            const auto filenameAssignment = firstLua.indexOf("SampleOsc.Filename");
+            const auto rootKeyAssignment = firstLua.indexOf("SampleOsc.Rootkey");
+            const auto keyLowAssignment = firstLua.indexOf("assignFieldRequired(zone, \"keyLow\"");
+            expect(filenameAssignment >= 0);
+            expect(rootKeyAssignment > filenameAssignment);
+            expect(keyLowAssignment > rootKeyAssignment);
 
             const auto velocityLua =
                 firstOutput.getChildFile("001_001_synth_single_cycle_three_regions_three_velocity_layers.lua").loadFileAsString();
