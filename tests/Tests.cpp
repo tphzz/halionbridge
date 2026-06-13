@@ -504,6 +504,7 @@ class BridgeTests : public juce::UnitTest
             expect(source.contains("hb.version = 1"));
             expect(source.contains("hb.capabilities = {"));
             expect(source.contains("sample_zones = true"));
+            expect(source.contains("volume = true"));
             expect(source.contains("crossfade = false"));
             expect(source.contains("function hb.ok"));
             expect(source.contains("function hb.fail"));
@@ -520,6 +521,9 @@ class BridgeTests : public juce::UnitTest
             expect(source.contains("function hb.create_sample_zone"));
             expect(source.contains("pcall(function()\n        return Layer()"));
             expect(source.contains("pcall(function()\n        return Zone()"));
+            expect(source.contains("\"InheritVelocitySettings\", false"));
+            expect(source.contains("\"VelocityToLevelCurve\", 1"));
+            expect(source.contains("\"SampleOsc.Level\", sample_osc_level_db"));
             expect(!source.contains("type(Layer) ~= \"function\""));
             expect(!source.contains("type(Zone) ~= \"function\""));
             expect(source.contains("function sfz_inclusive_end_to_halion_marker"));
@@ -773,6 +777,64 @@ class BridgeTests : public juce::UnitTest
             outputDir.deleteRecursively();
         }
 
+        beginTest("SFZ Converter - writes calibrated volume and velocity response fields");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_gain_response");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_gain_response_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("gain.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 volume=-6 amp_veltrack=100\n"
+                                        "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 volume=6 amp_veltrack=0\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_gain.lua").loadFileAsString();
+            expect(lua.contains("sample_osc_level_db = 1.8"));
+            expect(lua.contains("amp_velocity_to_level = 100"));
+            expect(lua.contains("sample_osc_level_db = 13.8"));
+            expect(lua.contains("amp_velocity_to_level = 0"));
+
+            const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
+            expect(helperLua.contains("\"InheritVelocitySettings\", false"));
+            expect(helperLua.contains("\"VelocityToLevelCurve\", 1"));
+            expect(helperLua.contains("\"SampleOsc.Level\", sample_osc_level_db"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - clamps amp_veltrack to SFZ range");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_amp_veltrack_clamped");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_amp_veltrack_clamped_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("velocity.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 amp_veltrack=200\n"
+                                        "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 amp_veltrack=-200\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "amp-veltrack-clamped"));
+
+            const auto lua = outputDir.getChildFile("000_velocity.lua").loadFileAsString();
+            expect(lua.contains("amp_velocity_to_level = 100"));
+            expect(lua.contains("amp_velocity_to_level = -100"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
         beginTest("SFZ Converter - clamps static pitch values to HALion ranges");
         {
             auto sourceDir = cleanTempDirectory("halionbridge_sfz_static_pitch_clamped");
@@ -935,6 +997,7 @@ class BridgeTests : public juce::UnitTest
             expect(helperLua.contains("\"SampleOsc.SustainLoopEndA\", halion_loop_end"));
             expect(!firstLua.contains("start = 14"));
             expect(!firstLua.contains("start = 86"));
+            expect(firstLua.contains("sample_osc_level_db = 7.8"));
             expect(firstLua.contains("amp_velocity_to_level = 100"));
             expect(firstLua.contains("filter = {"));
             expect(firstLua.contains("cutoff = 4978"));

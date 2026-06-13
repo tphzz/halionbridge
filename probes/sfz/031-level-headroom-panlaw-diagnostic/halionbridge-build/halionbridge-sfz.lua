@@ -17,7 +17,6 @@ hb.capabilities = {
     sustain_loop = true,
     amp_envelope = true,
     amp_velocity_to_level = true,
-    volume = true,
     filter_cutoff = true,
     transpose = true,
     tune = true,
@@ -25,6 +24,7 @@ hb.capabilities = {
 
     sample_offset = false,
     sample_end = false,
+    volume = false,
     pan = false,
     pitch_bend = false,
     crossfade = false,
@@ -212,14 +212,6 @@ function hb.create_layer(ctx, name)
         return nil, err
     end
 
-    -- SFZ's default amp velocity response uses a squared curve. In HALion this
-    -- is controlled by the Main-section velocity curve on program/layer
-    -- elements, not by the amp-envelope point curve. Probe 030 verified curve
-    -- index 1 as HALion's Squared mode. Disable inheritance so generated SFZ
-    -- layers do not depend on the parent program's current UI setting.
-    hb.set_parameter_if_available(ctx, layer, "InheritVelocitySettings", false)
-    hb.set_parameter_if_available(ctx, layer, "VelocityToLevelCurve", 1)
-
     return layer
 end
 
@@ -343,11 +335,6 @@ function hb.apply_optional_sample_fields(ctx, zone, region)
     end
 
     local gain = region and region.gain or nil
-    local sample_osc_level_db = type(gain) == "table" and gain.sample_osc_level_db or region and region.sample_osc_level_db
-    if sample_osc_level_db then
-        hb.set_parameter_if_available(ctx, zone, "SampleOsc.Level", sample_osc_level_db)
-    end
-
     local amp_velocity_to_level = type(gain) == "table" and gain.amp_velocity_to_level or region and region.amp_velocity_to_level
     if amp_velocity_to_level then
         hb.set_parameter_if_available(ctx, zone, "Amp Env.VelocityToLevel", amp_velocity_to_level)

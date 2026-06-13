@@ -28,6 +28,7 @@ namespace
 {
 
 constexpr const char* kSfzHelperLuaFileName = "halionbridge-sfz.lua";
+constexpr float kHalionSfzLevelCompensationDb = 7.8f;
 
 struct ConvertedRegion
 {
@@ -43,6 +44,7 @@ struct ConvertedRegion
     bool hasLoop = false;
     int64_t loopStart = 0;
     int64_t loopEnd = 0;
+    std::optional<float> sampleOscLevelDb;
     std::optional<float> ampVelocityToLevel;
     std::optional<float> filterCutoff;
     struct
@@ -438,6 +440,34 @@ float clampPitchKeytrack(const std::filesystem::path& sourceFile, const int regi
     return clamped;
 }
 
+float clampSampleOscLevelDb(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
+                            std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= -96.0f && value <= 96.0f)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, -96.0f, 96.0f) : kHalionSfzLevelCompensationDb;
+    diagnostics.push_back(makeWarning(sourceFile, "sample-level-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " SFZ volume plus HALion compensation value " +
+                                          std::to_string(value) + " dB is outside HALion's SampleOsc.Level -96..96 dB range; using " +
+                                          std::to_string(clamped) + " dB."));
+    return clamped;
+}
+
+float clampAmpVelocityToLevel(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
+                              std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= -100.0f && value <= 100.0f)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, -100.0f, 100.0f) : 100.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "amp-veltrack-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " amp_veltrack value " +
+                                          std::to_string(value) + " is outside SFZ's -100..100 percent range; using " +
+                                          std::to_string(clamped) + "."));
+    return clamped;
+}
+
 std::vector<ExplicitRegionOpcodes> collectExplicitRegionOpcodes(const std::filesystem::path& sfzFile, std::vector<Diagnostic>& diagnostics)
 {
     auto collector = ExplicitRegionOpcodeCollector{};
@@ -475,6 +505,8 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
     converted.velocityLow = normalizedVelocityStartToMidi(region.velocityRange.getStart());
     converted.velocityHigh = normalizedVelocityEndToMidi(region.velocityRange.getEnd());
     converted.rootKey = clampMidi(static_cast<int>(region.pitchKeycenter));
+    converted.sampleOscLevelDb =
+        clampSampleOscLevelDb(sourceFile, regionIndex, region.volume + kHalionSfzLevelCompensationDb, diagnostics);
 
     const auto combinedTuneCents = region.pitch + (region.transpose * 100.0f);
     if (differsFromDefault(combinedTuneCents, 0.0f))
@@ -500,7 +532,8 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
         converted.loopEnd = explicitOpcodes.loopEnd.value_or(region.loopRange.getEnd());
     }
 
-    converted.ampVelocityToLevel = ::sfz::Default::ampVeltrack.denormalizeInput(region.ampVeltrack);
+    converted.ampVelocityToLevel =
+        clampAmpVelocityToLevel(sourceFile, regionIndex, ::sfz::Default::ampVeltrack.denormalizeInput(region.ampVeltrack), diagnostics);
     if (!region.filters.empty())
         converted.filterCutoff = ::sfz::Default::filterCutoff.denormalizeInput(region.filters.front().cutoff);
 
@@ -585,6 +618,7 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
     if (region.ampVelocityToLevel)
     {
         lua << "        gain = {\n"
+            << "            sample_osc_level_db = " << luaNumber(*region.sampleOscLevelDb) << ",\n"
             << "            amp_velocity_to_level = " << luaNumber(*region.ampVelocityToLevel) << ",\n"
             << "        },\n";
     }
