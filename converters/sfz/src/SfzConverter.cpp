@@ -10,6 +10,7 @@
 #include <sfizz/parser/ParserListener.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <fstream>
@@ -18,6 +19,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <string_view>
 
 namespace halionbridge::converters::sfz
 {
@@ -38,6 +40,19 @@ struct ConvertedRegion
     int64_t loopEnd = 0;
     std::optional<float> ampVelocityToLevel;
     std::optional<float> filterCutoff;
+    struct
+    {
+        float start = 0.0f;
+        float delay = 0.0f;
+        float attack = 0.0f;
+        float hold = 0.0f;
+        float decay = 0.0f;
+        float sustain = 1.0f;
+        float release = 0.001f;
+        float attackCurve = 0.0f;
+        float decayCurve = 0.0f;
+        float releaseCurve = 0.0f;
+    } ampEnvelope;
 };
 
 struct ConvertedSfz
@@ -58,6 +73,8 @@ struct ExplicitRegionOpcodes
 {
     std::optional<int64_t> loopStart;
     std::optional<int64_t> loopEnd;
+    std::optional<int> decayZero;
+    std::set<std::string> unsupportedAmpEnvelopeOpcodes;
 };
 
 class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
@@ -112,7 +129,48 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
                 explicitOpcodes.loopStart = opcode.read(::sfz::Default::loopStart);
             else if (opcode.name == "loop_end")
                 explicitOpcodes.loopEnd = opcode.read(::sfz::Default::loopEnd);
+            else if (opcode.name == "ampeg_decay_zero")
+                explicitOpcodes.decayZero = readZeroFlag(opcode.value);
+
+            if (isUnsupportedAmpEnvelopeOpcode(opcode.name))
+                explicitOpcodes.unsupportedAmpEnvelopeOpcodes.insert(opcode.name);
         }
+    }
+
+    static std::optional<int> readZeroFlag(const std::string& value)
+    {
+        auto parsed = 0;
+        const auto* begin = value.data();
+        const auto* end = value.data() + value.size();
+        const auto result = std::from_chars(begin, end, parsed);
+        if (result.ec == std::errc{} && result.ptr == end && (parsed == 0 || parsed == 1))
+            return parsed;
+
+        return std::nullopt;
+    }
+
+    static bool startsWith(const std::string& text, const std::string_view prefix)
+    {
+        return text.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), text.begin());
+    }
+
+    static bool isSupportedStaticAmpEnvelopeOpcode(const std::string& name)
+    {
+        static const auto supported = std::set<std::string>{"ampeg_attack", "ampeg_decay",   "ampeg_decay_zero", "ampeg_delay",
+                                                            "ampeg_hold",   "ampeg_release", "ampeg_start",      "ampeg_sustain"};
+        return supported.contains(name);
+    }
+
+    static bool isUnsupportedAmpEnvelopeOpcode(const std::string& name)
+    {
+        if (startsWith(name, "ampeg_"))
+            return !isSupportedStaticAmpEnvelopeOpcode(name);
+
+        if (!startsWith(name, "eg"))
+            return false;
+
+        return name.find("_ampeg") != std::string::npos || name.find("_amplitude") != std::string::npos ||
+               name.find("_volume") != std::string::npos;
     }
 
     std::vector<::sfz::Opcode> globalOpcodes;
@@ -306,6 +364,42 @@ int normalizedVelocityEndToMidi(const float value)
     return clampMidi(static_cast<int>(std::floor((static_cast<double>(value) * 128.0) + 0.000001)) - 1);
 }
 
+float clampEnvelopeDuration(const std::filesystem::path& sourceFile, const int regionIndex, const std::string_view name, const float value,
+                            std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= 0.0f && value <= 30.0f)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, 0.0f, 30.0f) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "amp-envelope-duration-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " " + std::string(name) + " value " +
+                                          std::to_string(value) + " is outside HALion's 0..30 second envelope-point range; using " +
+                                          std::to_string(clamped) + "."));
+    return clamped;
+}
+
+float clampEnvelopeLevel(const std::filesystem::path& sourceFile, const int regionIndex, const std::string_view name, const float value,
+                         std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= 0.0f && value <= 1.0f)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "amp-envelope-level-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " " + std::string(name) + " value " +
+                                          std::to_string(value) + " is outside HALion's 0..1 amp-envelope level range; using " +
+                                          std::to_string(clamped) + "."));
+    return clamped;
+}
+
+float decayDurationToSustain(const float decay, const float sustain, const int decayZero)
+{
+    if (decayZero == 0)
+        return decay;
+
+    return decay * std::clamp(1.0f - sustain, 0.0f, 1.0f);
+}
+
 std::vector<ExplicitRegionOpcodes> collectExplicitRegionOpcodes(const std::filesystem::path& sfzFile, std::vector<Diagnostic>& diagnostics)
 {
     auto collector = ExplicitRegionOpcodeCollector{};
@@ -330,8 +424,8 @@ std::string luaNumber(const float value)
     return stream.str();
 }
 
-ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const ::sfz::Region& region,
-                              const ExplicitRegionOpcodes& explicitOpcodes)
+ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int regionIndex, const ::sfz::Region& region,
+                              const ExplicitRegionOpcodes& explicitOpcodes, std::vector<Diagnostic>& diagnostics)
 {
     const auto samplePath = absoluteNormalizedPath(sourceFile.parent_path() / std::filesystem::path(region.sampleId->filename()));
 
@@ -343,6 +437,16 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const ::s
     converted.velocityLow = normalizedVelocityStartToMidi(region.velocityRange.getStart());
     converted.velocityHigh = normalizedVelocityEndToMidi(region.velocityRange.getEnd());
     converted.rootKey = clampMidi(static_cast<int>(region.pitchKeycenter));
+
+    converted.ampEnvelope.start = clampEnvelopeLevel(sourceFile, regionIndex, "ampeg_start", region.amplitudeEG.start, diagnostics);
+    converted.ampEnvelope.delay = clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_delay", region.amplitudeEG.delay, diagnostics);
+    converted.ampEnvelope.attack = clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_attack", region.amplitudeEG.attack, diagnostics);
+    converted.ampEnvelope.hold = clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_hold", region.amplitudeEG.hold, diagnostics);
+    converted.ampEnvelope.sustain = clampEnvelopeLevel(sourceFile, regionIndex, "ampeg_sustain", region.amplitudeEG.sustain, diagnostics);
+    const auto decay = clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_decay", region.amplitudeEG.decay, diagnostics);
+    converted.ampEnvelope.decay = decayDurationToSustain(decay, converted.ampEnvelope.sustain, explicitOpcodes.decayZero.value_or(1));
+    converted.ampEnvelope.release =
+        clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_release", region.amplitudeEG.release, diagnostics);
 
     if (region.loopMode && (*region.loopMode == ::sfz::LoopMode::loop_continuous || *region.loopMode == ::sfz::LoopMode::loop_sustain))
     {
@@ -363,6 +467,41 @@ std::string luaInteger(const int64_t value)
     return std::to_string(value);
 }
 
+void appendEnvelopePointLua(std::ostringstream& lua, const float level, const float duration, const float curve)
+{
+    lua << "            { level = " << luaNumber(level) << ", duration = " << luaNumber(duration) << ", curve = " << luaNumber(curve)
+        << " },\n";
+}
+
+void appendAmpEnvelopeLua(std::ostringstream& lua, const ConvertedRegion& region)
+{
+    auto sustainIndex = 3;
+    if (region.ampEnvelope.delay > 0.0f)
+        ++sustainIndex;
+    if (region.ampEnvelope.hold > 0.0f)
+        ++sustainIndex;
+
+    lua << "        amp_envelope = {\n"
+        << "            points = {\n";
+
+    appendEnvelopePointLua(lua, region.ampEnvelope.start, 0.0f, 0.0f);
+
+    if (region.ampEnvelope.delay > 0.0f)
+        appendEnvelopePointLua(lua, region.ampEnvelope.start, region.ampEnvelope.delay, 0.0f);
+
+    appendEnvelopePointLua(lua, 1.0f, region.ampEnvelope.attack, region.ampEnvelope.attackCurve);
+
+    if (region.ampEnvelope.hold > 0.0f)
+        appendEnvelopePointLua(lua, 1.0f, region.ampEnvelope.hold, 0.0f);
+
+    appendEnvelopePointLua(lua, region.ampEnvelope.sustain, region.ampEnvelope.decay, region.ampEnvelope.decayCurve);
+    appendEnvelopePointLua(lua, 0.0f, region.ampEnvelope.release, region.ampEnvelope.releaseCurve);
+
+    lua << "            },\n"
+        << "            sustain_index = " << sustainIndex << ",\n"
+        << "        },\n";
+}
+
 void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
 {
     lua << "    {\n"
@@ -373,6 +512,8 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
         << "        lovel = " << region.velocityLow << ",\n"
         << "        hivel = " << region.velocityHigh << ",\n"
         << "        pitch_keycenter = " << region.rootKey << ",\n";
+
+    appendAmpEnvelopeLua(lua, region);
 
     if (region.hasLoop)
     {
@@ -441,6 +582,31 @@ std::string buildLuaSource(const ConvertedSfz& converted)
         << "    end\n\n"
         << "    return true\n"
         << "end\n\n"
+        << "local function setAmpEnvelopeRequired(zone, envelope)\n"
+        << "    local ok, err = pcall(function()\n"
+        << "        local points = zone:getParameter(\"Amp Env.EnvelopePoints\")\n"
+        << "        if type(points) ~= \"table\" or #points == 0 then\n"
+        << "            error(\"Amp Env.EnvelopePoints did not return an editable point table\")\n"
+        << "        end\n\n"
+        << "        while #points > #envelope.points do\n"
+        << "            removeEnvelopePoint(points, #points)\n"
+        << "        end\n\n"
+        << "        while #points < #envelope.points do\n"
+        << "            insertEnvelopePoint(points, #points, 0, 0, 0)\n"
+        << "        end\n\n"
+        << "        for i, source in ipairs(envelope.points) do\n"
+        << "            points[i].level = source.level\n"
+        << "            points[i].duration = source.duration\n"
+        << "            points[i].curve = source.curve\n"
+        << "        end\n\n"
+        << "        zone:setParameter(\"Amp Env.EnvelopePoints\", points)\n"
+        << "        zone:setParameter(\"Amp Env.SustainIndex\", envelope.sustain_index)\n"
+        << "    end)\n\n"
+        << "    if not ok then\n"
+        << "        return false, \"Failed to set required amp envelope: \" .. tostring(err)\n"
+        << "    end\n\n"
+        << "    return true\n"
+        << "end\n\n"
         << "local function appendSampleZone(ctx, layer, region)\n"
         << "    local zone = Zone()\n"
         << "    setNameIfAvailable(ctx, zone, region.name)\n\n"
@@ -455,6 +621,12 @@ std::string buildLuaSource(const ConvertedSfz& converted)
         << "    ok, err = setParameterRequired(zone, \"SampleOsc.Filename\", region.sample)\n"
         << "    if not ok then return false, err end\n"
         << "    ok, err = setParameterRequired(zone, \"SampleOsc.Rootkey\", region.pitch_keycenter)\n"
+        << "    if not ok then return false, err end\n\n"
+        << "    -- SFZ's amp envelope defaults are part of the sound: in particular,\n"
+        << "    -- ampeg_release may be zero for an immediate cutoff. HALion sample\n"
+        << "    -- zones have their own default release, so generated scripts always\n"
+        << "    -- replace the full amp envelope instead of relying on HALion defaults.\n"
+        << "    ok, err = setAmpEnvelopeRequired(zone, region.amp_envelope)\n"
         << "    if not ok then return false, err end\n\n"
         << "    if region.loop_start and region.loop_end then\n"
         << "        setParameterIfAvailable(ctx, zone, \"SampleOsc.SustainLoopModeA\", 1)\n"
@@ -563,7 +735,15 @@ std::optional<ConvertedSfz> loadSfz(const std::filesystem::path& sfzFile, const 
 
         const auto explicitOpcodes =
             static_cast<size_t>(i) < explicitRegionOpcodes.size() ? explicitRegionOpcodes[static_cast<size_t>(i)] : ExplicitRegionOpcodes{};
-        converted.regions.push_back(convertRegion(sfzFile, *region, explicitOpcodes));
+        for (const auto& opcodeName : explicitOpcodes.unsupportedAmpEnvelopeOpcodes)
+        {
+            diagnostics.push_back(makeWarning(sfzFile, "unsupported-amp-envelope",
+                                              "Region " + std::to_string(i + 1) + " uses " + opcodeName +
+                                                  "; generated Lua maps the static SFZ1 ampeg envelope but does not yet reproduce this "
+                                                  "advanced envelope feature exactly."));
+        }
+
+        converted.regions.push_back(convertRegion(sfzFile, i, *region, explicitOpcodes, diagnostics));
     }
 
     if (converted.regions.empty())

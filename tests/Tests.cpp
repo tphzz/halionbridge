@@ -661,6 +661,85 @@ class BridgeTests : public juce::UnitTest
             outputDir.deleteRecursively();
         }
 
+        beginTest("SFZ Converter - writes explicit static amp envelopes");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_amp_envelope");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_amp_envelope_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("envelope.sfz")
+                       .replaceWithText("<global> ampeg_start=10 ampeg_delay=0.02 ampeg_attack=0.25 ampeg_hold=0.1 "
+                                        "ampeg_decay=0.5 ampeg_sustain=40 ampeg_release=0\n"
+                                        "<region> sample=sample.wav lokey=60 hikey=60 pitch_keycenter=60\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_envelope.lua").loadFileAsString();
+            expect(lua.contains("amp_envelope = {"));
+            expect(lua.contains("{ level = 0.100000001, duration = 0, curve = 0 }"));
+            expect(lua.contains("{ level = 0.100000001, duration = 0.0199999996, curve = 0 }"));
+            expect(lua.contains("{ level = 1, duration = 0.25, curve = 0 }"));
+            expect(lua.contains("{ level = 1, duration = 0.100000001, curve = 0 }"));
+            expect(lua.contains("{ level = 0.400000006, duration = 0.300000012, curve = 0 }"));
+            expect(lua.contains("{ level = 0, duration = 0, curve = 0 }"));
+            expect(lua.contains("sustain_index = 5"));
+            expect(lua.contains("setAmpEnvelopeRequired(zone, region.amp_envelope)"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - writes SFZv2 default release when release is omitted");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_default_release");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_default_release_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("default_release.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=60 hikey=60 pitch_keycenter=60\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_default_release.lua").loadFileAsString();
+            expect(lua.contains("{ level = 0, duration = 0.001"));
+            expect(lua.contains("sustain_index = 3"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - reports unsupported advanced amp envelope features");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_unsupported_amp_envelope");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_unsupported_amp_envelope_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("unsupported.sfz")
+                       .replaceWithText("<group> ampeg_release_shape=2.1 ampeg_release_oncc1=1 eg01_ampeg=100\n"
+                                        "<region> sample=sample.wav lokey=60 hikey=60 pitch_keycenter=60\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "unsupported-amp-envelope"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
         beginTest("SFZ Converter - converts synth single cycle fixture deterministically");
         {
             const auto fixtureDirectory =
