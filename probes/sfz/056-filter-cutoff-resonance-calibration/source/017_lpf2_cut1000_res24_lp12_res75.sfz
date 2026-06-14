@@ -1,0 +1,12 @@
+<region>
+sample=samples/saw_A3_single_cycle.wav
+lokey=57
+hikey=57
+pitch_keycenter=57
+loop_mode=loop_continuous
+loop_start=0
+loop_end=199
+fil_type=lpf_2p
+cutoff=1000
+resonance=24
+ampeg_release=0.01

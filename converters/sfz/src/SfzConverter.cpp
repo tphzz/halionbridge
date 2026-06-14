@@ -36,6 +36,21 @@ constexpr float kHalionAmpReleaseEarlyLevel = 0.35f;
 constexpr float kHalionAmpReleaseEarlyCurve = -0.24f;
 constexpr float kHalionAmpReleaseTailCurve = -1.0f;
 constexpr float kHalionAmpDecayZeroOneScale = 0.5f;
+constexpr int kHalionClassicFilterType = 1;
+constexpr int kHalionClassicSingleFilterMode = 0;
+constexpr int kHalionClassicDualSerialMode = 1;
+constexpr int kHalionClassicLp24Shape = 0;
+constexpr int kHalionClassicLp12Shape = 2;
+constexpr int kHalionClassicLp6Shape = 3;
+constexpr int kHalionClassicBp12Shape = 4;
+constexpr int kHalionClassicHp18Shape = 9;
+constexpr int kHalionClassicHp12Shape = 10;
+constexpr int kHalionClassicHp6Shape = 11;
+constexpr int kHalionClassicBr12Shape = 12;
+constexpr int kHalionClassicBr24Shape = 13;
+constexpr int kHalionClassicApShape = 16;
+constexpr int kHalionClassicBp12Br12Shape = 19;
+constexpr float kHalionLpf2pMaxResonance = 86.0f;
 
 struct ConvertedRegion
 {
@@ -59,6 +74,11 @@ struct ConvertedRegion
     std::optional<float> ampVelocityToLevel;
     std::optional<float> ampPan;
     std::optional<float> filterCutoff;
+    std::optional<float> filterResonance;
+    std::optional<int> filterType;
+    std::optional<int> filterMode;
+    std::optional<int> filterShapeA;
+    std::optional<int> filterShapeB;
     struct
     {
         float start = 0.0f;
@@ -93,6 +113,7 @@ struct ExplicitRegionOpcodes
     std::optional<int64_t> loopStart;
     std::optional<int64_t> loopEnd;
     std::optional<int> decayZero;
+    std::optional<std::string> filterTypeText;
     std::set<std::string> unsupportedAmpEnvelopeOpcodes;
 };
 
@@ -143,6 +164,9 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
     {
         for (const auto& rawOpcode : opcodes)
         {
+            if (rawOpcode.name == "fil_type" || rawOpcode.name == "filtype")
+                explicitOpcodes.filterTypeText = lowercaseAscii(rawOpcode.value);
+
             const auto opcode = rawOpcode.cleanUp(::sfz::kOpcodeScopeRegion);
             if (opcode.name == "end")
                 explicitOpcodes.sampleEnd = opcode.read(::sfz::Default::sampleEnd);
@@ -152,6 +176,8 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
                 explicitOpcodes.loopEnd = opcode.read(::sfz::Default::loopEnd);
             else if (opcode.name == "ampeg_decay_zero")
                 explicitOpcodes.decayZero = readZeroFlag(opcode.value);
+            else if (opcode.name == "fil_type" || opcode.name == "fil&_type" || opcode.name == "filtype")
+                explicitOpcodes.filterTypeText = lowercaseAscii(opcode.value);
 
             if (isUnsupportedAmpEnvelopeOpcode(opcode.name))
                 explicitOpcodes.unsupportedAmpEnvelopeOpcodes.insert(opcode.name);
@@ -168,6 +194,13 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
             return parsed;
 
         return std::nullopt;
+    }
+
+    static std::string lowercaseAscii(std::string text)
+    {
+        std::transform(text.begin(), text.end(), text.begin(),
+                       [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return text;
     }
 
     static bool startsWith(const std::string& text, const std::string_view prefix)
@@ -561,6 +594,103 @@ float clampAmpPan(const std::filesystem::path& sourceFile, const int regionIndex
     return clamped;
 }
 
+float mapLpf2pResonanceToHalion(const float sfzResonance)
+{
+    struct Point
+    {
+        float sfz;
+        float halion;
+    };
+
+    constexpr Point points[] = {
+        {0.0f, 32.0f},
+        {3.0f, 39.0f},
+        {6.0f, 48.0f},
+        {12.0f, 63.0f},
+        {24.0f, 78.0f},
+        {40.0f, kHalionLpf2pMaxResonance},
+    };
+
+    if (!std::isfinite(sfzResonance))
+        return points[0].halion;
+
+    const auto clamped = std::clamp(sfzResonance, points[0].sfz, points[std::size(points) - 1].sfz);
+    for (size_t i = 1; i < std::size(points); ++i)
+    {
+        if (clamped <= points[i].sfz)
+        {
+            const auto span = points[i].sfz - points[i - 1].sfz;
+            const auto t = span > 0.0f ? (clamped - points[i - 1].sfz) / span : 0.0f;
+            return points[i - 1].halion + ((points[i].halion - points[i - 1].halion) * t);
+        }
+    }
+
+    return kHalionLpf2pMaxResonance;
+}
+
+float mapBaselineResonanceToHalion(const float sfzResonance, const float halionAtSfzSix)
+{
+    if (!std::isfinite(sfzResonance) || sfzResonance <= 0.0f || halionAtSfzSix <= 0.0f)
+        return 0.0f;
+
+    return std::clamp((sfzResonance / 6.0f) * halionAtSfzSix, 0.0f, kHalionLpf2pMaxResonance);
+}
+
+struct HalionFilterMapping
+{
+    int mode = kHalionClassicSingleFilterMode;
+    int shapeA = kHalionClassicLp12Shape;
+    std::optional<int> shapeB;
+    float cutoffScale = 1.0f;
+    float resonanceAtSfzSix = 0.0f;
+};
+
+std::optional<HalionFilterMapping> roughFilterMapping(const ::sfz::FilterType type)
+{
+    switch (type)
+    {
+        case ::sfz::kFilterLpf1p:
+            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicLp6Shape, std::nullopt, 0.7f, 0.0f};
+        case ::sfz::kFilterLpf2p:
+            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicLp12Shape, std::nullopt, 1.0f, 48.0f};
+        case ::sfz::kFilterLpf4p:
+            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicLp24Shape, std::nullopt, 1.0f, 66.0f};
+        case ::sfz::kFilterLpf6p:
+            return HalionFilterMapping{kHalionClassicDualSerialMode, kHalionClassicLp24Shape, kHalionClassicLp12Shape, 1.0f, 59.0f};
+        case ::sfz::kFilterHpf1p:
+            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicHp6Shape, std::nullopt, 1.0f, 0.0f};
+        case ::sfz::kFilterHpf2p:
+            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicHp12Shape, std::nullopt, 1.0f, 47.0f};
+        case ::sfz::kFilterHpf4p:
+            return HalionFilterMapping{kHalionClassicDualSerialMode, kHalionClassicHp18Shape, kHalionClassicHp6Shape, 1.0f, 50.0f};
+        case ::sfz::kFilterHpf6p:
+            return HalionFilterMapping{kHalionClassicDualSerialMode, kHalionClassicHp12Shape, kHalionClassicHp18Shape, 1.0f, 55.0f};
+        case ::sfz::kFilterBpf1p:
+        case ::sfz::kFilterBpf2p:
+            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBp12Shape, std::nullopt, 1.0f, 50.0f};
+        case ::sfz::kFilterBrf1p:
+            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBr12Shape, std::nullopt, 1.0f, 35.0f};
+        case ::sfz::kFilterBrf2p:
+            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBr24Shape, std::nullopt, 1.0f, 50.0f};
+        case ::sfz::kFilterLsh:
+            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBp12Br12Shape, std::nullopt, 1.0f, 0.0f};
+        case ::sfz::kFilterHsh:
+            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicHp6Shape, std::nullopt, 1.0f, 0.0f};
+        case ::sfz::kFilterPeq:
+            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicApShape, std::nullopt, 1.0f, 0.0f};
+        default:
+            return std::nullopt;
+    }
+}
+
+std::optional<HalionFilterMapping> roughFilterMapping(const ::sfz::FilterType type, const std::optional<std::string>& explicitTypeText)
+{
+    if (explicitTypeText && *explicitTypeText == "brf_1p")
+        return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBr12Shape, std::nullopt, 1.0f, 35.0f};
+
+    return roughFilterMapping(type);
+}
+
 std::vector<ExplicitRegionOpcodes> collectExplicitRegionOpcodes(const std::filesystem::path& sfzFile, std::vector<Diagnostic>& diagnostics)
 {
     auto collector = ExplicitRegionOpcodeCollector{};
@@ -643,7 +773,27 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
         converted.ampPan = clampAmpPan(sourceFile, regionIndex, ampPan, diagnostics);
 
     if (!region.filters.empty())
-        converted.filterCutoff = ::sfz::Default::filterCutoff.denormalizeInput(region.filters.front().cutoff);
+    {
+        const auto& filter = region.filters.front();
+        if (const auto mapping = roughFilterMapping(filter.type, explicitOpcodes.filterTypeText))
+        {
+            converted.filterType = kHalionClassicFilterType;
+            converted.filterMode = mapping->mode;
+            converted.filterShapeA = mapping->shapeA;
+            converted.filterShapeB = mapping->shapeB;
+            converted.filterCutoff = ::sfz::Default::filterCutoff.denormalizeInput(filter.cutoff) * mapping->cutoffScale;
+            const auto sfzResonance = ::sfz::Default::filterResonance.denormalizeInput(filter.resonance);
+            converted.filterResonance = filter.type == ::sfz::kFilterLpf2p ? mapLpf2pResonanceToHalion(sfzResonance)
+                                                                           : mapBaselineResonanceToHalion(sfzResonance,
+                                                                                                           mapping->resonanceAtSfzSix);
+        }
+        else
+        {
+            diagnostics.push_back(makeWarning(sourceFile, "unsupported-filter-type",
+                                              "Region " + std::to_string(regionIndex + 1) +
+                                                  " uses an SFZ filter type that has not been mapped to HALion output."));
+        }
+    }
 
     return converted;
 }
@@ -795,9 +945,19 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
 
     if (region.filterCutoff)
     {
-        lua << "        filter = {\n"
-            << "            cutoff = " << luaNumber(*region.filterCutoff) << ",\n"
-            << "        },\n";
+        lua << "        filter = {\n";
+        if (region.filterType)
+            lua << "            type = " << *region.filterType << ",\n";
+        if (region.filterMode)
+            lua << "            mode = " << *region.filterMode << ",\n";
+        if (region.filterShapeA)
+            lua << "            shape_a = " << *region.filterShapeA << ",\n";
+        if (region.filterShapeB)
+            lua << "            shape_b = " << *region.filterShapeB << ",\n";
+        lua << "            cutoff = " << luaNumber(*region.filterCutoff) << ",\n";
+        if (region.filterResonance)
+            lua << "            resonance = " << luaNumber(*region.filterResonance) << ",\n";
+        lua << "        },\n";
     }
 
     lua << "    },\n";

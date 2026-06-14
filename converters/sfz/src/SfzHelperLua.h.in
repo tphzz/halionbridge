@@ -5,6 +5,7 @@
 namespace halionbridge::converters::sfz::detail
 {
 
-inline constexpr std::string_view kSfzHelperLuaSource = R"SFZLUA(@HALIONBRIDGE_SFZ_HELPER_LUA@)SFZLUA";
+inline constexpr std::string_view kSfzHelperLuaSource =
+@HALIONBRIDGE_SFZ_HELPER_LUA_CHUNKS@;
 
 } // namespace halionbridge::converters::sfz::detail

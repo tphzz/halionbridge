@@ -868,6 +868,118 @@ class BridgeTests : public juce::UnitTest
             outputDir.deleteRecursively();
         }
 
+        beginTest("SFZ Converter - writes approximate LPF2 filter mapping");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_lpf2_filter");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_lpf2_filter_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("filter.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 "
+                                        "fil_type=lpf_2p cutoff=1000\n"
+                                        "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 "
+                                        "fil_type=lpf_2p cutoff=2000 resonance=6\n"
+                                        "<region> sample=sample.wav lokey=59 hikey=59 pitch_keycenter=59 "
+                                        "fil_type=lpf_2p cutoff=3000 resonance=40\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_filter.lua").loadFileAsString();
+            expect(lua.contains("filter = {"));
+            expect(lua.contains("type = 1"));
+            expect(lua.contains("mode = 0"));
+            expect(lua.contains("shape_a = 2"));
+            expect(lua.contains("cutoff = 1000"));
+            expect(lua.contains("resonance = 32"));
+            expect(lua.contains("cutoff = 2000"));
+            expect(lua.contains("resonance = 48"));
+            expect(lua.contains("cutoff = 3000"));
+            expect(lua.contains("resonance = 86"));
+
+            const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
+            expect(helperLua.contains("filter_lpf2p = true"));
+            expect(helperLua.contains("filter_resonance = true"));
+            expect(helperLua.contains("\"Filter.Type\", filter_type"));
+            expect(helperLua.contains("\"Filter.ShapeA\", filter_shape_a"));
+            expect(helperLua.contains("\"Filter.ShapeB\", filter_shape_b"));
+            expect(helperLua.contains("\"Filter.Resonance\", filter_resonance"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - writes rough filter family mappings");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_filter_family");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_filter_family_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("001_lpf1.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 "
+                                        "fil_type=lpf_1p cutoff=1000 resonance=6\n"));
+            expect(sourceDir.getChildFile("002_lpf6.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 "
+                                        "fil_type=lpf_6p cutoff=1000 resonance=6\n"));
+            expect(sourceDir.getChildFile("003_brf1.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 "
+                                        "fil_type=brf_1p cutoff=1000 resonance=6\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lpf1 = outputDir.getChildFile("000_001_lpf1.lua").loadFileAsString();
+            expect(lpf1.contains("shape_a = 3"));
+            expect(lpf1.contains("cutoff = 700"));
+            expect(lpf1.contains("resonance = 0"));
+
+            const auto lpf6 = outputDir.getChildFile("001_002_lpf6.lua").loadFileAsString();
+            expect(lpf6.contains("mode = 1"));
+            expect(lpf6.contains("shape_a = 0"));
+            expect(lpf6.contains("shape_b = 2"));
+            expect(lpf6.contains("resonance = 59"));
+
+            const auto brf1 = outputDir.getChildFile("002_003_brf1.lua").loadFileAsString();
+            expect(brf1.contains("shape_a = 12"));
+            expect(brf1.contains("resonance = 35"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - reports unsupported filter types");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_unsupported_filter");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_unsupported_filter_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("filter.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 "
+                                        "fil_type=lpf_2p_sv cutoff=1000\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "unsupported-filter-type"));
+
+            const auto lua = outputDir.getChildFile("000_filter.lua").loadFileAsString();
+            expect(!lua.contains("filter = {"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
         beginTest("SFZ Converter - writes verified sample playback range fields");
         {
             auto sourceDir = cleanTempDirectory("halionbridge_sfz_sample_range");
