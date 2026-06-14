@@ -86,7 +86,7 @@ void printHelp()
               << "\n"
               << "Runtime options:\n"
               << "  --timeout-seconds <n>    Build completion timeout. Defaults to 0, which waits forever.\n"
-              << "  --build-chunk-size <n>   Number of Lua build scripts per HALion run. Defaults to 15.\n"
+              << "  --build-chunk-size <n>   Number of Lua build scripts per HALion run. Defaults to 1.\n"
               << "  --fail-fast              Stop after the first failed Lua build chunk.\n"
               << "  --gui                    Use JUCE's GUI-capable VST3 host format and show HALion's editor.\n"
               << "  --nokill                 Keep HALion loaded after build completion or failure for inspection.\n"
