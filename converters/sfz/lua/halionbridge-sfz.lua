@@ -25,6 +25,7 @@ hb.capabilities = {
     transpose = true,
     tune = true,
     pitch_keytrack = true,
+    pitch_envelope = true,
     sample_offset = true,
     sample_end = true,
 
@@ -33,7 +34,6 @@ hb.capabilities = {
     random_selection = false,
     sequence_selection = false,
     filter_envelope = false,
-    pitch_envelope = false,
 }
 
 local sampleZoneType = 1
@@ -275,14 +275,18 @@ function hb.create_sample_zone(ctx, layer, name)
 end
 
 function hb.set_amp_envelope_required(zone, envelope)
+    return hb.set_envelope_required(zone, "Amp Env", envelope)
+end
+
+function hb.set_envelope_required(zone, parameter_prefix, envelope)
     if type(envelope) ~= "table" or type(envelope.points) ~= "table" then
-        return false, "Failed to set required amp envelope: envelope points are missing"
+        return false, "Failed to set required " .. tostring(parameter_prefix) .. " envelope: envelope points are missing"
     end
 
-    return call_with_error("Failed to set required amp envelope", function()
-        local points = zone:getParameter("Amp Env.EnvelopePoints")
+    return call_with_error("Failed to set required " .. tostring(parameter_prefix) .. " envelope", function()
+        local points = zone:getParameter(parameter_prefix .. ".EnvelopePoints")
         if type(points) ~= "table" or #points == 0 then
-            error("Amp Env.EnvelopePoints did not return an editable point table")
+            error(parameter_prefix .. ".EnvelopePoints did not return an editable point table")
         end
 
         while #points > #envelope.points do
@@ -299,8 +303,8 @@ function hb.set_amp_envelope_required(zone, envelope)
             points[i].curve = source.curve
         end
 
-        zone:setParameter("Amp Env.EnvelopePoints", points)
-        zone:setParameter("Amp Env.SustainIndex", envelope.sustain_index)
+        zone:setParameter(parameter_prefix .. ".EnvelopePoints", points)
+        zone:setParameter(parameter_prefix .. ".SustainIndex", envelope.sustain_index)
     end)
 end
 
@@ -358,11 +362,11 @@ function hb.apply_optional_sample_fields(ctx, zone, region)
         -- end marker before SampleStart because HALion can clamp a later start
         -- marker against its current end marker.
         hb.set_parameter_if_available(ctx, zone, "SampleOsc.SampleEnd", sfz_inclusive_end_to_halion_marker(sample_end))
-    elseif sample_start and sample_natural_end then
+    elseif sample_natural_end then
         -- HALion can leave SampleEnd at zero for newly loaded sample zones. If
-        -- SFZ offset is used without an explicit end= opcode, initialize the
-        -- end marker to the source file's natural last frame before moving the
-        -- start marker.
+        -- SFZ does not provide an explicit end= opcode, initialize the end
+        -- marker to the source file's natural last frame before any optional
+        -- start marker or loop marker writes.
         hb.set_parameter_if_available(ctx, zone, "SampleOsc.SampleEnd", sfz_inclusive_end_to_halion_marker(sample_natural_end))
     end
     if sample_start then
@@ -440,6 +444,15 @@ function hb.apply_optional_sample_fields(ctx, zone, region)
         end
     end
 
+    local pitch_envelope = region and region.pitch_envelope or nil
+    if type(pitch_envelope) == "table" then
+        local ok, err = hb.set_parameter_required(zone, "Pitch.EnvAmount", pitch_envelope.amount)
+        if not ok then return false, err end
+
+        ok, err = hb.set_envelope_required(zone, "Pitch Env", pitch_envelope)
+        if not ok then return false, err end
+    end
+
     return true
 end
 
@@ -469,7 +482,8 @@ function hb.append_sample_zone(ctx, layer, region)
     ok, err = hb.apply_required_sample_fields(zone, region)
     if not ok then return nil, err end
 
-    hb.apply_optional_sample_fields(ctx, zone, region)
+    ok, err = hb.apply_optional_sample_fields(ctx, zone, region)
+    if not ok then return nil, err end
 
     -- HALion can read sampler metadata while assigning SampleOsc.Filename.
     -- Writing the playable ranges last keeps the generated SFZ mapping in

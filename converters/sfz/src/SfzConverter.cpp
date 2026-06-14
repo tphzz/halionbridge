@@ -36,6 +36,11 @@ constexpr float kHalionAmpReleaseEarlyLevel = 0.35f;
 constexpr float kHalionAmpReleaseEarlyCurve = -0.24f;
 constexpr float kHalionAmpReleaseTailCurve = -1.0f;
 constexpr float kHalionAmpDecayZeroOneScale = 0.5f;
+constexpr float kHalionPitchEnvelopeDecayScale = 0.30f;
+constexpr float kHalionPitchEnvelopeDecayCurve = -0.60f;
+constexpr float kHalionPitchEnvelopeReleaseDuration = 0.01f;
+constexpr float kHalionPitchEnvelopeMinDepthCents = -6000.0f;
+constexpr float kHalionPitchEnvelopeMaxDepthCents = 6000.0f;
 constexpr int kHalionClassicFilterType = 1;
 constexpr int kHalionClassicSingleFilterMode = 0;
 constexpr int kHalionClassicDualSerialMode = 1;
@@ -51,6 +56,25 @@ constexpr int kHalionClassicBr24Shape = 13;
 constexpr int kHalionClassicApShape = 16;
 constexpr int kHalionClassicBp12Br12Shape = 19;
 constexpr float kHalionLpf2pMaxResonance = 86.0f;
+
+struct ConvertedEnvelopePoint
+{
+    float level = 0.0f;
+    float duration = 0.0f;
+    float curve = 0.0f;
+};
+
+struct ConvertedEnvelope
+{
+    std::vector<ConvertedEnvelopePoint> points;
+    int sustainIndex = 0;
+};
+
+struct ConvertedPitchEnvelope
+{
+    float amount = 0.0f;
+    ConvertedEnvelope envelope;
+};
 
 struct ConvertedRegion
 {
@@ -79,6 +103,7 @@ struct ConvertedRegion
     std::optional<int> filterMode;
     std::optional<int> filterShapeA;
     std::optional<int> filterShapeB;
+    std::optional<ConvertedPitchEnvelope> pitchEnvelope;
     struct
     {
         float start = 0.0f;
@@ -113,8 +138,10 @@ struct ExplicitRegionOpcodes
     std::optional<int64_t> loopStart;
     std::optional<int64_t> loopEnd;
     std::optional<int> decayZero;
+    std::optional<float> pitchEnvelopeDepthCents;
     std::optional<std::string> filterTypeText;
     std::set<std::string> unsupportedAmpEnvelopeOpcodes;
+    std::set<std::string> unsupportedPitchEnvelopeOpcodes;
 };
 
 class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
@@ -176,11 +203,15 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
                 explicitOpcodes.loopEnd = opcode.read(::sfz::Default::loopEnd);
             else if (opcode.name == "ampeg_decay_zero")
                 explicitOpcodes.decayZero = readZeroFlag(opcode.value);
+            else if (opcode.name == "pitcheg_depth")
+                explicitOpcodes.pitchEnvelopeDepthCents = opcode.read(::sfz::Default::egDepth);
             else if (opcode.name == "fil_type" || opcode.name == "fil&_type" || opcode.name == "filtype")
                 explicitOpcodes.filterTypeText = lowercaseAscii(opcode.value);
 
             if (isUnsupportedAmpEnvelopeOpcode(opcode.name))
                 explicitOpcodes.unsupportedAmpEnvelopeOpcodes.insert(opcode.name);
+            if (isUnsupportedPitchEnvelopeOpcode(opcode.name))
+                explicitOpcodes.unsupportedPitchEnvelopeOpcodes.insert(opcode.name);
         }
     }
 
@@ -215,6 +246,13 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
         return supported.contains(name);
     }
 
+    static bool isSupportedStaticPitchEnvelopeOpcode(const std::string& name)
+    {
+        static const auto supported = std::set<std::string>{"pitcheg_attack", "pitcheg_decay",   "pitcheg_delay",
+                                                            "pitcheg_depth",  "pitcheg_hold",    "pitcheg_sustain"};
+        return supported.contains(name);
+    }
+
     static bool isUnsupportedAmpEnvelopeOpcode(const std::string& name)
     {
         if (startsWith(name, "ampeg_"))
@@ -225,6 +263,17 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
 
         return name.find("_ampeg") != std::string::npos || name.find("_amplitude") != std::string::npos ||
                name.find("_volume") != std::string::npos;
+    }
+
+    static bool isUnsupportedPitchEnvelopeOpcode(const std::string& name)
+    {
+        if (startsWith(name, "pitcheg_"))
+            return !isSupportedStaticPitchEnvelopeOpcode(name);
+
+        if (!startsWith(name, "eg"))
+            return false;
+
+        return name.find("_pitcheg") != std::string::npos || name.find("_pitch") != std::string::npos;
     }
 
     std::vector<::sfz::Opcode> globalOpcodes;
@@ -553,6 +602,50 @@ float clampPitchKeytrack(const std::filesystem::path& sourceFile, const int regi
     return clamped;
 }
 
+float clampPitchEnvelopeDepthCents(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
+                                   std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= kHalionPitchEnvelopeMinDepthCents && value <= kHalionPitchEnvelopeMaxDepthCents)
+        return value;
+
+    const auto clamped =
+        std::isfinite(value) ? std::clamp(value, kHalionPitchEnvelopeMinDepthCents, kHalionPitchEnvelopeMaxDepthCents) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "pitch-envelope-depth-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " pitcheg_depth value " +
+                                          std::to_string(value) +
+                                          " cents is outside HALion's Pitch.EnvAmount -60..60 semitone range; using " +
+                                          std::to_string(clamped) + " cents."));
+    return clamped;
+}
+
+float clampPitchEnvelopeDuration(const std::filesystem::path& sourceFile, const int regionIndex, const std::string_view name,
+                                 const float value, std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= 0.0f && value <= 30.0f)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, 0.0f, 30.0f) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "pitch-envelope-duration-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " " + std::string(name) + " value " +
+                                          std::to_string(value) + " is outside HALion's 0..30 second envelope-point range; using " +
+                                          std::to_string(clamped) + "."));
+    return clamped;
+}
+
+float clampPitchEnvelopeLevel(const std::filesystem::path& sourceFile, const int regionIndex, const std::string_view name, const float value,
+                              std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= 0.0f && value <= 1.0f)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "pitch-envelope-level-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " " + std::string(name) + " value " +
+                                          std::to_string(value) + " is outside HALion's 0..1 pitch-envelope level range; using " +
+                                          std::to_string(clamped) + "."));
+    return clamped;
+}
+
 float clampSampleOscLevelDb(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
                             std::vector<Diagnostic>& diagnostics)
 {
@@ -715,6 +808,59 @@ std::string luaNumber(const float value)
     return stream.str();
 }
 
+ConvertedPitchEnvelope convertPitchEnvelope(const std::filesystem::path& sourceFile, const int regionIndex, const ::sfz::EGDescription& pitchEG,
+                                            const float depthCents, std::vector<Diagnostic>& diagnostics)
+{
+    auto converted = ConvertedPitchEnvelope{};
+    converted.amount = clampPitchEnvelopeDepthCents(sourceFile, regionIndex, depthCents, diagnostics) / 100.0f;
+
+    const auto delay = clampPitchEnvelopeDuration(sourceFile, regionIndex, "pitcheg_delay", pitchEG.delay, diagnostics);
+    const auto attack = clampPitchEnvelopeDuration(sourceFile, regionIndex, "pitcheg_attack", pitchEG.attack, diagnostics);
+    const auto hold = clampPitchEnvelopeDuration(sourceFile, regionIndex, "pitcheg_hold", pitchEG.hold, diagnostics);
+    const auto decay = clampPitchEnvelopeDuration(sourceFile, regionIndex, "pitcheg_decay", pitchEG.decay, diagnostics);
+    const auto sustain = clampPitchEnvelopeLevel(sourceFile, regionIndex, "pitcheg_sustain", pitchEG.sustain, diagnostics);
+
+    auto& envelope = converted.envelope;
+    auto appendPoint = [&envelope](const float level, const float duration, const float curve)
+    {
+        envelope.points.push_back(ConvertedEnvelopePoint{level, duration, curve});
+    };
+
+    if (delay > 0.0f)
+    {
+        appendPoint(0.0f, 0.0f, 0.0f);
+        appendPoint(0.0f, delay, 0.0f);
+    }
+
+    if (attack > 0.0f)
+    {
+        if (envelope.points.empty())
+            appendPoint(0.0f, 0.0f, 0.0f);
+        appendPoint(1.0f, attack, 0.0f);
+    }
+    else if (envelope.points.empty())
+    {
+        appendPoint(1.0f, 0.0f, 0.0f);
+    }
+    else
+    {
+        appendPoint(1.0f, 0.0f, 0.0f);
+    }
+
+    if (hold > 0.0f)
+        appendPoint(1.0f, hold, 0.0f);
+
+    if (decay > 0.0f && sustain < 1.0f)
+        appendPoint(sustain, decay * kHalionPitchEnvelopeDecayScale, kHalionPitchEnvelopeDecayCurve);
+    else
+        appendPoint(sustain, 0.0f, 0.0f);
+
+    envelope.sustainIndex = static_cast<int>(envelope.points.size());
+    appendPoint(0.0f, kHalionPitchEnvelopeReleaseDuration, -1.0f);
+
+    return converted;
+}
+
 ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int regionIndex, const ::sfz::Region& region,
                               const ExplicitRegionOpcodes& explicitOpcodes, std::vector<Diagnostic>& diagnostics)
 {
@@ -732,7 +878,7 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
         converted.sampleOffset = region.offset;
     if (explicitOpcodes.sampleEnd)
         converted.sampleEnd = *explicitOpcodes.sampleEnd;
-    if (converted.sampleOffset && !converted.sampleEnd)
+    if (!converted.sampleEnd)
     {
         if (const auto frameCount = readWaveFrameCount(samplePath); frameCount && *frameCount > 0)
             converted.sampleNaturalEnd = *frameCount - 1;
@@ -746,6 +892,12 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
 
     if (differsFromDefault(region.pitchKeytrack, static_cast<float>(::sfz::Default::pitchKeytrack)))
         converted.pitchKeytrack = clampPitchKeytrack(sourceFile, regionIndex, region.pitchKeytrack, diagnostics);
+
+    if (region.pitchEG && explicitOpcodes.pitchEnvelopeDepthCents &&
+        differsFromDefault(*explicitOpcodes.pitchEnvelopeDepthCents, 0.0f))
+    {
+        converted.pitchEnvelope = convertPitchEnvelope(sourceFile, regionIndex, *region.pitchEG, *explicitOpcodes.pitchEnvelopeDepthCents, diagnostics);
+    }
 
     (void)clampEnvelopeLevel(sourceFile, regionIndex, "ampeg_start", region.amplitudeEG.start, diagnostics);
     converted.ampEnvelope.start = 0.0f;
@@ -914,6 +1066,19 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
 
     appendAmpEnvelopeLua(lua, region);
 
+    if (region.pitchEnvelope)
+    {
+        lua << "        pitch_envelope = {\n"
+            << "            amount = " << luaNumber(region.pitchEnvelope->amount) << ",\n"
+            << "            points = {\n";
+        for (const auto& point : region.pitchEnvelope->envelope.points)
+            lua << "                { level = " << luaNumber(point.level) << ", duration = " << luaNumber(point.duration)
+                << ", curve = " << luaNumber(point.curve) << " },\n";
+        lua << "            },\n"
+            << "            sustain_index = " << region.pitchEnvelope->envelope.sustainIndex << ",\n"
+            << "        },\n";
+    }
+
     if (region.tuneCents || region.pitchKeytrack)
     {
         lua << "        pitch = {\n";
@@ -1055,6 +1220,13 @@ std::optional<ConvertedSfz> loadSfz(const std::filesystem::path& sfzFile, const 
                                               "Region " + std::to_string(i + 1) + " uses " + opcodeName +
                                                   "; generated Lua maps the static SFZ1 ampeg envelope but does not yet reproduce this "
                                                   "advanced envelope feature exactly."));
+        }
+        for (const auto& opcodeName : explicitOpcodes.unsupportedPitchEnvelopeOpcodes)
+        {
+            diagnostics.push_back(makeWarning(sfzFile, "unsupported-pitch-envelope",
+                                              "Region " + std::to_string(i + 1) + " uses " + opcodeName +
+                                                  "; generated Lua maps the current static pitcheg depth/attack/decay/hold/sustain "
+                                                  "candidate but does not yet reproduce this advanced pitch envelope feature exactly."));
         }
 
         converted.regions.push_back(convertRegion(sfzFile, i, *region, explicitOpcodes, diagnostics));

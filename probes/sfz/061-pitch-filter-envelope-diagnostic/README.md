@@ -17,10 +17,11 @@ regression.
 - `halionbridge-build/*.lua` hand-authors HALion candidates.
 - `halionbridge-build/*.vstpreset` are built through HALion and ready to load.
 
-Every SFZ reference uses `end=199`, and every HALion candidate writes
-`SampleOsc.SampleEnd=200` via the helper's inclusive-end conversion. This keeps
-the looped single-cycle sample from depending on HALion's initial sample end
-marker.
+The SFZ references intentionally omit `end=` and use only `loop_mode`,
+`loop_start`, and `loop_end`, matching the earlier working single-cycle filter
+probes. The HALion candidates still write `SampleOsc.SampleEnd=200` through the
+helper's inclusive-end conversion so HALion does not depend on an unset initial
+sample end marker.
 
 ## Generate And Build
 
@@ -54,3 +55,16 @@ build-release\halionbridge_artefacts\Release\halionbridge.exe probes\sfz\061-pit
 
 Generated on 2026-06-14. HALion build completed successfully: 1 script
 processed, 13 `.vstpreset` files saved.
+
+Manual pitch feedback:
+
+- `001` matches, confirming `pitcheg_depth=1200` can map to
+  `Pitch.EnvAmount=12` for the one-second attack ramp.
+- `002` and `003` are too high because their amount candidates intentionally
+  exceed the source depth.
+- `004` starts too high despite amount `12`, so pitch decay/start point
+  topology needs a focused follow-up before implementing pitch envelopes.
+- `006` is much too high because its amount candidate intentionally exceeds
+  the source depth.
+
+Follow-up generated as `062-pitch-envelope-decay-start-diagnostic`.

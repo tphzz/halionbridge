@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <span>
@@ -75,6 +76,50 @@ bool containsDiagnosticCode(const std::vector<halionbridge::converters::Diagnost
 {
     return std::any_of(diagnostics.begin(), diagnostics.end(),
                        [code](const halionbridge::converters::Diagnostic& diagnostic) { return diagnostic.code == code; });
+}
+
+bool writeSilentPcm16MonoWav(const juce::File& file, const int frameCount)
+{
+    if (frameCount <= 0)
+        return false;
+
+    auto stream = file.createOutputStream();
+    if (!stream)
+        return false;
+
+    const auto dataSize = static_cast<std::uint32_t>(frameCount * 2);
+    const auto writeText = [&stream](const char* text) { stream->write(text, 4); };
+    const auto writeU16 = [&stream](const std::uint16_t value)
+    {
+        const unsigned char bytes[] = {static_cast<unsigned char>(value & 0xffU), static_cast<unsigned char>((value >> 8U) & 0xffU)};
+        stream->write(bytes, sizeof(bytes));
+    };
+    const auto writeU32 = [&stream](const std::uint32_t value)
+    {
+        const unsigned char bytes[] = {static_cast<unsigned char>(value & 0xffU), static_cast<unsigned char>((value >> 8U) & 0xffU),
+                                       static_cast<unsigned char>((value >> 16U) & 0xffU),
+                                       static_cast<unsigned char>((value >> 24U) & 0xffU)};
+        stream->write(bytes, sizeof(bytes));
+    };
+
+    writeText("RIFF");
+    writeU32(36U + dataSize);
+    writeText("WAVE");
+    writeText("fmt ");
+    writeU32(16);
+    writeU16(1);
+    writeU16(1);
+    writeU32(44100);
+    writeU32(44100 * 2);
+    writeU16(2);
+    writeU16(16);
+    writeText("data");
+    writeU32(dataSize);
+
+    for (int i = 0; i < frameCount; ++i)
+        writeU16(0);
+
+    return stream->flush();
 }
 #endif
 
@@ -985,7 +1030,7 @@ class BridgeTests : public juce::UnitTest
             auto sourceDir = cleanTempDirectory("halionbridge_sfz_sample_range");
             auto outputDir = cleanTempDirectory("halionbridge_sfz_sample_range_out");
             expect(sourceDir.createDirectory());
-            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(writeSilentPcm16MonoWav(sourceDir.getChildFile("sample.wav"), 50000));
             expect(sourceDir.getChildFile("range.sfz")
                        .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 offset=22050 end=44099\n"
                                         "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 offset=44100\n"));
@@ -1001,12 +1046,14 @@ class BridgeTests : public juce::UnitTest
             expect(lua.contains("offset = 22050"));
             expect(lua.contains("finish = 44099"));
             expect(lua.contains("offset = 44100"));
+            expect(lua.contains("natural_end = 49999"));
 
             const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
             expect(helperLua.contains("sample_offset = true"));
             expect(helperLua.contains("sample_end = true"));
             expect(helperLua.contains("\"SampleOsc.SampleEnd\", sfz_inclusive_end_to_halion_marker(sample_end)"));
             expect(helperLua.contains("sample_natural_end"));
+            expect(helperLua.contains("elseif sample_natural_end then"));
             expect(helperLua.contains("\"SampleOsc.SampleStart\", sample_start"));
 
             sourceDir.deleteRecursively();
@@ -1018,7 +1065,7 @@ class BridgeTests : public juce::UnitTest
             auto sourceDir = cleanTempDirectory("halionbridge_sfz_loop_modes");
             auto outputDir = cleanTempDirectory("halionbridge_sfz_loop_modes_out");
             expect(sourceDir.createDirectory());
-            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(writeSilentPcm16MonoWav(sourceDir.getChildFile("sample.wav"), 200));
             expect(sourceDir.getChildFile("loops.sfz")
                        .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 loop_mode=loop_continuous loop_start=0 loop_end=199\n"
                                         "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 loop_mode=loop_sustain loop_start=0 loop_end=199\n"));
@@ -1034,6 +1081,7 @@ class BridgeTests : public juce::UnitTest
             expect(lua.contains("mode = \"continuous\""));
             expect(lua.contains("mode = \"sustain\""));
             expect(lua.contains("finish = 199"));
+            expect(lua.contains("natural_end = 199"));
 
             const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
             expect(helperLua.contains("loop_mode == \"sustain\""));
@@ -1066,6 +1114,44 @@ class BridgeTests : public juce::UnitTest
             const auto lua = outputDir.getChildFile("000_pitch.lua").loadFileAsString();
             expect(lua.contains("tune_cents = 1200"));
             expect(lua.contains("keytrack = 200"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - writes static pitch envelopes");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_pitch_envelope");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_pitch_envelope_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("pitch_env.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 "
+                                        "pitcheg_depth=1200 pitcheg_attack=1.0 pitcheg_sustain=100\n"
+                                        "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 "
+                                        "pitcheg_depth=1200 pitcheg_attack=0 pitcheg_decay=1.0 pitcheg_sustain=0\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_pitch_env.lua").loadFileAsString();
+            expect(lua.contains("pitch_envelope = {"));
+            expect(lua.contains("amount = 12"));
+            expect(lua.contains("{ level = 0, duration = 0, curve = 0 }"));
+            expect(lua.contains("{ level = 1, duration = 1, curve = 0 }"));
+            expect(lua.contains("sustain_index = 3"));
+            expect(lua.contains("{ level = 1, duration = 0, curve = 0 }"));
+            expect(lua.contains("{ level = 0, duration = 0.300000012, curve = -0.600000024 }"));
+            expect(lua.contains("sustain_index = 2"));
+
+            const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
+            expect(helperLua.contains("pitch_envelope = true"));
+            expect(helperLua.contains("\"Pitch.EnvAmount\""));
+            expect(helperLua.contains("\"Pitch Env\""));
 
             sourceDir.deleteRecursively();
             outputDir.deleteRecursively();
@@ -1209,6 +1295,28 @@ class BridgeTests : public juce::UnitTest
             const auto result = halionbridge::converters::sfz::convertDirectory(options);
             expect(result.succeeded);
             expect(containsDiagnosticCode(result.diagnostics, "unsupported-amp-envelope"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - reports unsupported advanced pitch envelope features");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_unsupported_pitch_envelope");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_unsupported_pitch_envelope_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("unsupported.sfz")
+                       .replaceWithText("<group> pitcheg_depth=1200 pitcheg_decay_shape=-3.8 pitcheg_depth_oncc1=50 eg01_pitch=100\n"
+                                        "<region> sample=sample.wav lokey=60 hikey=60 pitch_keycenter=60\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "unsupported-pitch-envelope"));
 
             sourceDir.deleteRecursively();
             outputDir.deleteRecursively();
