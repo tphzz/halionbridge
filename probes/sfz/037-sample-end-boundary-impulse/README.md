@@ -64,3 +64,20 @@ build-release\halionbridge_artefacts\Release\halionbridge.exe probes\sfz\037-sam
 4. The matching HALion candidate is the one whose click/no-click behavior
    matches sforzando. Metering is fine, but this probe should not depend on
    phase cancellation or release-envelope shape.
+
+## Result
+
+Manual validation on 2026-06-14 used a phase-reversed null-test setup where
+`no click` means the HALion candidate matched sforzando:
+
+- SFZ `002_end_22049_impulse_22049.sfz` against HALion `002` left a click;
+  against HALion `003_end_22050_impulse_22049.vstpreset` it canceled.
+- SFZ `005_end_44099_impulse_44099.sfz` against HALion `006` left a click;
+  against HALion `007_end_44100_impulse_44099.vstpreset` it canceled.
+- SFZ `006_offset_22050_end_44099_impulse_44099.sfz` against HALion `008` and
+  `009` left a click; against HALion
+  `010_start_22050_end_44100_impulse_44099.vstpreset` it canceled.
+
+Decision: SFZ `end=N` is inclusive and maps to HALion
+`SampleOsc.SampleEnd=N+1`. For combined `offset`/`end`, write
+`SampleOsc.SampleEnd` before `SampleOsc.SampleStart`.
