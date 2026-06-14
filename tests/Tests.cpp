@@ -287,7 +287,7 @@ class BridgeTests : public juce::UnitTest
                 expect(options.has_value());
                 if (options)
                 {
-                    expectEquals(options->buildChunkSize, 15);
+                    expectEquals(options->buildChunkSize, 1);
                     expect(!options->failFast);
                 }
             }
