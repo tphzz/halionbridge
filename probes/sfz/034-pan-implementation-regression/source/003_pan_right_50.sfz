@@ -1,0 +1,15 @@
+<group>
+ampeg_attack=0.001
+ampeg_release=0.05
+
+<region>
+sample=samples\sine_A3_single_cycle.wav
+pitch_keycenter=57
+lokey=57
+hikey=57
+lovel=0
+hivel=127
+pan=50
+loop_mode=loop_continuous
+loop_start=0
+loop_end=199
