@@ -437,8 +437,7 @@ juce::String createRuntimeModuleTextForFile(const juce::File& runtimeRoot, const
                     juce::String(slice.count) +
                     "\n"
                     "HALIONBRIDGE_BUILD_TOTAL = " +
-                    juce::String(slice.total) +
-                    "\n\n";
+                    juce::String(slice.total) + "\n\n";
     }
     else
     {
@@ -460,8 +459,8 @@ juce::String createRuntimeModuleTextForFile(const juce::File& runtimeRoot, const
            "if runtimeRoot:sub(-1) ~= \"/\" then\n"
            "    runtimeRoot = runtimeRoot .. \"/\"\n"
            "end\n"
-           "HALIONBRIDGE_RUNTIME_ROOT = runtimeRoot\n\n"
-           + sliceText +
+           "HALIONBRIDGE_RUNTIME_ROOT = runtimeRoot\n\n" +
+           sliceText +
            "local runtimePathPrefix = runtimeRoot .. \"?.lua;\" .. runtimeRoot .. \"?/init.lua;\"\n"
            "if not package.path:find(runtimePathPrefix, 1, true) then\n"
            "    package.path = runtimePathPrefix .. package.path\n"
@@ -1025,8 +1024,7 @@ RunResult Bridge::Impl::runDetailed(const AppOptions& options)
 
     if (slices.empty())
     {
-        log::warn("Could not statically split {} into build chunks; running it as one HALion Lua invocation.",
-                  kBuildFileName);
+        log::warn("Could not statically split {} into build chunks; running it as one HALion Lua invocation.", kBuildFileName);
         return runSingleInvocation(options, runtimeRoot, {});
     }
 
@@ -1039,8 +1037,8 @@ RunResult Bridge::Impl::runDetailed(const AppOptions& options)
     for (size_t i = 0; i < slices.size(); ++i)
     {
         const auto& slice = slices[i];
-        log::info("Starting build chunk {}/{}: scripts {}-{} of {}.", static_cast<int>(i + 1), static_cast<int>(slices.size()),
-                  slice.start, slice.end(), slice.total);
+        log::info("Starting build chunk {}/{}: scripts {}-{} of {}.", static_cast<int>(i + 1), static_cast<int>(slices.size()), slice.start,
+                  slice.end(), slice.total);
 
         const auto result = runSingleInvocation(options, runtimeRoot, slice);
         if (result == RunResult::success)

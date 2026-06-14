@@ -191,8 +191,8 @@ int runConvertCommand(std::span<const std::string> args)
 
     if (converter->runWithContext != nullptr)
     {
-        auto context = halionbridge::converters::ConverterRunContext{
-            [](const halionbridge::converters::Diagnostic& diagnostic, void*) { logDiagnostic(diagnostic); }, nullptr};
+        auto context = halionbridge::converters::ConverterRunContext{[](const halionbridge::converters::Diagnostic& diagnostic, void*)
+                                                                     { logDiagnostic(diagnostic); }, nullptr};
         result = converter->runWithContext(converterArgs, context);
         usedStreamingContext = true;
     }
