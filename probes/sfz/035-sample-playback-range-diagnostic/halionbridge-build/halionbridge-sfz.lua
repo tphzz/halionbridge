@@ -23,9 +23,9 @@ hb.capabilities = {
     transpose = true,
     tune = true,
     pitch_keytrack = true,
-    sample_offset = true,
-    sample_end = true,
 
+    sample_offset = false,
+    sample_end = false,
     pitch_bend = false,
     crossfade = false,
     random_selection = false,
@@ -326,20 +326,6 @@ function hb.apply_required_sample_fields(zone, region)
 end
 
 function hb.apply_optional_sample_fields(ctx, zone, region)
-    local playback = region and region.sample_playback or nil
-    local sample_start = type(playback) == "table" and (playback.offset or playback.start) or region and region.sample_start
-    local sample_end = type(playback) == "table" and (playback.finish or playback["end"]) or region and region.sample_end
-    if sample_end then
-        -- SFZ end is inclusive, but HALion's SampleEnd is a marker position.
-        -- Probe 037 verified that SFZ end=N must be written as N+1. Write the
-        -- end marker before SampleStart because HALion can clamp a later start
-        -- marker against its current end marker.
-        hb.set_parameter_if_available(ctx, zone, "SampleOsc.SampleEnd", sfz_inclusive_end_to_halion_marker(sample_end))
-    end
-    if sample_start then
-        hb.set_parameter_if_available(ctx, zone, "SampleOsc.SampleStart", sample_start)
-    end
-
     local loop = region and region.loop or nil
     local loop_start = type(loop) == "table" and loop.start or region and region.loop_start
     local loop_end = type(loop) == "table" and (loop.finish or loop["end"]) or region and region.loop_end

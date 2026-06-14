@@ -39,6 +39,8 @@ struct ConvertedRegion
     int velocityLow = 0;
     int velocityHigh = 127;
     int rootKey = 60;
+    std::optional<int64_t> sampleOffset;
+    std::optional<int64_t> sampleEnd;
     std::optional<float> tuneCents;
     std::optional<float> pitchKeytrack;
     bool hasLoop = false;
@@ -519,6 +521,10 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
     converted.velocityLow = normalizedVelocityStartToMidi(region.velocityRange.getStart());
     converted.velocityHigh = normalizedVelocityEndToMidi(region.velocityRange.getEnd());
     converted.rootKey = clampMidi(static_cast<int>(region.pitchKeycenter));
+    if (region.offset != ::sfz::Default::offset)
+        converted.sampleOffset = region.offset;
+    if (region.sampleEnd != ::sfz::Default::sampleEnd)
+        converted.sampleEnd = region.sampleEnd;
     converted.sampleOscLevelDb =
         clampSampleOscLevelDb(sourceFile, regionIndex, region.volume + kHalionSfzLevelCompensationDb, diagnostics);
 
@@ -603,8 +609,12 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
     lua << "    {\n"
         << "        name = " << luaQuotedString(region.name) << ",\n"
         << "        sample_playback = {\n"
-        << "            sample = " << luaQuotedString(toGenericString(region.samplePath)) << ",\n"
-        << "        },\n"
+        << "            sample = " << luaQuotedString(toGenericString(region.samplePath)) << ",\n";
+    if (region.sampleOffset)
+        lua << "            offset = " << luaInteger(*region.sampleOffset) << ",\n";
+    if (region.sampleEnd)
+        lua << "            finish = " << luaInteger(*region.sampleEnd) << ",\n";
+    lua << "        },\n"
         << "        mapping = {\n"
         << "            key_low = " << region.keyLow << ",\n"
         << "            key_high = " << region.keyHigh << ",\n"

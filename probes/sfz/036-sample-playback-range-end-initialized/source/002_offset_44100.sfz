@@ -1,0 +1,12 @@
+<group>
+ampeg_attack=0.001
+ampeg_release=0.05
+
+<region>
+sample=samples\segmented_four_tones.wav
+pitch_keycenter=57
+lokey=57
+hikey=57
+lovel=0
+hivel=127
+offset=44100

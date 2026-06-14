@@ -506,6 +506,8 @@ class BridgeTests : public juce::UnitTest
             expect(source.contains("sample_zones = true"));
             expect(source.contains("volume = true"));
             expect(source.contains("pan = true"));
+            expect(source.contains("sample_offset = true"));
+            expect(source.contains("sample_end = true"));
             expect(source.contains("crossfade = false"));
             expect(source.contains("function hb.ok"));
             expect(source.contains("function hb.fail"));
@@ -861,6 +863,38 @@ class BridgeTests : public juce::UnitTest
             const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
             expect(helperLua.contains("pan = true"));
             expect(helperLua.contains("\"Amp.Pan\", amp_pan"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - writes verified sample playback range fields");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_sample_range");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_sample_range_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("range.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 offset=22050 end=44099\n"
+                                        "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 offset=44100\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_range.lua").loadFileAsString();
+            expect(lua.contains("offset = 22050"));
+            expect(lua.contains("finish = 44099"));
+            expect(lua.contains("offset = 44100"));
+
+            const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
+            expect(helperLua.contains("sample_offset = true"));
+            expect(helperLua.contains("sample_end = true"));
+            expect(helperLua.contains("\"SampleOsc.SampleEnd\", sfz_inclusive_end_to_halion_marker(sample_end)"));
+            expect(helperLua.contains("\"SampleOsc.SampleStart\", sample_start"));
 
             sourceDir.deleteRecursively();
             outputDir.deleteRecursively();
