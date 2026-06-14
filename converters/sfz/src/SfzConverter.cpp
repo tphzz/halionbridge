@@ -229,8 +229,7 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
 
     static std::string lowercaseAscii(std::string text)
     {
-        std::transform(text.begin(), text.end(), text.begin(),
-                       [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::transform(text.begin(), text.end(), text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
         return text;
     }
 
@@ -248,8 +247,8 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
 
     static bool isSupportedStaticPitchEnvelopeOpcode(const std::string& name)
     {
-        static const auto supported = std::set<std::string>{"pitcheg_attack", "pitcheg_decay",   "pitcheg_delay",
-                                                            "pitcheg_depth",  "pitcheg_hold",    "pitcheg_sustain"};
+        static const auto supported =
+            std::set<std::string>{"pitcheg_attack", "pitcheg_decay", "pitcheg_delay", "pitcheg_depth", "pitcheg_hold", "pitcheg_sustain"};
         return supported.contains(name);
     }
 
@@ -586,10 +585,10 @@ float clampPitchTuneCents(const std::filesystem::path& sourceFile, const int reg
         return value;
 
     const auto clamped = std::isfinite(value) ? std::clamp(value, -1200.0f, 1200.0f) : 0.0f;
-    diagnostics.push_back(makeWarning(sourceFile, "pitch-tune-clamped",
-                                      "Region " + std::to_string(regionIndex + 1) + " combined transpose/tune value " +
-                                          std::to_string(value) + " cents is outside HALion's SampleOsc.Tune -1200..1200 cent range; using " +
-                                          std::to_string(clamped) + "."));
+    diagnostics.push_back(
+        makeWarning(sourceFile, "pitch-tune-clamped",
+                    "Region " + std::to_string(regionIndex + 1) + " combined transpose/tune value " + std::to_string(value) +
+                        " cents is outside HALion's SampleOsc.Tune -1200..1200 cent range; using " + std::to_string(clamped) + "."));
     return clamped;
 }
 
@@ -601,9 +600,9 @@ float clampPitchKeytrack(const std::filesystem::path& sourceFile, const int regi
 
     const auto clamped = std::isfinite(value) ? std::clamp(value, -200.0f, 200.0f) : 100.0f;
     diagnostics.push_back(makeWarning(sourceFile, "pitch-keytrack-clamped",
-                                      "Region " + std::to_string(regionIndex + 1) + " pitch_keytrack value " +
-                                          std::to_string(value) + " is outside HALion's Pitch.KeyFollow -200..200 percent range; using " +
-                                          std::to_string(clamped) + "."));
+                                      "Region " + std::to_string(regionIndex + 1) + " pitch_keytrack value " + std::to_string(value) +
+                                          " is outside HALion's Pitch.KeyFollow -200..200 percent range; using " + std::to_string(clamped) +
+                                          "."));
     return clamped;
 }
 
@@ -616,8 +615,7 @@ float clampPitchEnvelopeDepthCents(const std::filesystem::path& sourceFile, cons
     const auto clamped =
         std::isfinite(value) ? std::clamp(value, kHalionPitchEnvelopeMinDepthCents, kHalionPitchEnvelopeMaxDepthCents) : 0.0f;
     diagnostics.push_back(makeWarning(sourceFile, "pitch-envelope-depth-clamped",
-                                      "Region " + std::to_string(regionIndex + 1) + " pitcheg_depth value " +
-                                          std::to_string(value) +
+                                      "Region " + std::to_string(regionIndex + 1) + " pitcheg_depth value " + std::to_string(value) +
                                           " cents is outside HALion's Pitch.EnvAmount -60..60 semitone range; using " +
                                           std::to_string(clamped) + " cents."));
     return clamped;
@@ -637,8 +635,8 @@ float clampPitchEnvelopeDuration(const std::filesystem::path& sourceFile, const 
     return clamped;
 }
 
-float clampPitchEnvelopeLevel(const std::filesystem::path& sourceFile, const int regionIndex, const std::string_view name, const float value,
-                              std::vector<Diagnostic>& diagnostics)
+float clampPitchEnvelopeLevel(const std::filesystem::path& sourceFile, const int regionIndex, const std::string_view name,
+                              const float value, std::vector<Diagnostic>& diagnostics)
 {
     if (std::isfinite(value) && value >= 0.0f && value <= 1.0f)
         return value;
@@ -673,14 +671,12 @@ float clampAmpVelocityToLevel(const std::filesystem::path& sourceFile, const int
 
     const auto clamped = std::isfinite(value) ? std::clamp(value, -100.0f, 100.0f) : 100.0f;
     diagnostics.push_back(makeWarning(sourceFile, "amp-veltrack-clamped",
-                                      "Region " + std::to_string(regionIndex + 1) + " amp_veltrack value " +
-                                          std::to_string(value) + " is outside SFZ's -100..100 percent range; using " +
-                                          std::to_string(clamped) + "."));
+                                      "Region " + std::to_string(regionIndex + 1) + " amp_veltrack value " + std::to_string(value) +
+                                          " is outside SFZ's -100..100 percent range; using " + std::to_string(clamped) + "."));
     return clamped;
 }
 
-float clampAmpPan(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
-                  std::vector<Diagnostic>& diagnostics)
+float clampAmpPan(const std::filesystem::path& sourceFile, const int regionIndex, const float value, std::vector<Diagnostic>& diagnostics)
 {
     if (std::isfinite(value) && value >= -100.0f && value <= 100.0f)
         return value;
@@ -701,12 +697,7 @@ float mapLpf2pResonanceToHalion(const float sfzResonance)
     };
 
     constexpr Point points[] = {
-        {0.0f, 32.0f},
-        {3.0f, 39.0f},
-        {6.0f, 48.0f},
-        {12.0f, 63.0f},
-        {24.0f, 78.0f},
-        {40.0f, kHalionLpf2pMaxResonance},
+        {0.0f, 32.0f}, {3.0f, 39.0f}, {6.0f, 48.0f}, {12.0f, 63.0f}, {24.0f, 78.0f}, {40.0f, kHalionLpf2pMaxResonance},
     };
 
     if (!std::isfinite(sfzResonance))
@@ -747,37 +738,37 @@ std::optional<HalionFilterMapping> roughFilterMapping(const ::sfz::FilterType ty
 {
     switch (type)
     {
-        case ::sfz::kFilterLpf1p:
-            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicLp6Shape, std::nullopt, 0.7f, 0.0f};
-        case ::sfz::kFilterLpf2p:
-            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicLp12Shape, std::nullopt, 1.0f, 48.0f};
-        case ::sfz::kFilterLpf4p:
-            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicLp24Shape, std::nullopt, 1.0f, 66.0f};
-        case ::sfz::kFilterLpf6p:
-            return HalionFilterMapping{kHalionClassicDualSerialMode, kHalionClassicLp24Shape, kHalionClassicLp12Shape, 1.0f, 59.0f};
-        case ::sfz::kFilterHpf1p:
-            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicHp6Shape, std::nullopt, 1.0f, 0.0f};
-        case ::sfz::kFilterHpf2p:
-            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicHp12Shape, std::nullopt, 1.0f, 47.0f};
-        case ::sfz::kFilterHpf4p:
-            return HalionFilterMapping{kHalionClassicDualSerialMode, kHalionClassicHp18Shape, kHalionClassicHp6Shape, 1.0f, 50.0f};
-        case ::sfz::kFilterHpf6p:
-            return HalionFilterMapping{kHalionClassicDualSerialMode, kHalionClassicHp12Shape, kHalionClassicHp18Shape, 1.0f, 55.0f};
-        case ::sfz::kFilterBpf1p:
-        case ::sfz::kFilterBpf2p:
-            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBp12Shape, std::nullopt, 1.0f, 50.0f};
-        case ::sfz::kFilterBrf1p:
-            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBr12Shape, std::nullopt, 1.0f, 35.0f};
-        case ::sfz::kFilterBrf2p:
-            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBr24Shape, std::nullopt, 1.0f, 50.0f};
-        case ::sfz::kFilterLsh:
-            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBp12Br12Shape, std::nullopt, 1.0f, 0.0f};
-        case ::sfz::kFilterHsh:
-            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicHp6Shape, std::nullopt, 1.0f, 0.0f};
-        case ::sfz::kFilterPeq:
-            return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicApShape, std::nullopt, 1.0f, 0.0f};
-        default:
-            return std::nullopt;
+    case ::sfz::kFilterLpf1p:
+        return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicLp6Shape, std::nullopt, 0.7f, 0.0f};
+    case ::sfz::kFilterLpf2p:
+        return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicLp12Shape, std::nullopt, 1.0f, 48.0f};
+    case ::sfz::kFilterLpf4p:
+        return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicLp24Shape, std::nullopt, 1.0f, 66.0f};
+    case ::sfz::kFilterLpf6p:
+        return HalionFilterMapping{kHalionClassicDualSerialMode, kHalionClassicLp24Shape, kHalionClassicLp12Shape, 1.0f, 59.0f};
+    case ::sfz::kFilterHpf1p:
+        return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicHp6Shape, std::nullopt, 1.0f, 0.0f};
+    case ::sfz::kFilterHpf2p:
+        return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicHp12Shape, std::nullopt, 1.0f, 47.0f};
+    case ::sfz::kFilterHpf4p:
+        return HalionFilterMapping{kHalionClassicDualSerialMode, kHalionClassicHp18Shape, kHalionClassicHp6Shape, 1.0f, 50.0f};
+    case ::sfz::kFilterHpf6p:
+        return HalionFilterMapping{kHalionClassicDualSerialMode, kHalionClassicHp12Shape, kHalionClassicHp18Shape, 1.0f, 55.0f};
+    case ::sfz::kFilterBpf1p:
+    case ::sfz::kFilterBpf2p:
+        return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBp12Shape, std::nullopt, 1.0f, 50.0f};
+    case ::sfz::kFilterBrf1p:
+        return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBr12Shape, std::nullopt, 1.0f, 35.0f};
+    case ::sfz::kFilterBrf2p:
+        return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBr24Shape, std::nullopt, 1.0f, 50.0f};
+    case ::sfz::kFilterLsh:
+        return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicBp12Br12Shape, std::nullopt, 1.0f, 0.0f};
+    case ::sfz::kFilterHsh:
+        return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicHp6Shape, std::nullopt, 1.0f, 0.0f};
+    case ::sfz::kFilterPeq:
+        return HalionFilterMapping{kHalionClassicSingleFilterMode, kHalionClassicApShape, std::nullopt, 1.0f, 0.0f};
+    default:
+        return std::nullopt;
     }
 }
 
@@ -813,8 +804,9 @@ std::string luaNumber(const float value)
     return stream.str();
 }
 
-ConvertedPitchEnvelope convertPitchEnvelope(const std::filesystem::path& sourceFile, const int regionIndex, const ::sfz::EGDescription& pitchEG,
-                                            const float depthCents, std::vector<Diagnostic>& diagnostics)
+ConvertedPitchEnvelope convertPitchEnvelope(const std::filesystem::path& sourceFile, const int regionIndex,
+                                            const ::sfz::EGDescription& pitchEG, const float depthCents,
+                                            std::vector<Diagnostic>& diagnostics)
 {
     auto converted = ConvertedPitchEnvelope{};
     converted.amount = clampPitchEnvelopeDepthCents(sourceFile, regionIndex, depthCents, diagnostics) / 100.0f;
@@ -827,9 +819,7 @@ ConvertedPitchEnvelope convertPitchEnvelope(const std::filesystem::path& sourceF
 
     auto& envelope = converted.envelope;
     auto appendPoint = [&envelope](const float level, const float duration, const float curve)
-    {
-        envelope.points.push_back(ConvertedEnvelopePoint{level, duration, curve});
-    };
+    { envelope.points.push_back(ConvertedEnvelopePoint{level, duration, curve}); };
 
     if (delay > 0.0f)
     {
@@ -888,8 +878,7 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
         if (const auto frameCount = readWaveFrameCount(samplePath); frameCount && *frameCount > 0)
             converted.sampleNaturalEnd = *frameCount - 1;
     }
-    converted.sampleOscLevelDb =
-        clampSampleOscLevelDb(sourceFile, regionIndex, region.volume + kHalionSfzLevelCompensationDb, diagnostics);
+    converted.sampleOscLevelDb = clampSampleOscLevelDb(sourceFile, regionIndex, region.volume + kHalionSfzLevelCompensationDb, diagnostics);
 
     const auto combinedTuneCents = region.pitch + (region.transpose * 100.0f);
     if (differsFromDefault(combinedTuneCents, 0.0f))
@@ -898,10 +887,10 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
     if (differsFromDefault(region.pitchKeytrack, static_cast<float>(::sfz::Default::pitchKeytrack)))
         converted.pitchKeytrack = clampPitchKeytrack(sourceFile, regionIndex, region.pitchKeytrack, diagnostics);
 
-    if (region.pitchEG && explicitOpcodes.pitchEnvelopeDepthCents &&
-        differsFromDefault(*explicitOpcodes.pitchEnvelopeDepthCents, 0.0f))
+    if (region.pitchEG && explicitOpcodes.pitchEnvelopeDepthCents && differsFromDefault(*explicitOpcodes.pitchEnvelopeDepthCents, 0.0f))
     {
-        converted.pitchEnvelope = convertPitchEnvelope(sourceFile, regionIndex, *region.pitchEG, *explicitOpcodes.pitchEnvelopeDepthCents, diagnostics);
+        converted.pitchEnvelope =
+            convertPitchEnvelope(sourceFile, regionIndex, *region.pitchEG, *explicitOpcodes.pitchEnvelopeDepthCents, diagnostics);
     }
 
     (void)clampEnvelopeLevel(sourceFile, regionIndex, "ampeg_start", region.amplitudeEG.start, diagnostics);
@@ -940,9 +929,9 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
             converted.filterShapeB = mapping->shapeB;
             converted.filterCutoff = ::sfz::Default::filterCutoff.denormalizeInput(filter.cutoff) * mapping->cutoffScale;
             const auto sfzResonance = ::sfz::Default::filterResonance.denormalizeInput(filter.resonance);
-            converted.filterResonance = filter.type == ::sfz::kFilterLpf2p ? mapLpf2pResonanceToHalion(sfzResonance)
-                                                                           : mapBaselineResonanceToHalion(sfzResonance,
-                                                                                                           mapping->resonanceAtSfzSix);
+            converted.filterResonance = filter.type == ::sfz::kFilterLpf2p
+                                            ? mapLpf2pResonanceToHalion(sfzResonance)
+                                            : mapBaselineResonanceToHalion(sfzResonance, mapping->resonanceAtSfzSix);
         }
         else
         {
@@ -985,8 +974,8 @@ int appendDecayEnvelopePointsLua(std::ostringstream& lua, const float sustain, c
         return 2;
     }
 
-    const auto duration = decayZero == 0 ? decay * kHalionAmpReleaseTotalScale
-                                         : decay * std::clamp(1.0f - sustain, 0.0f, 1.0f) * kHalionAmpDecayZeroOneScale;
+    const auto duration =
+        decayZero == 0 ? decay * kHalionAmpReleaseTotalScale : decay * std::clamp(1.0f - sustain, 0.0f, 1.0f) * kHalionAmpDecayZeroOneScale;
     appendEnvelopePointLua(lua, sustain, duration, kHalionAmpReleaseTailCurve);
     return 1;
 }
@@ -1314,8 +1303,8 @@ ConverterResult runConverterWithContext(std::span<const std::string> args, const
 
     if (positional.empty() || positional.size() > 2)
     {
-        result.diagnostics.push_back(makeError(
-            {}, "argument", "halionbridge convert sfz requires a source directory and optional output directory."));
+        result.diagnostics.push_back(
+            makeError({}, "argument", "halionbridge convert sfz requires a source directory and optional output directory."));
         context.report(result.diagnostics.back());
         return result;
     }
@@ -1419,9 +1408,9 @@ ConversionResult convertDirectory(const ConversionOptions& options)
 
     for (size_t i = 0; i < sfzFiles.size(); ++i)
     {
-        addDiagnostic(makeInfo(sfzFiles[i], "convert-started",
-                               "Converting " + std::to_string(i + 1) + "/" + std::to_string(sfzFiles.size()) + ": " +
-                                   sfzFiles[i].string()));
+        addDiagnostic(
+            makeInfo(sfzFiles[i], "convert-started",
+                     "Converting " + std::to_string(i + 1) + "/" + std::to_string(sfzFiles.size()) + ": " + sfzFiles[i].string()));
         auto converted = loadSfz(sfzFiles[i], options.name, result.diagnostics, result.regionsSkipped);
         reportPendingDiagnostics();
         if (!converted)
@@ -1430,8 +1419,7 @@ ConversionResult convertDirectory(const ConversionOptions& options)
         ++result.sfzFilesConverted;
         result.regionsConverted += static_cast<int>(converted->regions.size());
         addDiagnostic(makeInfo(sfzFiles[i], "convert-complete",
-                               "Converted " + sfzFiles[i].string() + " with " + std::to_string(converted->regions.size()) +
-                                   " region(s)."));
+                               "Converted " + sfzFiles[i].string() + " with " + std::to_string(converted->regions.size()) + " region(s)."));
         convertedFiles.push_back(std::move(*converted));
     }
 
@@ -1460,8 +1448,8 @@ ConversionResult convertDirectory(const ConversionOptions& options)
 
     std::vector<GeneratedLuaScript> scripts;
     scripts.reserve(convertedFiles.size() + 1);
-    scripts.push_back(GeneratedLuaScript{"", kSfzHelperLuaFileName, std::string{detail::kSfzHelperLuaSource},
-                                         GeneratedLuaFileRole::helperModule});
+    scripts.push_back(
+        GeneratedLuaScript{"", kSfzHelperLuaFileName, std::string{detail::kSfzHelperLuaSource}, GeneratedLuaFileRole::helperModule});
 
     for (size_t i = 0; i < convertedFiles.size(); ++i)
     {
@@ -1470,9 +1458,9 @@ ConversionResult convertDirectory(const ConversionOptions& options)
         scripts.push_back(GeneratedLuaScript{moduleName, moduleName, buildLuaSource(convertedFiles[i])});
     }
 
-    addDiagnostic(makeInfo(options.outputDirectory, "write-started",
-                           "Writing " + std::to_string(scripts.size()) + " generated Lua file(s) to " +
-                               options.outputDirectory.string() + "."));
+    addDiagnostic(
+        makeInfo(options.outputDirectory, "write-started",
+                 "Writing " + std::to_string(scripts.size()) + " generated Lua file(s) to " + options.outputDirectory.string() + "."));
     auto emitResult = writeBuildDirectory(BuildDirectoryRequest{options.outputDirectory, options.overwrite, scripts});
     result.buildFile = emitResult.buildFile;
     result.generatedLuaFiles = emitResult.generatedLuaFiles;
@@ -1484,9 +1472,8 @@ ConversionResult convertDirectory(const ConversionOptions& options)
 
 void registerConverter(ConverterRegistry& registry)
 {
-    registry.registerConverter(
-        ConverterDefinition{"sfz", "SFZ", "Generate HALion Lua build scripts from SFZ directories.", runConverter, runConverterWithContext,
-                            helpText});
+    registry.registerConverter(ConverterDefinition{"sfz", "SFZ", "Generate HALion Lua build scripts from SFZ directories.", runConverter,
+                                                   runConverterWithContext, helpText});
 }
 
 } // namespace halionbridge::converters::sfz
