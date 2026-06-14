@@ -53,4 +53,10 @@ Generated on 2026-06-14. `halionbridge convert sfz` generated eight build
 scripts plus `halionbridge-sfz.lua`, and the HALion build completed
 successfully with eight saved `.vstpreset` files.
 
-Manual same-number validation is pending.
+Initial manual validation found the pitch-envelope behavior generally correct,
+but HALion `SampleOsc.SampleEnd` was still `0` because the generated loop-only
+regions omitted both explicit `end=` and WAV-derived `natural_end`.
+
+Regenerated on 2026-06-14 after the converter fix. All eight generated scripts
+now include `natural_end = 199`, and the HALion build completed successfully
+again with eight saved `.vstpreset` files.

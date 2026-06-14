@@ -12,6 +12,7 @@ local regions = {
         name = "saw_A3_single_cycle",
         sample_playback = {
             sample = "C:/develop/halionbridge/probes/sfz/064-pitch-envelope-implementation-regression/source/samples/saw_A3_single_cycle.wav",
+            natural_end = 199,
         },
         mapping = {
             key_low = 57,

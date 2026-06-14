@@ -362,11 +362,11 @@ function hb.apply_optional_sample_fields(ctx, zone, region)
         -- end marker before SampleStart because HALion can clamp a later start
         -- marker against its current end marker.
         hb.set_parameter_if_available(ctx, zone, "SampleOsc.SampleEnd", sfz_inclusive_end_to_halion_marker(sample_end))
-    elseif sample_start and sample_natural_end then
+    elseif sample_natural_end then
         -- HALion can leave SampleEnd at zero for newly loaded sample zones. If
-        -- SFZ offset is used without an explicit end= opcode, initialize the
-        -- end marker to the source file's natural last frame before moving the
-        -- start marker.
+        -- SFZ does not provide an explicit end= opcode, initialize the end
+        -- marker to the source file's natural last frame before any optional
+        -- start marker or loop marker writes.
         hb.set_parameter_if_available(ctx, zone, "SampleOsc.SampleEnd", sfz_inclusive_end_to_halion_marker(sample_natural_end))
     end
     if sample_start then

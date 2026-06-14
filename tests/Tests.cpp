@@ -119,7 +119,8 @@ bool writeSilentPcm16MonoWav(const juce::File& file, const int frameCount)
     for (int i = 0; i < frameCount; ++i)
         writeU16(0);
 
-    return stream->flush();
+    stream->flush();
+    return stream->getStatus().wasOk();
 }
 #endif
 
@@ -1065,7 +1066,12 @@ class BridgeTests : public juce::UnitTest
             auto sourceDir = cleanTempDirectory("halionbridge_sfz_loop_modes");
             auto outputDir = cleanTempDirectory("halionbridge_sfz_loop_modes_out");
             expect(sourceDir.createDirectory());
-            expect(writeSilentPcm16MonoWav(sourceDir.getChildFile("sample.wav"), 200));
+            const auto fixtureSample = juce::File::getCurrentWorkingDirectory()
+                                           .getChildFile("examples")
+                                           .getChildFile("synth-single-cycle-sfz")
+                                           .getChildFile("samples")
+                                           .getChildFile("saw_A3_single_cycle.wav");
+            expect(fixtureSample.copyFileTo(sourceDir.getChildFile("sample.wav")));
             expect(sourceDir.getChildFile("loops.sfz")
                        .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 loop_mode=loop_continuous loop_start=0 loop_end=199\n"
                                         "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 loop_mode=loop_sustain loop_start=0 loop_end=199\n"));
