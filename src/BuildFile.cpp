@@ -17,11 +17,13 @@ constexpr const char* kBuildFileName = "halionbridge_build.lua";
 constexpr const char* kRuntimeModuleFileName = "halionbridge_runtime.lua";
 constexpr const char* kBuilderModuleFileName = "halionbridge_builder.lua";
 constexpr const char* kBuilderBootstrapFileName = "builder_bootstrap.lua";
+constexpr const char* kSfzHelperModuleFileName = "halionbridge-sfz.lua";
 
 bool isInfrastructureLuaFile(const juce::String& fileName)
 {
     return fileName.equalsIgnoreCase(kBuildFileName) || fileName.equalsIgnoreCase(kRuntimeModuleFileName) ||
-           fileName.equalsIgnoreCase(kBuilderModuleFileName) || fileName.equalsIgnoreCase(kBuilderBootstrapFileName);
+           fileName.equalsIgnoreCase(kBuilderModuleFileName) || fileName.equalsIgnoreCase(kBuilderBootstrapFileName) ||
+           fileName.equalsIgnoreCase(kSfzHelperModuleFileName);
 }
 
 std::string luaQuotedString(const juce::String& text)

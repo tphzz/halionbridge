@@ -165,9 +165,15 @@ void configure(Level level)
     auto logger = std::make_shared<spdlog::logger>("halionbridge", sinks.begin(), sinks.end());
     const auto configuredLevel = toSpdlogLevel(level);
     logger->set_level(configuredLevel);
-    logger->flush_on(configuredLevel == spdlog::level::off ? spdlog::level::off : configuredLevel);
+    logger->flush_on(configuredLevel == spdlog::level::off ? spdlog::level::off : spdlog::level::trace);
     spdlog::set_default_logger(std::move(logger));
     spdlog::set_level(configuredLevel);
+}
+
+void flush()
+{
+    if (auto* logger = spdlog::default_logger_raw())
+        logger->flush();
 }
 
 } // namespace halionbridge::log

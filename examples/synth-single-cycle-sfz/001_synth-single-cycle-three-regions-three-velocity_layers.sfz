@@ -1,0 +1,54 @@
+<group>
+amp_veltrack=100
+ampeg_attack=0.000999942
+cutoff=4978
+fil_type=lpf_2p
+fil_veltrack=2400
+
+<region> sample=samples\saw_A3_single_cycle.wav
+pitch_keycenter=57
+lokey=36 hikey=51
+lovel=0 hivel=63
+loop_mode=loop_continuous
+loop_start=0
+loop_end=199
+
+<region> sample=samples\additive_organ_A3_si.wav
+pitch_keycenter=57
+lokey=36 hikey=51
+lovel=64 hivel=127
+loop_mode=loop_continuous
+loop_start=0
+loop_end=199
+
+<region> sample=samples\sine_A3_single_cycle.wav
+pitch_keycenter=57
+lokey=52 hikey=67
+lovel=0 hivel=63
+loop_mode=loop_continuous
+loop_start=0
+loop_end=199
+
+<region> sample=samples\pulse25_A3_single_cy.wav
+pitch_keycenter=57
+lokey=52 hikey=67
+lovel=64 hivel=127
+loop_mode=loop_continuous
+loop_start=0
+loop_end=199
+
+<region> sample=samples\triangle_A3_single_c.wav
+pitch_keycenter=57
+lokey=68 hikey=82
+lovel=0 hivel=63
+loop_mode=loop_continuous
+loop_start=0
+loop_end=199
+
+<region> sample=samples\sample_hold_A3_singl.wav
+pitch_keycenter=57
+lokey=68 hikey=82
+lovel=64 hivel=127
+loop_mode=loop_continuous
+loop_start=0
+loop_end=199

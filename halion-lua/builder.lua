@@ -106,6 +106,15 @@ local MAX_PROGRESS_MESSAGE_BYTES = 88
 local MAX_PROGRESS_MARKER_PATH_BYTES = 240
 local TRUNCATION_SUFFIX = "..."
 
+local function globalNumber(name)
+    local value = tonumber(_G[name])
+    if value == nil then
+        return nil
+    end
+
+    return math.floor(value)
+end
+
 if scriptDir ~= "" then
     -- HALion Lua can load sibling files through require() when the builder's
     -- directory is appended to package.path. This avoids using io APIs that may
@@ -391,16 +400,29 @@ local function runBatch()
         return { ok = false, total = 0, saved = 0, failed = 1, message = message }
     end
 
-    local total = #buildScriptNames
+    local total = tonumber(globalNumber("HALIONBRIDGE_BUILD_TOTAL")) or #buildScriptNames
+    if total < #buildScriptNames then
+        total = #buildScriptNames
+    end
+
+    local sliceStart = globalNumber("HALIONBRIDGE_BUILD_SLICE_START") or 1
+    local sliceCount = globalNumber("HALIONBRIDGE_BUILD_SLICE_COUNT") or #buildScriptNames
+    if sliceStart < 1 then sliceStart = 1 end
+    if sliceCount < 0 then sliceCount = 0 end
+
+    local sliceEnd = math.min(#buildScriptNames, sliceStart + sliceCount - 1)
     local totalSaved = 0
     local totalFailed = 0
-    printFileProgress(0, total)
+    local scriptsProcessed = 0
+    printFileProgress(sliceStart - 1, total)
 
-    for index, moduleName in ipairs(buildScriptNames) do
+    for index = sliceStart, sliceEnd do
+        local moduleName = buildScriptNames[index]
         -- Repeated HALion runs in the same scripting session reload updated
         -- build script source files because package.loaded is cleared per module.
         moduleName = normalizeModuleName(moduleName)
         emit("info", "Processing " .. moduleFileName(moduleName))
+        scriptsProcessed = scriptsProcessed + 1
 
         package.loaded[moduleName] = nil
         local okModule, buildScript = pcall(require, moduleName)
@@ -440,8 +462,8 @@ local function runBatch()
 
     local ok = totalFailed == 0
     local message = ok
-        and ("Build complete. Scripts processed: " .. total .. ", presets saved: " .. totalSaved)
-        or ("Build completed with failures. Scripts processed: " .. total .. ", presets saved: " .. totalSaved .. ", failed: " .. totalFailed)
+        and ("Build chunk complete. Scripts processed: " .. scriptsProcessed .. ", presets saved: " .. totalSaved)
+        or ("Build chunk completed with failures. Scripts processed: " .. scriptsProcessed .. ", presets saved: " .. totalSaved .. ", failed: " .. totalFailed)
 
     emit(ok and "info" or "error", message)
     return { ok = ok, total = total, saved = totalSaved, failed = totalFailed, message = message }

@@ -20,9 +20,11 @@ struct AppOptions
     std::optional<std::filesystem::path> pluginPathOverride;
     std::optional<std::filesystem::path> executableFile;
     int timeoutSeconds = 0;
+    int buildChunkSize = 15;
     bool showGui = false;
     bool noKill = false;
     bool forceScan = false;
+    bool failFast = false;
 };
 
 struct BuildStatusMarkerFiles
@@ -85,6 +87,7 @@ class HALIONBRIDGE_EXPORT Bridge
     // Falls back to standard OS locations if pluginPathOverride is empty.
     // Returns std::nullopt if the plugin cannot be found.
     static std::optional<std::filesystem::path> findHalionPlugin(const std::optional<std::filesystem::path>& pluginPathOverride);
+    static std::filesystem::path getDefaultHalionPluginPath();
 
     static std::optional<VstPresetContainerInfo> inspectVstPresetContainer(std::span<const std::byte> presetData);
     static BuildStatusMarkerFiles getBuildStatusMarkerFilesForDirectory(const std::filesystem::path& directory);
@@ -93,6 +96,7 @@ class HALIONBRIDGE_EXPORT Bridge
     // This helper is for source inspection by tooling and is not a full Lua parser.
     static std::vector<std::string> parseBuildFileModuleNames(std::string_view luaText);
     static std::string createRuntimeModuleText(const std::filesystem::path& runtimeRoot);
+    static std::string createRuntimeModuleText(const std::filesystem::path& runtimeRoot, int sliceStart, int sliceCount, int totalScripts);
 
     // Core execution loop. While running, halionbridge temporarily mutates the
     // process working directory, an environment variable, and HALion user script files.

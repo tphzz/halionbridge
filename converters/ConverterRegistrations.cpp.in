@@ -1,0 +1,13 @@
+#include "halionbridge_converters/Converter.h"
+
+@HALIONBRIDGE_CONVERTER_REGISTRATION_INCLUDES@
+
+namespace halionbridge::converters
+{
+
+void registerCompiledConverters(ConverterRegistry& registry)
+{
+@HALIONBRIDGE_CONVERTER_REGISTRATION_CALLS@
+}
+
+} // namespace halionbridge::converters

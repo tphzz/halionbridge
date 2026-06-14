@@ -1,0 +1,11 @@
+#pragma once
+
+#include <string_view>
+
+namespace halionbridge::converters::sfz::detail
+{
+
+inline constexpr std::string_view kSfzHelperLuaSource =
+@HALIONBRIDGE_SFZ_HELPER_LUA_CHUNKS@;
+
+} // namespace halionbridge::converters::sfz::detail

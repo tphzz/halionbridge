@@ -19,6 +19,8 @@ This makes scripted instrument builds practical while keeping the file-writing l
 5. Build scripts create HALion objects such as layers, zones, sample mappings, parameters, and presets.
 6. HALion saves the requested output presets and writes success or failure marker presets that halionbridge observes.
 
+For source formats such as SFZ, halionbridge can also generate the Lua build directory first. The generated Lua remains normal, inspectable build source that can be edited before running the HALion build.
+
 ## What This Is
 
 - A batch automation host for HALion Lua build scripts.
@@ -37,6 +39,7 @@ This makes scripted instrument builds practical while keeping the file-writing l
 - **Batch-generate HALion presets from structured instrument data:** Generate Lua build scripts from another format or database (e.g. CSV files), run them through halionbridge, and let HALion save the resulting `.vstpreset` files.
 - **Build sample-mapped instruments programmatically:** Create layers, zones, key ranges, velocity ranges, sample assignments, loop settings, and HALion parameters from Lua instead of assembling them manually in the GUI.
 - **Converter workflows:** Generate Lua from source formats such as SFZ, run that Lua inside HALion with halionbridge, and let HALion handle the preset-writing step.
+- **SFZ-to-HALion Lua conversion:** Convert a directory of `.sfz` files into a halionbridge build directory, then run that build directory to create layer `.vstpreset` files.
 - **Regenerate preset libraries reproducibly:** Treat HALion presets as build artifacts that can be recreated from source Lua build scripts and sample files.
 - **Run HALion Lua build scripts in CI-like or headless workflows:** Execute scripted HALion builds without opening an audio device, with success/failure reported through marker presets (requires the licensed and activated HALion plugin on the build server).
 - **Debug scripted HALion builds with optional GUI inspection:** Use `--gui` or `--nokill` when a build script needs visual inspection after running.
@@ -48,7 +51,12 @@ Before running the generic builder, open HALion's **Options Editor**, go to **Sc
 - Windows: `C:\Users\<username>\Documents\Steinberg\HALion\Library\scripts`
 - macOS: `/Users/<username>/Documents/Steinberg/HALion/Library/scripts`
 
-The build directory must contain `halionbridge_build.lua` and the Lua build script files referenced from that file. You can find examples in `examples`. If you already have Lua build scripts in a directory, run `halionbridge init <directory>` to create a simple sorted `halionbridge_build.lua` for them. Review the generated file before building: `init` lists every top-level non-infrastructure `.lua` file, so helper modules that are required by build scripts but are not build entrypoints should be removed from the list.
+halionbridge looks for the HALion 7 VST3 plugin at the normal Steinberg install locations unless `--plugin` is provided:
+
+- Windows: `C:\Program Files\Common Files\VST3\Steinberg\HALion 7.vst3`
+- macOS: `/Library/Audio/Plug-Ins/VST3/Steinberg/HALion 7.vst3`
+
+The build directory must contain `halionbridge_build.lua` and the Lua build script files referenced from that file. You can find examples in `examples`. If you already have Lua build scripts in a directory, run `halionbridge init <directory>` to create a simple sorted `halionbridge_build.lua` for them. Review the generated file before building: `init` lists every top-level non-infrastructure `.lua` file, so helper modules that are required by build scripts but are not build entrypoints should be removed from the list. Converter-owned infrastructure helpers such as `halionbridge-sfz.lua` are excluded automatically.
 
 ```bash
 # Show command-line help
@@ -60,11 +68,25 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 # Generate halionbridge_build.lua from top-level Lua files and exit
 ./halionbridge init /path/to/build-directory
 
+# Generate halionbridge Lua build files next to top-level .sfz files
+./halionbridge convert sfz /path/to/sfz-source-directory
+
+# Or write generated build files to a separate directory
+./halionbridge convert sfz /path/to/sfz-source-directory /path/to/generated-build-directory
+
+# Include nested .sfz files below the source directory; generated Lua stays flat in the build root
+./halionbridge convert sfz /path/to/sfz-source-directory --recursive
+
 # Run the generic HALion Lua builder against a build directory
 ./halionbridge /path/to/build-directory
 
 # By default, halionbridge waits forever and prints a warning. Set a timeout when desired.
 ./halionbridge /path/to/build-directory --timeout-seconds 3600
+
+# Build scripts run in chunks of 15 by default and continue after failed chunks.
+# Tune chunk size or stop after the first failed chunk when desired.
+./halionbridge /path/to/build-directory --build-chunk-size 30
+./halionbridge /path/to/build-directory --fail-fast
 
 # Override the default HALion 7 VST3 plugin search path
 ./halionbridge /path/to/build-directory --plugin /path/to/custom/HALion 7.vst3
@@ -77,6 +99,8 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 ./halionbridge /path/to/build-directory --gui --nokill
 ```
 
+The SFZ converter fails before writing the build directory if two source files would generate the same output preset name. Generated output includes `halionbridge-sfz.lua`, an inspectable SFZ-owned helper module required by the generated SFZ build scripts. The entrypoint scripts keep readable normalized region data for sample playback, mapping, envelopes, loops, gain, filter, and static pitch fields. Generated Lua treats required HALion sample-zone assignments as build failures, while optional decoration such as names, loop parameters, sample playback range, and simple tone/pitch parameters can be skipped by HALion without reporting a successful preset as corrupted. Sample zones are named from the source sample filename without its extension. SFZ `offset` maps to HALion `SampleOsc.SampleStart`; for WAV-backed regions without explicit `end=`, the converter records the file's natural last frame so the helper can initialize HALion `SampleOsc.SampleEnd` before moving the start marker or writing loop markers. SFZ `end` and `loop_end` are preserved as inclusive source values in generated region data; the helper writes HALion's exclusive end marker (`end + 1`) to `SampleOsc.SampleEnd` for explicit SFZ `end`, and to `SampleOsc.SustainLoopEndA` for loop playback. SFZ `loop_mode=loop_continuous` maps to HALion's continuous sustain-loop mode, and `loop_mode=loop_sustain` maps to HALion's until-release sustain-loop mode without forcing a release-start jump. Loop markers no longer truncate `SampleOsc.SampleEnd`; only explicit SFZ sample playback `end=` does that. Static SFZ amp-envelope opcodes such as `ampeg_attack`, `ampeg_decay`, `ampeg_sustain`, and `ampeg_release` are written as explicit HALion amp envelope points, so values such as `ampeg_release=0` do not inherit HALion's default release fade. Static decay and positive release values use probe-verified curved HALion approximations of SFZ's exponential envelope behavior, including SFZ `ampeg_decay_zero` handling and sustain-zero decay without a release bump. For current sforzando parity, static `ampeg_start` values emit a zero initial amp-envelope level. SFZ volume, pan, and default amplitude velocity response are mapped through HALion's squared layer velocity curve, `Amp Env.VelocityToLevel`, per-zone `SampleOsc.Level` with the currently verified HALion compensation offset, and zone `Amp.Pan` with HALion's default pan law left unchanged; out-of-range `amp_veltrack` values are clamped to SFZ's -100..100 percent range with converter warnings before Lua is written. Static pitch support maps `pitch_keycenter` to `SampleOsc.Rootkey`, combines `transpose` and `tune` as cents for `SampleOsc.Tune`, and maps `pitch_keytrack` to `Pitch.CenterKey` plus `Pitch.KeyFollow`; out-of-range tune/keytrack values are clamped with converter warnings before Lua is written. The static pitch envelope subset maps `pitcheg_depth` from cents to HALion semitones, writes simple attack/hold/sustain points, and maps `pitcheg_decay` to the current probe-selected HALion approximation `0.30 * pitcheg_decay` with Lua curve `-0.6`; advanced pitch envelope shape, CC, velocity, and flex-EG pitch behavior remains unsupported and is reported with converter warnings. Static SFZ filters are mapped only as rough HALion Classic filter approximations for sforzando-recognized LPF, HPF, BPF, BRF, shelf, and peaking families. State-variable `_sv` filter names and `pink` remain unsupported warnings. Filter parity is approximate because sforzando/sfizz and HALion filters did not match closely in manual probes.
+
 halionbridge prints timestamped console logs. The default log level is `info`, which keeps build script progress and important state changes visible while hiding host internals. Set `HALIONBRIDGE_LOGLEVEL=debug` when you need plugin loading, VST3 preset, and cleanup diagnostics. Supported values are `trace`, `debug`, `info`, `warn`, `error`, and `off`.
 
 Only one halionbridge build can run at a time for a user account. HALion resolves temporary runtime modules from the shared HALion user script directory, so a second overlapping run exits with a clear error instead of corrupting build output.
@@ -86,6 +110,7 @@ Only one halionbridge build can run at a time for a user account. HALion resolve
 - **Embedded Bootstrap VSTPreset:** Applies the bundled HALion bootstrap preset internally; users only pass a build directory.
 - **Offline Processing Loop:** Runs a manual processing loop without opening an audio device, to keep HALion alive while LUA instrument scripts execute.
 - **Generic HALion Lua Build Scripts:** The embedded builder loads build script modules listed in `halionbridge_build.lua`; the build script modules decide what to build.
-- **Build Completion Detection:** Waits for HALion-written `.vstpreset` status marker presets in the build directory in order to know when HALion is finished. Temporary progress marker presets are cleaned after logging; failed status markers may remain after failed builds for diagnostics.
+- **Converter Setup Commands:** `halionbridge convert sfz` creates a normal halionbridge build directory from `.sfz` files without launching HALion. When no output directory is provided, generated Lua/build files are written flat into the source directory; an explicit output directory can still be passed. The generated Lua build scripts can be reviewed or edited before running `halionbridge <build-directory>`. Converter-generated Lua filenames are kept inside the build root; unsafe generated paths are rejected. Converter-generated helper modules may be written beside build scripts without being listed in `halionbridge_build.lua`.
+- **Build Completion Detection:** Runs static `halionbridge_build.lua` lists in chunks of 15 scripts by default, relaunching HALion for each chunk so later chunks can continue after a failed chunk. Waits for HALion-written `.vstpreset` status marker presets in the build directory in order to know when each chunk is finished. Temporary progress marker presets are cleaned after logging; failed status markers may remain after failed builds for diagnostics.
 
 See `HALION-LUA.md` for the Lua build script API used by the generic builder workflow.
