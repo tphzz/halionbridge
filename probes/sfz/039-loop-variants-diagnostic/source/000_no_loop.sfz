@@ -1,0 +1,9 @@
+<region>
+sample=samples/loop_segments.wav
+key=57
+pitch_keycenter=57
+loop_mode=no_loop
+ampeg_attack=0
+ampeg_decay=0
+ampeg_sustain=100
+ampeg_release=1.2

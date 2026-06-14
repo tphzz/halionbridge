@@ -64,26 +64,6 @@ local function sfz_inclusive_end_to_halion_marker(sample_index)
     return sample_index
 end
 
-local function halion_sustain_loop_mode(loop_mode)
-    if loop_mode == nil then
-        return 1
-    end
-
-    if type(loop_mode) == "number" then
-        return loop_mode
-    end
-
-    if loop_mode == "continuous" or loop_mode == "loop_continuous" then
-        return 1
-    end
-
-    if loop_mode == "sustain" or loop_mode == "until_release" or loop_mode == "loop_sustain" then
-        return 4
-    end
-
-    return 1
-end
-
 function hb.ok(message, saved)
     return {
         ok = true,
@@ -349,19 +329,12 @@ function hb.apply_optional_sample_fields(ctx, zone, region)
     local playback = region and region.sample_playback or nil
     local sample_start = type(playback) == "table" and (playback.offset or playback.start) or region and region.sample_start
     local sample_end = type(playback) == "table" and (playback.finish or playback["end"]) or region and region.sample_end
-    local sample_natural_end = type(playback) == "table" and playback.natural_end or region and region.sample_natural_end
     if sample_end then
         -- SFZ end is inclusive, but HALion's SampleEnd is a marker position.
         -- Probe 037 verified that SFZ end=N must be written as N+1. Write the
         -- end marker before SampleStart because HALion can clamp a later start
         -- marker against its current end marker.
         hb.set_parameter_if_available(ctx, zone, "SampleOsc.SampleEnd", sfz_inclusive_end_to_halion_marker(sample_end))
-    elseif sample_start and sample_natural_end then
-        -- HALion can leave SampleEnd at zero for newly loaded sample zones. If
-        -- SFZ offset is used without an explicit end= opcode, initialize the
-        -- end marker to the source file's natural last frame before moving the
-        -- start marker.
-        hb.set_parameter_if_available(ctx, zone, "SampleOsc.SampleEnd", sfz_inclusive_end_to_halion_marker(sample_natural_end))
     end
     if sample_start then
         hb.set_parameter_if_available(ctx, zone, "SampleOsc.SampleStart", sample_start)
@@ -372,16 +345,13 @@ function hb.apply_optional_sample_fields(ctx, zone, region)
     local loop_end = type(loop) == "table" and (loop.finish or loop["end"]) or region and region.loop_end
     if loop_start and loop_end then
         local halion_loop_end = sfz_inclusive_end_to_halion_marker(loop_end)
-        local loop_mode = type(loop) == "table" and loop.mode or region and region.loop_mode
-        -- SFZ loop_end is the last sample played in the loop. HALion's loop end
-        -- field is a marker position, so a 200-sample cycle with SFZ
-        -- loop_end=199 must be written as loop end marker 200. Probe 041 showed
-        -- that SampleEnd must not be truncated to the loop end for looped
-        -- samples with post-loop tails; only explicit SFZ end=... writes the
-        -- sample end marker above.
-        hb.set_parameter_if_available(ctx, zone, "SampleOsc.PlaybackMode", 0)
-        hb.set_parameter_if_available(ctx, zone, "SampleOsc.LoopSelect", 0)
-        hb.set_parameter_if_available(ctx, zone, "SampleOsc.SustainLoopModeA", halion_sustain_loop_mode(loop_mode))
+        -- SFZ loop_end is the last sample played in the loop. HALion's sample
+        -- and loop end fields are marker positions, so a 200-sample cycle with
+        -- SFZ loop_end=199 must be written as end marker 200. Setting both
+        -- SampleEnd and SustainLoopEndA avoids a correct-sounding loop marker
+        -- escaping at the sample boundary.
+        hb.set_parameter_if_available(ctx, zone, "SampleOsc.SampleEnd", halion_loop_end)
+        hb.set_parameter_if_available(ctx, zone, "SampleOsc.SustainLoopModeA", 1)
         hb.set_parameter_if_available(ctx, zone, "SampleOsc.SustainLoopStartA", loop_start)
         hb.set_parameter_if_available(ctx, zone, "SampleOsc.SustainLoopEndA", halion_loop_end)
     end

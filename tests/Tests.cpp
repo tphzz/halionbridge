@@ -894,7 +894,39 @@ class BridgeTests : public juce::UnitTest
             expect(helperLua.contains("sample_offset = true"));
             expect(helperLua.contains("sample_end = true"));
             expect(helperLua.contains("\"SampleOsc.SampleEnd\", sfz_inclusive_end_to_halion_marker(sample_end)"));
+            expect(helperLua.contains("sample_natural_end"));
             expect(helperLua.contains("\"SampleOsc.SampleStart\", sample_start"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - preserves verified loop mode semantics");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_loop_modes");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_loop_modes_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("loops.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 loop_mode=loop_continuous loop_start=0 loop_end=199\n"
+                                        "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 loop_mode=loop_sustain loop_start=0 loop_end=199\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_loops.lua").loadFileAsString();
+            expect(lua.contains("mode = \"continuous\""));
+            expect(lua.contains("mode = \"sustain\""));
+            expect(lua.contains("finish = 199"));
+
+            const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
+            expect(helperLua.contains("loop_mode == \"sustain\""));
+            expect(helperLua.contains("return 4"));
+            expect(!helperLua.contains("\"SampleOsc.SampleEnd\", halion_loop_end"));
 
             sourceDir.deleteRecursively();
             outputDir.deleteRecursively();
@@ -1056,9 +1088,13 @@ class BridgeTests : public juce::UnitTest
             expect(firstLua.contains("velocity_high = 127"));
             expect(firstLua.contains("root_key = 57"));
             expect(firstLua.contains("loop = {"));
+            expect(firstLua.contains("mode = \"continuous\""));
             expect(firstLua.contains("start = 0"));
             expect(firstLua.contains("finish = 199"));
-            expect(helperLua.contains("\"SampleOsc.SampleEnd\", halion_loop_end"));
+            expect(!helperLua.contains("\"SampleOsc.SampleEnd\", halion_loop_end"));
+            expect(helperLua.contains("\"SampleOsc.PlaybackMode\", 0"));
+            expect(helperLua.contains("\"SampleOsc.LoopSelect\", 0"));
+            expect(helperLua.contains("\"SampleOsc.SustainLoopModeA\", halion_sustain_loop_mode(loop_mode)"));
             expect(helperLua.contains("\"SampleOsc.SustainLoopEndA\", halion_loop_end"));
             expect(!firstLua.contains("start = 14"));
             expect(!firstLua.contains("start = 86"));

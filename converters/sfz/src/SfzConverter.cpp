@@ -14,6 +14,7 @@
 #include <charconv>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -41,11 +42,13 @@ struct ConvertedRegion
     int rootKey = 60;
     std::optional<int64_t> sampleOffset;
     std::optional<int64_t> sampleEnd;
+    std::optional<int64_t> sampleNaturalEnd;
     std::optional<float> tuneCents;
     std::optional<float> pitchKeytrack;
     bool hasLoop = false;
     int64_t loopStart = 0;
     int64_t loopEnd = 0;
+    const char* loopMode = "continuous";
     std::optional<float> sampleOscLevelDb;
     std::optional<float> ampVelocityToLevel;
     std::optional<float> ampPan;
@@ -81,6 +84,7 @@ struct SfzFileSearchResult
 
 struct ExplicitRegionOpcodes
 {
+    std::optional<int64_t> sampleEnd;
     std::optional<int64_t> loopStart;
     std::optional<int64_t> loopEnd;
     std::optional<int> decayZero;
@@ -135,7 +139,9 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
         for (const auto& rawOpcode : opcodes)
         {
             const auto opcode = rawOpcode.cleanUp(::sfz::kOpcodeScopeRegion);
-            if (opcode.name == "loop_start")
+            if (opcode.name == "end")
+                explicitOpcodes.sampleEnd = opcode.read(::sfz::Default::sampleEnd);
+            else if (opcode.name == "loop_start")
                 explicitOpcodes.loopStart = opcode.read(::sfz::Default::loopStart);
             else if (opcode.name == "loop_end")
                 explicitOpcodes.loopEnd = opcode.read(::sfz::Default::loopEnd);
@@ -206,6 +212,80 @@ Diagnostic makeWarning(const std::filesystem::path& source, std::string code, st
 std::string toGenericString(const std::filesystem::path& path)
 {
     return path.lexically_normal().generic_string();
+}
+
+std::uint16_t readLittleEndian16(const char* bytes)
+{
+    const auto low = static_cast<std::uint16_t>(static_cast<unsigned char>(bytes[0]));
+    const auto high = static_cast<std::uint16_t>(static_cast<unsigned char>(bytes[1]));
+    return static_cast<std::uint16_t>(low | (high << 8));
+}
+
+std::uint32_t readLittleEndian32(const char* bytes)
+{
+    const auto b0 = static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[0]));
+    const auto b1 = static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[1]));
+    const auto b2 = static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[2]));
+    const auto b3 = static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[3]));
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+std::optional<int64_t> readWaveFrameCount(const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+        return std::nullopt;
+
+    char riffHeader[12]{};
+    if (!input.read(riffHeader, sizeof(riffHeader)))
+        return std::nullopt;
+
+    if (std::string_view{riffHeader, 4} != "RIFF" || std::string_view{riffHeader + 8, 4} != "WAVE")
+        return std::nullopt;
+
+    std::optional<std::uint16_t> blockAlign;
+    std::optional<std::uint32_t> pendingDataSize;
+
+    while (input)
+    {
+        char chunkHeader[8]{};
+        if (!input.read(chunkHeader, sizeof(chunkHeader)))
+            break;
+
+        const auto chunkId = std::string_view{chunkHeader, 4};
+        const auto chunkSize = readLittleEndian32(chunkHeader + 4);
+
+        if (chunkId == "fmt ")
+        {
+            std::string fmtData(chunkSize, '\0');
+            if (!input.read(fmtData.data(), static_cast<std::streamsize>(fmtData.size())))
+                return std::nullopt;
+
+            if (fmtData.size() >= 14)
+            {
+                blockAlign = readLittleEndian16(fmtData.data() + 12);
+                if (pendingDataSize && *blockAlign > 0)
+                    return static_cast<int64_t>(*pendingDataSize / *blockAlign);
+            }
+        }
+        else if (chunkId == "data")
+        {
+            if (blockAlign && *blockAlign > 0)
+                return static_cast<int64_t>(chunkSize / *blockAlign);
+
+            pendingDataSize = chunkSize;
+            input.seekg(static_cast<std::streamoff>(chunkSize), std::ios::cur);
+        }
+        else
+        {
+            input.seekg(static_cast<std::streamoff>(chunkSize), std::ios::cur);
+        }
+
+        if ((chunkSize % 2U) != 0U)
+            input.seekg(1, std::ios::cur);
+    }
+
+    return std::nullopt;
 }
 
 std::string displayNameFromStem(std::string text)
@@ -523,8 +603,13 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
     converted.rootKey = clampMidi(static_cast<int>(region.pitchKeycenter));
     if (region.offset != ::sfz::Default::offset)
         converted.sampleOffset = region.offset;
-    if (region.sampleEnd != ::sfz::Default::sampleEnd)
-        converted.sampleEnd = region.sampleEnd;
+    if (explicitOpcodes.sampleEnd)
+        converted.sampleEnd = *explicitOpcodes.sampleEnd;
+    if (converted.sampleOffset && !converted.sampleEnd)
+    {
+        if (const auto frameCount = readWaveFrameCount(samplePath); frameCount && *frameCount > 0)
+            converted.sampleNaturalEnd = *frameCount - 1;
+    }
     converted.sampleOscLevelDb =
         clampSampleOscLevelDb(sourceFile, regionIndex, region.volume + kHalionSfzLevelCompensationDb, diagnostics);
 
@@ -550,6 +635,7 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
         converted.hasLoop = true;
         converted.loopStart = explicitOpcodes.loopStart.value_or(region.loopRange.getStart());
         converted.loopEnd = explicitOpcodes.loopEnd.value_or(region.loopRange.getEnd());
+        converted.loopMode = *region.loopMode == ::sfz::LoopMode::loop_sustain ? "sustain" : "continuous";
     }
 
     converted.ampVelocityToLevel =
@@ -614,6 +700,8 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
         lua << "            offset = " << luaInteger(*region.sampleOffset) << ",\n";
     if (region.sampleEnd)
         lua << "            finish = " << luaInteger(*region.sampleEnd) << ",\n";
+    if (region.sampleNaturalEnd)
+        lua << "            natural_end = " << luaInteger(*region.sampleNaturalEnd) << ",\n";
     lua << "        },\n"
         << "        mapping = {\n"
         << "            key_low = " << region.keyLow << ",\n"
@@ -638,6 +726,7 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
     if (region.hasLoop)
     {
         lua << "        loop = {\n"
+            << "            mode = " << luaQuotedString(region.loopMode) << ",\n"
             << "            start = " << luaInteger(region.loopStart) << ",\n"
             << "            finish = " << luaInteger(region.loopEnd) << ",\n"
             << "        },\n";
