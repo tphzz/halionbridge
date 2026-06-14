@@ -452,12 +452,24 @@ bool hasSfzExtension(const std::filesystem::path& path)
     return extension == ".sfz";
 }
 
+bool shouldStop(const ConverterRunContext* context)
+{
+    return context != nullptr && context->shouldStop();
+}
+
 template <typename Iterator>
-void collectSfzFiles(Iterator iterator, const Iterator end, std::vector<std::filesystem::path>& files, std::vector<Diagnostic>& diagnostics)
+void collectSfzFiles(Iterator iterator, const Iterator end, const ConverterRunContext* context, std::vector<std::filesystem::path>& files,
+                     std::vector<Diagnostic>& diagnostics)
 {
     std::error_code error;
     while (iterator != end)
     {
+        if (shouldStop(context))
+        {
+            diagnostics.push_back(makeError({}, "stopped", "Conversion stopped by user request."));
+            return;
+        }
+
         const auto path = iterator->path();
         const auto isFile = iterator->is_regular_file(error);
         if (error)
@@ -480,7 +492,7 @@ void collectSfzFiles(Iterator iterator, const Iterator end, std::vector<std::fil
     }
 }
 
-SfzFileSearchResult findSfzFiles(const std::filesystem::path& sourceDirectory, const bool recursive)
+SfzFileSearchResult findSfzFiles(const std::filesystem::path& sourceDirectory, const bool recursive, const ConverterRunContext* context)
 {
     auto result = SfzFileSearchResult{};
     std::error_code error;
@@ -495,7 +507,7 @@ SfzFileSearchResult findSfzFiles(const std::filesystem::path& sourceDirectory, c
             return result;
         }
 
-        collectSfzFiles(iterator, std::filesystem::recursive_directory_iterator{}, result.files, result.diagnostics);
+        collectSfzFiles(iterator, std::filesystem::recursive_directory_iterator{}, context, result.files, result.diagnostics);
     }
     else
     {
@@ -507,7 +519,7 @@ SfzFileSearchResult findSfzFiles(const std::filesystem::path& sourceDirectory, c
             return result;
         }
 
-        collectSfzFiles(iterator, std::filesystem::directory_iterator{}, result.files, result.diagnostics);
+        collectSfzFiles(iterator, std::filesystem::directory_iterator{}, context, result.files, result.diagnostics);
     }
 
     std::sort(result.files.begin(), result.files.end(),
@@ -1148,7 +1160,7 @@ std::string buildLuaSource(const ConvertedSfz& converted)
         << "    end\n\n"
         << "    for i, region in ipairs(regions) do\n"
         << "        local label = hb.region_label(region)\n"
-        << "        if i == 1 or ((i - 1) % progressInterval) == 0 then\n"
+        << "        if i == 1 then\n"
         << "            ctx.progress(i - 1, #regions, \"Mapping \" .. label)\n"
         << "        end\n"
         << "        local zone, zoneErr = hb.append_sample_zone(ctx, layer, region)\n"
@@ -1381,11 +1393,17 @@ ConversionResult convertDirectory(const ConversionOptions& options)
     }
 
     addDiagnostic(makeInfo(options.sourceDirectory, "scan-started", "Scanning " + options.sourceDirectory.string() + " for SFZ files."));
-    auto searchResult = findSfzFiles(options.sourceDirectory, options.recursive);
+    auto searchResult = findSfzFiles(options.sourceDirectory, options.recursive, options.context);
     result.diagnostics.insert(result.diagnostics.end(), searchResult.diagnostics.begin(), searchResult.diagnostics.end());
     reportPendingDiagnostics();
     if (!searchResult.diagnostics.empty())
         return result;
+
+    if (shouldStop(options.context))
+    {
+        addDiagnostic(makeError(options.sourceDirectory, "stopped", "Conversion stopped by user request."));
+        return result;
+    }
 
     const auto& sfzFiles = searchResult.files;
     if (sfzFiles.empty())
@@ -1413,6 +1431,12 @@ ConversionResult convertDirectory(const ConversionOptions& options)
 
     for (size_t i = 0; i < sfzFiles.size(); ++i)
     {
+        if (shouldStop(options.context))
+        {
+            addDiagnostic(makeError(sfzFiles[i], "stopped", "Conversion stopped by user request."));
+            return result;
+        }
+
         addDiagnostic(
             makeInfo(sfzFiles[i], "convert-started",
                      "Converting " + std::to_string(i + 1) + "/" + std::to_string(sfzFiles.size()) + ": " + sfzFiles[i].string()));
@@ -1449,6 +1473,12 @@ ConversionResult convertDirectory(const ConversionOptions& options)
             result.succeeded = false;
             return result;
         }
+    }
+
+    if (shouldStop(options.context))
+    {
+        addDiagnostic(makeError(options.outputDirectory, "stopped", "Conversion stopped by user request before writing generated files."));
+        return result;
     }
 
     std::vector<GeneratedLuaScript> scripts;

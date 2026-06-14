@@ -321,7 +321,7 @@ local function printFileProgress(done, total)
         percent = math.floor((done * 100 / total) + 0.5)
     end
 
-    emit("info", string.format("Progress %d/%d files (%d%%)", done, total, percent))
+    emit("info", string.format("Completed %d/%d files (%d%%)", done, total, percent))
 end
 
 local function makeContext(moduleName)
@@ -363,15 +363,19 @@ local function makeContext(moduleName)
         if total < 0 then total = 0 end
         if total > 0 and done > total then done = total end
 
-        local percent = total > 0 and math.floor((done * 100 / total) + 0.5) or 100
-        local unitWidth = math.max(decimalWidth(done), decimalWidth(total), 1)
-        local line = string.format("Progress %" .. unitWidth .. "d/%" .. unitWidth .. "d (%3d%%)", done, total, percent)
+        -- TODO: Re-enable numeric progress when the build runner executes from
+        -- a callback/onIdle path where progress markers can be observed in real
+        -- time. In synchronous global/module code the host sees markers in
+        -- bursts, and the prefix below is more confusing than useful.
+        -- local percent = total > 0 and math.floor((done * 100 / total) + 0.5) or 100
+        -- local unitWidth = math.max(decimalWidth(done), decimalWidth(total), 1)
+        -- local line = string.format("Progress %" .. unitWidth .. "d/%" .. unitWidth .. "d (%3d%%)", done, total, percent)
 
         if message ~= nil and tostring(message) ~= "" then
-            line = line .. " - " .. tostring(message)
+            emit("info", tostring(message))
+        else
+            emit("info", "Progress marker")
         end
-
-        emit("info", line)
     end
 
     return context
@@ -454,7 +458,7 @@ local function runBatch()
         -- Repeated HALion runs in the same scripting session reload updated
         -- build script source files because package.loaded is cleared per module.
         moduleName = normalizeModuleName(moduleName)
-        emit("info", "Processing " .. moduleFileName(moduleName))
+        emit("info", string.format("Processing %d/%d: %s", index, total, moduleFileName(moduleName)))
         scriptsProcessed = scriptsProcessed + 1
 
         package.loaded[moduleName] = nil
