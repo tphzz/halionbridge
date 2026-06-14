@@ -42,7 +42,7 @@ constexpr int kTerminalProgressDrainMaxMs = 1500;
 constexpr int kTerminalProgressDrainQuietMs = 300;
 constexpr double kBuildWaitProgressLogIntervalSeconds = 5.0;
 constexpr double kNoKillHeartbeatIntervalSeconds = 30.0;
-constexpr int kDefaultBuildChunkSize = 1;
+constexpr int kDefaultBuildChunkSize = 15;
 constexpr const char* kBuildStatusOkPresetFileName = "halionbridge_status_ok.vstpreset";
 constexpr const char* kBuildStatusFailedPresetFileName = "halionbridge_status_failed.vstpreset";
 constexpr const char* kPresetDirEnvironmentVariable = "HALIONBRIDGE_PRESET_DIR";
@@ -640,6 +640,13 @@ BuildWaitResult waitForBuildCompletion(juce::AudioPluginInstance& plugin, const 
         plugin.processBlock(buffer, midi);
 
         auto elapsed = (juce::Time::getMillisecondCounterHiRes() - startTime) / 1000.0;
+        if (isStopRequested())
+        {
+            detail::logNewProgressMarkers(markers.builderRoot, seenProgressMarkers);
+            log::warn("HALion Lua build stopped by user request.");
+            return {.failureResult = RunResult::stopped};
+        }
+
         if (elapsed - lastMarkerPoll >= kMarkerPollIntervalSeconds)
         {
             detail::logNewProgressMarkers(markers.builderRoot, seenProgressMarkers);
@@ -677,12 +684,6 @@ BuildWaitResult waitForBuildCompletion(juce::AudioPluginInstance& plugin, const 
             lastProgressLog = elapsed;
         }
 
-        if (isStopRequested())
-        {
-            log::warn("HALion Lua build stopped by user request.");
-            return {.failureResult = RunResult::stopped};
-        }
-
         if (options.timeoutSeconds > 0 && elapsed >= static_cast<double>(options.timeoutSeconds))
         {
             log::error("Timed out waiting for HALion build completion after {} seconds.", options.timeoutSeconds);
@@ -717,6 +718,8 @@ bool cleanupPostReleaseMarkers(const BuildMarkerSet& markers, const RunResult re
     }
 
     if (result == RunResult::success && !cleanupSuccessfulBuildMarkers(markers))
+        cleanupOk = false;
+    else if (result == RunResult::stopped && !deleteFileIfExists(markers.okMarkerFile, "OK build status marker from stopped run"))
         cleanupOk = false;
 
     return cleanupOk;
@@ -1036,20 +1039,34 @@ RunResult Bridge::Impl::runDetailed(const AppOptions& options)
 
     for (size_t i = 0; i < slices.size(); ++i)
     {
+        if (isStopRequested())
+        {
+            log::warn("HALion Lua build stopped by user request before starting build chunk {}/{}.", static_cast<int>(i + 1),
+                      static_cast<int>(slices.size()));
+            return RunResult::stopped;
+        }
+
         const auto& slice = slices[i];
-        log::info("Starting build chunk {}/{}: scripts {}-{} of {}.", static_cast<int>(i + 1), static_cast<int>(slices.size()), slice.start,
+        log::info("Starting build chunk {}/{}: entries {}-{} of {}.", static_cast<int>(i + 1), static_cast<int>(slices.size()), slice.start,
                   slice.end(), slice.total);
 
         const auto result = runSingleInvocation(options, runtimeRoot, slice);
         if (result == RunResult::success)
         {
+            if (isStopRequested())
+            {
+                log::warn("HALion Lua build stopped by user request after build chunk {}/{}.", static_cast<int>(i + 1),
+                          static_cast<int>(slices.size()));
+                return RunResult::stopped;
+            }
+
             log::info("Build chunk {}/{} completed.", static_cast<int>(i + 1), static_cast<int>(slices.size()));
             continue;
         }
 
         ++failedChunks;
         lastFailure = result;
-        log::error("Build chunk {}/{} failed; scripts {}-{} were not completed successfully.", static_cast<int>(i + 1),
+        log::error("Build chunk {}/{} failed; entries {}-{} were not completed successfully.", static_cast<int>(i + 1),
                    static_cast<int>(slices.size()), slice.start, slice.end());
 
         if (options.failFast || !isRecoverableChunkFailure(result))
@@ -1339,6 +1356,9 @@ RunResult Bridge::Impl::runProcessingLoop(const AppOptions& options, const juce:
 
         if (markersToClean != nullptr && !cleanupPostReleaseMarkers(*markersToClean, result) && result == RunResult::success)
             return RunResult::cleanupFailed;
+
+        log::debug("Unloading plugin instance...");
+        pluginInstance = nullptr;
 
         return result;
     };

@@ -86,7 +86,7 @@ void printHelp()
               << "\n"
               << "Runtime options:\n"
               << "  --timeout-seconds <n>    Build completion timeout. Defaults to 0, which waits forever.\n"
-              << "  --build-chunk-size <n>   Number of Lua build scripts per HALion run. Defaults to 1.\n"
+              << "  --build-chunk-size <n>   Number of Lua build scripts per HALion run. Defaults to 15.\n"
               << "  --fail-fast              Stop after the first failed Lua build chunk.\n"
               << "  --gui                    Use JUCE's GUI-capable VST3 host format and show HALion's editor.\n"
               << "  --nokill                 Keep HALion loaded after build completion or failure for inspection.\n"
@@ -192,7 +192,8 @@ int runConvertCommand(std::span<const std::string> args)
     if (converter->runWithContext != nullptr)
     {
         auto context = halionbridge::converters::ConverterRunContext{[](const halionbridge::converters::Diagnostic& diagnostic, void*)
-                                                                     { logDiagnostic(diagnostic); }, nullptr};
+                                                                     { logDiagnostic(diagnostic); },
+                                                                     [](void*) { return halionbridge::isStopRequested(); }, nullptr};
         result = converter->runWithContext(converterArgs, context);
         usedStreamingContext = true;
     }
@@ -270,6 +271,7 @@ int main(int argc, char* argv[])
     }
 
     halionbridge::log::configureFromEnvironment();
+    installStopHandlers();
 
     if (juceArgs.size() > 0 && juceArgs[0] == "init")
     {
@@ -305,8 +307,6 @@ int main(int argc, char* argv[])
 #endif
 
     halionbridge::installCrashDiagnostics();
-    installStopHandlers();
-
     juce::ScopedJuceInitialiser_GUI juceInitialiser;
 
     ConsoleLogger logger;
@@ -331,9 +331,14 @@ int main(int argc, char* argv[])
     options->executableFile = halionbridge::detail::toStdPath(executableFile);
 
     halionbridge::Bridge app;
-    if (!app.run(*options))
+    const auto runResult = app.runDetailed(*options);
+    if (runResult != halionbridge::RunResult::success)
     {
-        halionbridge::log::error("Failed to run halionbridge.");
+        if (runResult == halionbridge::RunResult::stopped)
+            halionbridge::log::warn("halionbridge stopped by user request.");
+        else
+            halionbridge::log::error("Failed to run halionbridge.");
+
         juce::Logger::setCurrentLogger(nullptr);
         halionbridge::log::flush();
         return 1;

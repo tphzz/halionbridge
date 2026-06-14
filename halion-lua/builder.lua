@@ -105,6 +105,7 @@ local PROGRESS_WRITE_FAILURES = 0
 local MAX_PROGRESS_MESSAGE_BYTES = 88
 local MAX_PROGRESS_MARKER_PATH_BYTES = 240
 local TRUNCATION_SUFFIX = "..."
+local BUILD_SCRIPT_TIMEOUT_MS = 600000
 
 local function globalNumber(name)
     local value = tonumber(_G[name])
@@ -250,6 +251,38 @@ local function emit(kind, message)
     writeProgress(kind, message)
 end
 
+local function extendScriptExecutionTimeout()
+    -- HALion's default controller script timeout is short for build-time scripts
+    -- that construct hundreds or thousands of zones. This API is valid from
+    -- global controller code, unlike wait(), which HALion only allows inside
+    -- callbacks.
+    if type(getScriptExecTimeOut) ~= "function" or type(setScriptExecTimeOut) ~= "function" then
+        return nil
+    end
+
+    local okGet, current = pcall(getScriptExecTimeOut)
+    current = tonumber(current)
+    if not okGet or current == nil or current >= BUILD_SCRIPT_TIMEOUT_MS then
+        return nil
+    end
+
+    local okSet = pcall(setScriptExecTimeOut, BUILD_SCRIPT_TIMEOUT_MS)
+    if not okSet then
+        return nil
+    end
+
+    emit("info", "Raised HALion script execution timeout from " .. current .. " ms to " .. BUILD_SCRIPT_TIMEOUT_MS .. " ms.")
+    return current
+end
+
+local function restoreScriptExecutionTimeout(previousTimeout)
+    if previousTimeout == nil or type(setScriptExecTimeOut) ~= "function" then
+        return
+    end
+
+    pcall(setScriptExecTimeOut, previousTimeout)
+end
+
 local function writeStatus(status)
     -- halionbridge watches for these marker presets in the build directory.
     -- Markers are written through savePreset() because HALion scripting may not
@@ -288,7 +321,7 @@ local function printFileProgress(done, total)
         percent = math.floor((done * 100 / total) + 0.5)
     end
 
-    emit("info", string.format("Progress %d/%d files (%d%%)", done, total, percent))
+    emit("info", string.format("Completed %d/%d files (%d%%)", done, total, percent))
 end
 
 local function makeContext(moduleName)
@@ -330,15 +363,19 @@ local function makeContext(moduleName)
         if total < 0 then total = 0 end
         if total > 0 and done > total then done = total end
 
-        local percent = total > 0 and math.floor((done * 100 / total) + 0.5) or 100
-        local unitWidth = math.max(decimalWidth(done), decimalWidth(total), 1)
-        local line = string.format("Progress %" .. unitWidth .. "d/%" .. unitWidth .. "d (%3d%%)", done, total, percent)
+        -- TODO: Re-enable numeric progress when the build runner executes from
+        -- a callback/onIdle path where progress markers can be observed in real
+        -- time. In synchronous global/module code the host sees markers in
+        -- bursts, and the prefix below is more confusing than useful.
+        -- local percent = total > 0 and math.floor((done * 100 / total) + 0.5) or 100
+        -- local unitWidth = math.max(decimalWidth(done), decimalWidth(total), 1)
+        -- local line = string.format("Progress %" .. unitWidth .. "d/%" .. unitWidth .. "d (%3d%%)", done, total, percent)
 
         if message ~= nil and tostring(message) ~= "" then
-            line = line .. " - " .. tostring(message)
+            emit("info", tostring(message))
+        else
+            emit("info", "Progress marker")
         end
-
-        emit("info", line)
     end
 
     return context
@@ -421,7 +458,7 @@ local function runBatch()
         -- Repeated HALion runs in the same scripting session reload updated
         -- build script source files because package.loaded is cleared per module.
         moduleName = normalizeModuleName(moduleName)
-        emit("info", "Processing " .. moduleFileName(moduleName))
+        emit("info", string.format("Processing %d/%d: %s", index, total, moduleFileName(moduleName)))
         scriptsProcessed = scriptsProcessed + 1
 
         package.loaded[moduleName] = nil
@@ -473,6 +510,7 @@ if RUN_BUILD then
     -- A status marker is written even when the runner itself throws. This gives
     -- halionbridge a concrete completion signal instead of relying only on the
     -- timeout path.
+    local previousScriptTimeout = extendScriptExecutionTimeout()
     local ok, status = pcall(runBatch)
     if not ok then
         status = {
@@ -491,4 +529,5 @@ if RUN_BUILD then
     end
 
     writeStatus(status)
+    restoreScriptExecutionTimeout(previousScriptTimeout)
 end

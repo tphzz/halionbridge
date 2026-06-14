@@ -287,7 +287,7 @@ class BridgeTests : public juce::UnitTest
                 expect(options.has_value());
                 if (options)
                 {
-                    expectEquals(options->buildChunkSize, 1);
+                    expectEquals(options->buildChunkSize, 15);
                     expect(!options->failFast);
                 }
             }
@@ -808,7 +808,7 @@ class BridgeTests : public juce::UnitTest
                         auto* diagnostics = static_cast<std::vector<halionbridge::converters::Diagnostic>*>(userData);
                         diagnostics->push_back(diagnostic);
                     },
-                    &streamedDiagnostics};
+                    nullptr, &streamedDiagnostics};
                 auto streamArgs = std::vector<std::string>{sourceDir.getFullPathName().toStdString(), "--overwrite"};
                 result = converter->runWithContext(std::span<const std::string>{streamArgs.data(), streamArgs.size()}, context);
                 expectEquals(result.exitCode, 0);
@@ -873,6 +873,28 @@ class BridgeTests : public juce::UnitTest
             result = halionbridge::converters::sfz::convertDirectory(options);
             expect(!result.succeeded);
             expect(!result.diagnostics.empty());
+
+            sourceDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - stop request aborts before writing build files");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_stopped_source");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("instrument.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=60 hikey=60 lovel=0 hivel=127 pitch_keycenter=60\n"));
+
+            auto context = halionbridge::converters::ConverterRunContext{nullptr, [](void*) { return true; }, nullptr};
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = options.sourceDirectory;
+            options.context = &context;
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(!result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "stopped"));
+            expect(!sourceDir.getChildFile("halionbridge_build.lua").existsAsFile());
 
             sourceDir.deleteRecursively();
         }
@@ -1533,6 +1555,11 @@ class BridgeTests : public juce::UnitTest
             expect(firstLua.contains("hb.create_layer(ctx, layerName)"));
             expect(firstLua.contains("hb.append_sample_zone(ctx, layer, region)"));
             expect(firstLua.contains("hb.save_layer_preset(ctx, layer, outputFile)"));
+            expect(firstLua.contains("local progressInterval = 25"));
+            expect(firstLua.contains("if i == 1 then"));
+            expect(!firstLua.contains("((i - 1) % progressInterval)"));
+            expect(!firstLua.contains("ctx.yield"));
+            expect(!firstLua.contains("wait("));
             expect(!firstLua.contains("local function setNameIfAvailable"));
             expect(!firstLua.contains("local function setParameterRequired"));
             expect(!firstLua.contains("local function setParameterIfAvailable"));
@@ -1720,6 +1747,16 @@ class BridgeTests : public juce::UnitTest
             expect(slicedText.find("HALIONBRIDGE_BUILD_SLICE_START = 16") != std::string::npos);
             expect(slicedText.find("HALIONBRIDGE_BUILD_SLICE_COUNT = 15") != std::string::npos);
             expect(slicedText.find("HALIONBRIDGE_BUILD_TOTAL = 42") != std::string::npos);
+
+            const auto builderLua =
+                juce::File::getCurrentWorkingDirectory().getChildFile("halion-lua").getChildFile("builder.lua").loadFileAsString();
+            expect(builderLua.contains("BUILD_SCRIPT_TIMEOUT_MS = 600000"));
+            expect(builderLua.contains("setScriptExecTimeOut"));
+            expect(builderLua.contains("Completed %d/%d files"));
+            expect(builderLua.contains("Processing %d/%d: %s"));
+            expect(builderLua.contains("TODO: Re-enable numeric progress"));
+            expect(builderLua.contains("emit(\"info\", tostring(message))"));
+            expect(!builderLua.contains("function context.yield"));
         }
 
         beginTest("Plugin Location - platform default path");

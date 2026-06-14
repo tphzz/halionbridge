@@ -88,9 +88,11 @@ ctx.progress(done, total, message)
 - `ctx.path_join(root, rel)`: joins paths using forward slashes.
 - `ctx.save_preset(path, object, preset_type)`: wraps HALion `savePreset`; defaults `preset_type` to `"H7"`.
 - `ctx.log(message)`: prints a build script log line and writes a host-readable progress marker. halionbridge treats build script log and progress lines as `info` output, so they remain visible at the default `HALIONBRIDGE_LOGLEVEL=info`. Very long messages are shortened in the marker filename; keep essential context near the start of the message.
-- `ctx.progress(done, total, message)`: prints generic build script progress such as `Progress 12/48 ( 25%) - Building zones` and writes the same message through the host-readable progress marker channel. Numeric fields are padded so the message after ` - ` starts at a stable column within the same progress group. Very long messages are shortened in the marker filename; keep essential context near the start of the message.
+- `ctx.progress(done, total, message)`: writes the message text through the host-readable progress marker channel. The `done` and `total` fields are currently accepted for compatibility but not printed by the builder because synchronous HALion global/module execution makes numeric progress bursts misleading. Very long messages are shortened in the marker filename; keep essential context near the start of the message.
 
 `ctx.progress` is build-script-defined progress. `done` and `total` can represent files, zones, presets, phases, or any other work unit meaningful to that build script.
+
+Before running the batch, the builder raises HALion's controller script execution timeout to 600000 ms when HALion exposes `getScriptExecTimeOut()` and `setScriptExecTimeOut()`, then restores the previous value after writing the final status marker. Build scripts should not call HALion `wait()` for this purpose; HALion only allows `wait()` inside callbacks, while build script entrypoints run as controller global/module code.
 
 ## Build Script Result
 
@@ -118,12 +120,14 @@ If a build script throws an error, returns an invalid entrypoint, or returns an 
 
 - loading `halionbridge_build.lua`
 - loading and invoking the host-selected build script module slice in order
-- printing and forwarding file-level progress such as `Processing x.lua` and `Progress x/y files (70%)`
+- printing and forwarding file-level progress such as `Processing 12/48: x.lua` and `Completed 12/48 files (25%)`
 - passing `ctx` to each build script
 - aggregating build script results
 - writing `halionbridge_status_ok.vstpreset` or `halionbridge_status_failed.vstpreset`
 
 `builder.lua` must not assume build script fields or build shapes such as `articulations`, `slots`, `wav`, velocity layers, round robin, key mapping, program presets, layer presets, sample zones, or output filenames.
+
+Console timestamps are host observation times. Because current build script entrypoints run as synchronous HALion global/module code, the host may log progress markers in bursts after HALion returns control instead of at the exact moment `ctx.progress()` was called.
 
 ## Example: Saving a Layer Preset
 

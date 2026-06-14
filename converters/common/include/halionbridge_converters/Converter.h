@@ -34,12 +34,18 @@ struct ConverterResult
 struct ConverterRunContext
 {
     void (*diagnostic)(const Diagnostic& diagnostic, void* userData) = nullptr;
+    bool (*stopRequested)(void* userData) = nullptr;
     void* userData = nullptr;
 
     void report(const Diagnostic& entry) const
     {
         if (this->diagnostic != nullptr)
             this->diagnostic(entry, userData);
+    }
+
+    bool shouldStop() const
+    {
+        return stopRequested != nullptr && stopRequested(userData);
     }
 };
 
