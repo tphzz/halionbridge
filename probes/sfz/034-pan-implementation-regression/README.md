@@ -50,3 +50,10 @@ build-release\halionbridge_artefacts\Release\halionbridge.exe probes\sfz\034-pan
    Plug'n Script instance and meter.
 5. Confirm all five cases match the sforzando pan behavior. Do not manually
    alter HALion pan law for this regression.
+
+## Result
+
+Manual validation on 2026-06-14: all five HALion presets canceled against the
+matching sforzando references when HALion was phase-inverted. This confirms the
+converter-backed `pan` implementation for the tested center, half-left/right,
+and full-left/right values.
