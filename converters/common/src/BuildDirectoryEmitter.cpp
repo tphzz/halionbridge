@@ -135,9 +135,9 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
         const auto scriptFileName = std::filesystem::path(script.fileName);
         if (!isFlatRelativeFilename(scriptFileName) || !hasLuaSuffix(scriptFileName))
         {
-            result.diagnostics.push_back(makeError(request.outputDirectory, "invalid-script-filename",
-                                                   "Generated Lua script filenames must be flat relative .lua filenames: " +
-                                                       script.fileName));
+            result.diagnostics.push_back(
+                makeError(request.outputDirectory, "invalid-script-filename",
+                          "Generated Lua script filenames must be flat relative .lua filenames: " + script.fileName));
             return result;
         }
 
@@ -155,16 +155,15 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
         ++buildEntrypointCount;
         if (script.moduleName.empty())
         {
-            result.diagnostics.push_back(
-                makeError(request.outputDirectory, "invalid-module-name", "Generated Lua build entrypoint module names must not be empty."));
+            result.diagnostics.push_back(makeError(request.outputDirectory, "invalid-module-name",
+                                                   "Generated Lua build entrypoint module names must not be empty."));
             return result;
         }
 
         if (isReservedHelperEntrypointName(script))
         {
             result.diagnostics.push_back(makeError(request.outputDirectory, "reserved-helper-entrypoint",
-                                                   "Generated helper module must not be listed as a build entrypoint: " +
-                                                       script.fileName));
+                                                   "Generated helper module must not be listed as a build entrypoint: " + script.fileName));
             return result;
         }
 

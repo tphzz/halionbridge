@@ -293,8 +293,7 @@ class BridgeTests : public juce::UnitTest
             }
 
             {
-                auto options =
-                    halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--build-chunk-size", "3"});
+                auto options = halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--build-chunk-size", "3"});
                 expect(options.has_value());
                 if (options)
                     expectEquals(options->buildChunkSize, 3);
@@ -308,7 +307,8 @@ class BridgeTests : public juce::UnitTest
             }
 
             expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--build-chunk-size", "0"}).has_value());
-            expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--build-chunk-size", "abc"}).has_value());
+            expect(
+                !halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--build-chunk-size", "abc"}).has_value());
             expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--build-chunk-size"}).has_value());
 
             tempDir.deleteRecursively();
@@ -570,12 +570,15 @@ class BridgeTests : public juce::UnitTest
             expect(registry.find("sfz") != nullptr);
             expect(registry.find("missing") == nullptr);
 
-            auto duplicate = halionbridge::converters::ConverterDefinition{"sfz", "Duplicate", "Duplicate", converters.front().run,
-                                                                           converters.front().runWithContext, nullptr};
+            auto duplicate = halionbridge::converters::ConverterDefinition{
+                "sfz", "Duplicate", "Duplicate", converters.front().run, converters.front().runWithContext, nullptr};
             expect(!registry.registerConverter(duplicate));
 
             auto contextOnly = halionbridge::converters::ConverterDefinition{
-                "context-only", "Context Only", "Context Only", nullptr,
+                "context-only",
+                "Context Only",
+                "Context Only",
+                nullptr,
                 [](std::span<const std::string>, const halionbridge::converters::ConverterRunContext&)
                 { return halionbridge::converters::ConverterResult{0, {}}; },
                 nullptr};
@@ -708,8 +711,7 @@ class BridgeTests : public juce::UnitTest
             expect(containsDiagnosticCode(result.diagnostics, "duplicate-module-name"));
 
             auto duplicateEffectiveModule = request;
-            duplicateEffectiveModule.scripts.push_back(
-                halionbridge::converters::GeneratedLuaScript{"valid", "other.lua", "return {}\n"});
+            duplicateEffectiveModule.scripts.push_back(halionbridge::converters::GeneratedLuaScript{"valid", "other.lua", "return {}\n"});
             result = halionbridge::converters::writeBuildDirectory(duplicateEffectiveModule);
             expect(!result.succeeded);
             expect(containsDiagnosticCode(result.diagnostics, "duplicate-module-name"));
@@ -773,9 +775,7 @@ class BridgeTests : public juce::UnitTest
             expect(converter != nullptr && converter->run != nullptr);
 
             const auto runSfzConverter = [converter](const std::vector<std::string>& args)
-            {
-                return converter->run(std::span<const std::string>{args.data(), args.size()});
-            };
+            { return converter->run(std::span<const std::string>{args.data(), args.size()}); };
 
             expect(runSfzConverter({}).exitCode != 0);
             expect(runSfzConverter({"a", "b", "c"}).exitCode != 0);
@@ -822,10 +822,11 @@ class BridgeTests : public juce::UnitTest
             auto explicitOutputDir = cleanTempDirectory("halionbridge_sfz_cli_explicit_output");
             expect(explicitSourceDir.createDirectory());
             expect(explicitSourceDir.getChildFile("sample.wav").replaceWithText(""));
-            expect(explicitSourceDir.getChildFile("top.sfz")
-                       .replaceWithText("<region> sample=sample.wav lokey=61 hikey=61 lovel=0 hivel=127 pitch_keycenter=61\n"));
+            expect(explicitSourceDir.getChildFile("top.sfz").replaceWithText(
+                "<region> sample=sample.wav lokey=61 hikey=61 lovel=0 hivel=127 pitch_keycenter=61\n"));
 
-            result = runSfzConverter({explicitSourceDir.getFullPathName().toStdString(), explicitOutputDir.getFullPathName().toStdString()});
+            result =
+                runSfzConverter({explicitSourceDir.getFullPathName().toStdString(), explicitOutputDir.getFullPathName().toStdString()});
             expectEquals(result.exitCode, 0);
             expect(!explicitSourceDir.getChildFile("halionbridge_build.lua").existsAsFile());
             expect(explicitOutputDir.getChildFile("halionbridge_build.lua").existsAsFile());
@@ -1027,9 +1028,9 @@ class BridgeTests : public juce::UnitTest
             auto outputDir = cleanTempDirectory("halionbridge_sfz_pan_out");
             expect(sourceDir.createDirectory());
             expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
-            expect(sourceDir.getChildFile("pan.sfz")
-                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 pan=-50\n"
-                                        "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 pan=100\n"));
+            expect(sourceDir.getChildFile("pan.sfz").replaceWithText(
+                "<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 pan=-50\n"
+                "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 pan=100\n"));
 
             auto options = halionbridge::converters::sfz::ConversionOptions{};
             options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
@@ -1209,8 +1210,10 @@ class BridgeTests : public juce::UnitTest
                                            .getChildFile("saw_A3_single_cycle.wav");
             expect(fixtureSample.copyFileTo(sourceDir.getChildFile("sample.wav")));
             expect(sourceDir.getChildFile("loops.sfz")
-                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 loop_mode=loop_continuous loop_start=0 loop_end=199\n"
-                                        "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 loop_mode=loop_sustain loop_start=0 loop_end=199\n"));
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 loop_mode=loop_continuous "
+                                        "loop_start=0 loop_end=199\n"
+                                        "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 loop_mode=loop_sustain "
+                                        "loop_start=0 loop_end=199\n"));
 
             auto options = halionbridge::converters::sfz::ConversionOptions{};
             options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
