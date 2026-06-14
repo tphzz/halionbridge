@@ -80,6 +80,7 @@ ctx.path_join(root, rel)
 ctx.save_preset(path, object, preset_type)
 ctx.log(message)
 ctx.progress(done, total, message)
+ctx.yield(ms)
 ```
 
 - `ctx.script_dir`: runtime root directory passed on the command line; it contains `halionbridge_build.lua` and Lua build script files.
@@ -89,6 +90,7 @@ ctx.progress(done, total, message)
 - `ctx.save_preset(path, object, preset_type)`: wraps HALion `savePreset`; defaults `preset_type` to `"H7"`.
 - `ctx.log(message)`: prints a build script log line and writes a host-readable progress marker. halionbridge treats build script log and progress lines as `info` output, so they remain visible at the default `HALIONBRIDGE_LOGLEVEL=info`. Very long messages are shortened in the marker filename; keep essential context near the start of the message.
 - `ctx.progress(done, total, message)`: prints generic build script progress such as `Progress 12/48 ( 25%) - Building zones` and writes the same message through the host-readable progress marker channel. Numeric fields are padded so the message after ` - ` starts at a stable column within the same progress group. Very long messages are shortened in the marker filename; keep essential context near the start of the message.
+- `ctx.yield(ms)`: calls HALion `wait(ms)` when available and returns `true`; outside HALion contexts where `wait` is unavailable, it returns `false`. Long-running build scripts should call this periodically while creating many zones or parameters so HALion can continue processing and avoid its script execution watchdog.
 
 `ctx.progress` is build-script-defined progress. `done` and `total` can represent files, zones, presets, phases, or any other work unit meaningful to that build script.
 

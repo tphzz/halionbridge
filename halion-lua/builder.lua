@@ -341,6 +341,20 @@ local function makeContext(moduleName)
         emit("info", line)
     end
 
+    function context.yield(ms)
+        -- HALion can stop long-running Lua callbacks with "Script time out"
+        -- even when the script is making valid progress. Build scripts that
+        -- create many zones or parameters can call ctx.yield() periodically to
+        -- hand control back to HALion. Outside HALion, or in older contexts
+        -- without wait(), this is a harmless no-op.
+        if type(wait) ~= "function" then
+            return false
+        end
+
+        wait(tonumber(ms) or 1)
+        return true
+    end
+
     return context
 end
 
