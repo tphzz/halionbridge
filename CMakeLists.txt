@@ -16,8 +16,11 @@ include(CTest)
 include(GenerateExportHeader)
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/halionbridge_version.cmake")
 
-# Set C++ standard to C++23 as per requirements
-set(CMAKE_CXX_STANDARD 23)
+# Set C++ standard to C++23 as per requirements. This is cache-backed because
+# vendored sfizz writes its own CMAKE_CXX_STANDARD cache entry during configure;
+# first-party code and sfizz headers must agree on ABI-affecting standard library
+# aliases such as absl::optional.
+set(CMAKE_CXX_STANDARD 23 CACHE STRING "C++ standard for halionbridge and first-party integrated dependencies." FORCE)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
