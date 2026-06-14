@@ -147,16 +147,16 @@ The workflow validates compilation and unit tests only. It does not install, lau
 halionbridge supports setup-time converters through:
 
 ```text
-halionbridge convert <converter-id> <source-directory> <output-directory> [converter-options]
+halionbridge convert <converter-id> <source-directory> [output-directory] [converter-options]
 ```
 
 Converters generate normal halionbridge build directories and then exit. They do not launch HALion. Users can inspect or edit the generated Lua and then run:
 
 ```text
-halionbridge <output-directory>
+halionbridge <build-directory>
 ```
 
-The built-in `sfz` converter scans a source directory for `.sfz` files. It processes only top-level `.sfz` files by default and includes nested files only when `--recursive` is passed. Each `.sfz` file currently generates one Lua build script; one generated `halionbridge_build.lua` lists all generated build entrypoint scripts in deterministic order. Converter-generated helper modules may be emitted beside build scripts and are treated as generated outputs for overwrite checks, but they are not listed in `halionbridge_build.lua`. `--overwrite` is required to replace existing generated files. `--name <name>` is accepted only when exactly one `.sfz` file is converted. Conversion fails before writing files if two SFZ inputs would generate the same output `.vstpreset` filename.
+The built-in `sfz` converter scans a source directory for `.sfz` files. It processes only top-level `.sfz` files by default and includes nested files only when `--recursive` is passed. If the output directory is omitted, the source directory is also the build root; if an output directory is supplied, generated files are written there instead. Each `.sfz` file currently generates one flat Lua build script in the build root; recursive source discovery does not create nested generated Lua. One generated `halionbridge_build.lua` lists all generated build entrypoint scripts in deterministic order. Converter-generated helper modules may be emitted beside build scripts and are treated as generated outputs for overwrite checks, but they are not listed in `halionbridge_build.lua`. `--overwrite` is required to replace existing generated files, including `halionbridge_build.lua`, `halionbridge-sfz.lua`, and generated entrypoint scripts. `--name <name>` is accepted only when exactly one `.sfz` file is converted. Conversion fails before writing files if two SFZ inputs would generate the same output `.vstpreset` filename.
 
 `converters/common` owns reusable converter infrastructure: converter registration, build-directory writing, Lua string escaping, overwrite checks, and deterministic LF output. Format-specific converter modules should pass generated Lua files to this common emitter instead of rewriting build-file logic. Generated Lua files have a role: `buildEntrypoint` files are written and listed in `halionbridge_build.lua`, while `helperModule` files are written but not listed. The emitter accepts only flat relative `.lua` filenames, rejects absolute paths, root paths, `.`/`..`, nested paths, non-`.lua` names, duplicate filenames, duplicate build-entrypoint module names, helper-only output, and reserved helper filenames used as build entrypoints. Validation and overwrite checks run before writing; later filesystem write failures can still leave partial output.
 

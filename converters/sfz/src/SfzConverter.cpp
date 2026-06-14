@@ -1244,7 +1244,9 @@ std::optional<ConvertedSfz> loadSfz(const std::filesystem::path& sfzFile, const 
 std::string helpText()
 {
     return "Usage:\n"
+           "  halionbridge convert sfz <source-directory> [options]\n"
            "  halionbridge convert sfz <source-directory> <output-directory> [options]\n\n"
+           "When output-directory is omitted, generated Lua/build files are written flat into the source directory.\n\n"
            "Options:\n"
            "  --recursive             Convert .sfz files below the source directory recursively.\n"
            "  --overwrite             Replace existing generated Lua/build files.\n"
@@ -1301,15 +1303,15 @@ ConverterResult runConverter(std::span<const std::string> args)
         positional.push_back(arg);
     }
 
-    if (positional.size() != 2)
+    if (positional.empty() || positional.size() > 2)
     {
-        result.diagnostics.push_back(
-            makeError({}, "argument", "halionbridge convert sfz requires a source directory and output directory."));
+        result.diagnostics.push_back(makeError(
+            {}, "argument", "halionbridge convert sfz requires a source directory and optional output directory."));
         return result;
     }
 
     options.sourceDirectory = positional[0];
-    options.outputDirectory = positional[1];
+    options.outputDirectory = positional.size() == 2 ? std::filesystem::path{positional[1]} : options.sourceDirectory;
 
     const auto conversion = convertDirectory(options);
     result.diagnostics = conversion.diagnostics;

@@ -1,1 +1,0 @@
-return require("amp_decay_variant")({ layer_name = "050 012 sustain zero current bump", output_file = "012_sustain_zero_current_bump.vstpreset", sustain_level = 0, decay_duration = 1.0, decay_curve = 0, release_bump = true })

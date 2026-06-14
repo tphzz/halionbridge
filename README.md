@@ -68,11 +68,14 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 # Generate halionbridge_build.lua from top-level Lua files and exit
 ./halionbridge init /path/to/build-directory
 
-# Generate a halionbridge build directory from top-level .sfz files
+# Generate halionbridge Lua build files next to top-level .sfz files
+./halionbridge convert sfz /path/to/sfz-source-directory
+
+# Or write generated build files to a separate directory
 ./halionbridge convert sfz /path/to/sfz-source-directory /path/to/generated-build-directory
 
-# Include nested .sfz files below the source directory
-./halionbridge convert sfz /path/to/sfz-source-directory /path/to/generated-build-directory --recursive
+# Include nested .sfz files below the source directory; generated Lua stays flat in the build root
+./halionbridge convert sfz /path/to/sfz-source-directory --recursive
 
 # Run the generic HALion Lua builder against a build directory
 ./halionbridge /path/to/build-directory
@@ -102,7 +105,7 @@ Only one halionbridge build can run at a time for a user account. HALion resolve
 - **Embedded Bootstrap VSTPreset:** Applies the bundled HALion bootstrap preset internally; users only pass a build directory.
 - **Offline Processing Loop:** Runs a manual processing loop without opening an audio device, to keep HALion alive while LUA instrument scripts execute.
 - **Generic HALion Lua Build Scripts:** The embedded builder loads build script modules listed in `halionbridge_build.lua`; the build script modules decide what to build.
-- **Converter Setup Commands:** `halionbridge convert sfz` creates a normal halionbridge build directory from `.sfz` files without launching HALion. The generated Lua build scripts can be reviewed or edited before running `halionbridge <build-directory>`. Converter-generated Lua filenames are kept inside the output directory; unsafe generated paths are rejected. Converter-generated helper modules may be written beside build scripts without being listed in `halionbridge_build.lua`.
+- **Converter Setup Commands:** `halionbridge convert sfz` creates a normal halionbridge build directory from `.sfz` files without launching HALion. When no output directory is provided, generated Lua/build files are written flat into the source directory; an explicit output directory can still be passed. The generated Lua build scripts can be reviewed or edited before running `halionbridge <build-directory>`. Converter-generated Lua filenames are kept inside the build root; unsafe generated paths are rejected. Converter-generated helper modules may be written beside build scripts without being listed in `halionbridge_build.lua`.
 - **Build Completion Detection:** Waits for HALion-written `.vstpreset` status marker presets in the build directory in order to know when HALion is finished. Temporary progress marker presets are cleaned after logging; failed status markers may remain after failed builds for diagnostics.
 
 See `HALION-LUA.md` for the Lua build script API used by the generic builder workflow.

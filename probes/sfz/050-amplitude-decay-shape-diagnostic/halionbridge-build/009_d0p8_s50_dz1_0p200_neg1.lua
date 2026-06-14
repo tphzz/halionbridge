@@ -1,1 +1,0 @@
-return require("amp_decay_variant")({ layer_name = "050 009 d0.8 s50 dz1 0.200 neg1", output_file = "009_d0p8_s50_dz1_0p200_neg1.vstpreset", sustain_level = 0.5, decay_duration = 0.2, decay_curve = -1 })

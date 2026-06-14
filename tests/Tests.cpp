@@ -719,6 +719,78 @@ class BridgeTests : public juce::UnitTest
             emptyDirectory.deleteRecursively();
         }
 
+        beginTest("SFZ Converter CLI - output directory is optional");
+        {
+            halionbridge::converters::ConverterRegistry registry;
+            halionbridge::converters::registerCompiledConverters(registry);
+            const auto* converter = registry.find("sfz");
+            expect(converter != nullptr);
+            expect(converter != nullptr && converter->run != nullptr);
+
+            const auto runSfzConverter = [converter](const std::vector<std::string>& args)
+            {
+                return converter->run(std::span<const std::string>{args.data(), args.size()});
+            };
+
+            expect(runSfzConverter({}).exitCode != 0);
+            expect(runSfzConverter({"a", "b", "c"}).exitCode != 0);
+
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_cli_source_root");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("instrument.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=60 hikey=60 lovel=0 hivel=127 pitch_keycenter=60\n"));
+
+            auto result = runSfzConverter({sourceDir.getFullPathName().toStdString()});
+            expectEquals(result.exitCode, 0);
+            expect(sourceDir.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(sourceDir.getChildFile("halionbridge-sfz.lua").existsAsFile());
+            expect(sourceDir.getChildFile("000_instrument.lua").existsAsFile());
+
+            result = runSfzConverter({sourceDir.getFullPathName().toStdString()});
+            expect(result.exitCode != 0);
+            expect(containsDiagnosticCode(result.diagnostics, "already-exists"));
+
+            result = runSfzConverter({sourceDir.getFullPathName().toStdString(), "--overwrite"});
+            expectEquals(result.exitCode, 0);
+
+            auto explicitSourceDir = cleanTempDirectory("halionbridge_sfz_cli_explicit_source");
+            auto explicitOutputDir = cleanTempDirectory("halionbridge_sfz_cli_explicit_output");
+            expect(explicitSourceDir.createDirectory());
+            expect(explicitSourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(explicitSourceDir.getChildFile("top.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=61 hikey=61 lovel=0 hivel=127 pitch_keycenter=61\n"));
+
+            result = runSfzConverter({explicitSourceDir.getFullPathName().toStdString(), explicitOutputDir.getFullPathName().toStdString()});
+            expectEquals(result.exitCode, 0);
+            expect(!explicitSourceDir.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(explicitOutputDir.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(explicitOutputDir.getChildFile("000_top.lua").existsAsFile());
+
+            auto recursiveDir = cleanTempDirectory("halionbridge_sfz_cli_recursive_flat");
+            expect(recursiveDir.createDirectory());
+            expect(recursiveDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(recursiveDir.getChildFile("nested").createDirectory());
+            expect(recursiveDir.getChildFile("nested")
+                       .getChildFile("nested.sfz")
+                       .replaceWithText("<region> sample=../sample.wav lokey=62 hikey=62 lovel=0 hivel=127 pitch_keycenter=62\n"));
+
+            result = runSfzConverter({recursiveDir.getFullPathName().toStdString()});
+            expect(result.exitCode != 0);
+            expect(!recursiveDir.getChildFile("halionbridge_build.lua").existsAsFile());
+
+            result = runSfzConverter({recursiveDir.getFullPathName().toStdString(), "--recursive"});
+            expectEquals(result.exitCode, 0);
+            expect(recursiveDir.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(recursiveDir.getChildFile("000_nested.lua").existsAsFile());
+            expect(!recursiveDir.getChildFile("nested").getChildFile("000_nested.lua").existsAsFile());
+
+            sourceDir.deleteRecursively();
+            explicitSourceDir.deleteRecursively();
+            explicitOutputDir.deleteRecursively();
+            recursiveDir.deleteRecursively();
+        }
+
         beginTest("SFZ Converter - recursive discovery is explicit");
         {
             auto sourceDir = cleanTempDirectory("halionbridge_sfz_recursive_source");
