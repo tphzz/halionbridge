@@ -69,4 +69,12 @@ Generated Lua inspection confirmed:
 HALion build completed successfully on 2026-06-14: nine scripts processed,
 nine `.vstpreset` files saved.
 
-Manual validation pending.
+Manual validation on 2026-06-14:
+
+- Same-number pairs match well except for `006_start_50`.
+- `006_start_50` is still off, confirming that the remaining mismatch belongs
+  to `ampeg_start` rather than the calibrated decay mapping.
+
+Decision: the static amp-decay implementation is accepted for the cases covered
+by this probe. Keep `ampeg_start` open and isolate it in a separate focused
+probe before changing converter behavior.
