@@ -1010,7 +1010,38 @@ class BridgeTests : public juce::UnitTest
             expect(result.succeeded);
 
             const auto lua = outputDir.getChildFile("000_default_release.lua").loadFileAsString();
-            expect(lua.contains("{ level = 0, duration = 0.001"));
+            expect(lua.contains("{ level = 0.349"));
+            expect(lua.contains("curve = -0.239"));
+            expect(lua.contains("{ level = 0, duration = "));
+            expect(lua.contains("curve = -1"));
+            expect(lua.contains("sustain_index = 3"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - writes calibrated two-segment amp release");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_two_segment_release");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_two_segment_release_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("release.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=60 hikey=60 pitch_keycenter=60 ampeg_release=1.0\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_release.lua").loadFileAsString();
+            expect(lua.contains("{ level = 0.349"));
+            expect(lua.contains("duration = 0.097"));
+            expect(lua.contains("curve = -0.239"));
+            expect(lua.contains("{ level = 0, duration = 0.506"));
+            expect(lua.contains("curve = -1"));
             expect(lua.contains("sustain_index = 3"));
 
             sourceDir.deleteRecursively();

@@ -30,6 +30,11 @@ namespace
 
 constexpr const char* kSfzHelperLuaFileName = "halionbridge-sfz.lua";
 constexpr float kHalionSfzLevelCompensationDb = 7.8f;
+constexpr float kHalionAmpReleaseTotalScale = 0.604f;
+constexpr float kHalionAmpReleaseEarlyScale = 0.097f;
+constexpr float kHalionAmpReleaseEarlyLevel = 0.35f;
+constexpr float kHalionAmpReleaseEarlyCurve = -0.24f;
+constexpr float kHalionAmpReleaseTailCurve = -1.0f;
 
 struct ConvertedRegion
 {
@@ -64,7 +69,6 @@ struct ConvertedRegion
         float release = 0.001f;
         float attackCurve = 0.0f;
         float decayCurve = 0.0f;
-        float releaseCurve = 0.0f;
     } ampEnvelope;
 };
 
@@ -661,6 +665,22 @@ void appendEnvelopePointLua(std::ostringstream& lua, const float level, const fl
         << " },\n";
 }
 
+void appendReleaseEnvelopePointsLua(std::ostringstream& lua, const float release)
+{
+    if (release <= 0.0f)
+    {
+        appendEnvelopePointLua(lua, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    const auto earlyDuration = release * kHalionAmpReleaseEarlyScale;
+    const auto totalDuration = release * kHalionAmpReleaseTotalScale;
+    const auto tailDuration = std::max(0.0f, totalDuration - earlyDuration);
+
+    appendEnvelopePointLua(lua, kHalionAmpReleaseEarlyLevel, earlyDuration, kHalionAmpReleaseEarlyCurve);
+    appendEnvelopePointLua(lua, 0.0f, tailDuration, kHalionAmpReleaseTailCurve);
+}
+
 void appendAmpEnvelopeLua(std::ostringstream& lua, const ConvertedRegion& region)
 {
     auto sustainIndex = 3;
@@ -683,7 +703,7 @@ void appendAmpEnvelopeLua(std::ostringstream& lua, const ConvertedRegion& region
         appendEnvelopePointLua(lua, 1.0f, region.ampEnvelope.hold, 0.0f);
 
     appendEnvelopePointLua(lua, region.ampEnvelope.sustain, region.ampEnvelope.decay, region.ampEnvelope.decayCurve);
-    appendEnvelopePointLua(lua, 0.0f, region.ampEnvelope.release, region.ampEnvelope.releaseCurve);
+    appendReleaseEnvelopePointsLua(lua, region.ampEnvelope.release);
 
     lua << "            },\n"
         << "            sustain_index = " << sustainIndex << ",\n"
