@@ -8,7 +8,7 @@ namespace halionbridge::converters
 
 bool ConverterRegistry::registerConverter(ConverterDefinition definition)
 {
-    if (definition.id.empty() || definition.run == nullptr)
+    if (definition.id.empty() || (definition.run == nullptr && definition.runWithContext == nullptr))
         return false;
 
     if (find(definition.id) != nullptr)

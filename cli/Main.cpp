@@ -65,7 +65,7 @@ void printHelp()
               << "  halionbridge <build-directory> [options]\n"
               << "  halionbridge init <build-directory> [--overwrite]\n"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
-              << "  halionbridge convert <converter-id> <source-directory> <output-directory> [converter-options]\n"
+              << "  halionbridge convert <converter-id> <source-directory> [output-directory] [converter-options]\n"
 #endif
               << "\n"
               << "Required argument:\n"
@@ -86,6 +86,8 @@ void printHelp()
               << "\n"
               << "Runtime options:\n"
               << "  --timeout-seconds <n>    Build completion timeout. Defaults to 0, which waits forever.\n"
+              << "  --build-chunk-size <n>   Number of Lua build scripts per HALion run. Defaults to 15.\n"
+              << "  --fail-fast              Stop after the first failed Lua build chunk.\n"
               << "  --gui                    Use JUCE's GUI-capable VST3 host format and show HALion's editor.\n"
               << "  --nokill                 Keep HALion loaded after build completion or failure for inspection.\n"
               << "\n"
@@ -118,7 +120,7 @@ void printConvertHelp()
     std::cout << "halionbridge convert\n"
               << "\n"
               << "Usage:\n"
-              << "  halionbridge convert <converter-id> <source-directory> <output-directory> [converter-options]\n"
+              << "  halionbridge convert <converter-id> <source-directory> [output-directory] [converter-options]\n"
               << "  halionbridge convert --list\n"
               << "  halionbridge convert <converter-id> --help\n";
 }
@@ -184,9 +186,31 @@ int runConvertCommand(std::span<const std::string> args)
     }
 
     const auto converterArgs = std::span<const std::string>(args.data() + 1, args.size() - 1);
-    const auto result = converter->run(converterArgs);
-    for (const auto& diagnostic : result.diagnostics)
-        logDiagnostic(diagnostic);
+    auto usedStreamingContext = false;
+    auto result = halionbridge::converters::ConverterResult{};
+
+    if (converter->runWithContext != nullptr)
+    {
+        auto context = halionbridge::converters::ConverterRunContext{
+            [](const halionbridge::converters::Diagnostic& diagnostic, void*) { logDiagnostic(diagnostic); }, nullptr};
+        result = converter->runWithContext(converterArgs, context);
+        usedStreamingContext = true;
+    }
+    else if (converter->run != nullptr)
+    {
+        result = converter->run(converterArgs);
+    }
+    else
+    {
+        halionbridge::log::error("Converter '{}' is not executable.", args[0]);
+        return 1;
+    }
+
+    if (!usedStreamingContext)
+        for (const auto& diagnostic : result.diagnostics)
+            logDiagnostic(diagnostic);
+
+    halionbridge::log::flush();
 
     return result.exitCode;
 }
@@ -266,6 +290,7 @@ int main(int argc, char* argv[])
             }
         }
 
+        halionbridge::log::flush();
         return initResult.exitCode;
     }
 
@@ -273,7 +298,9 @@ int main(int argc, char* argv[])
     if (juceArgs.size() > 0 && juceArgs[0] == "convert")
     {
         const auto convertArgs = std::span<const std::string>(args.data() + 1, args.size() - 1);
-        return runConvertCommand(convertArgs);
+        const auto exitCode = runConvertCommand(convertArgs);
+        halionbridge::log::flush();
+        return exitCode;
     }
 #endif
 
@@ -296,6 +323,7 @@ int main(int argc, char* argv[])
     if (!options)
     {
         juce::Logger::setCurrentLogger(nullptr);
+        halionbridge::log::flush();
         return 1;
     }
 
@@ -307,9 +335,11 @@ int main(int argc, char* argv[])
     {
         halionbridge::log::error("Failed to run halionbridge.");
         juce::Logger::setCurrentLogger(nullptr);
+        halionbridge::log::flush();
         return 1;
     }
 
     juce::Logger::setCurrentLogger(nullptr);
+    halionbridge::log::flush();
     return 0;
 }

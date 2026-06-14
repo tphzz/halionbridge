@@ -83,6 +83,11 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 # By default, halionbridge waits forever and prints a warning. Set a timeout when desired.
 ./halionbridge /path/to/build-directory --timeout-seconds 3600
 
+# Build scripts run in chunks of 15 by default and continue after failed chunks.
+# Tune chunk size or stop after the first failed chunk when desired.
+./halionbridge /path/to/build-directory --build-chunk-size 30
+./halionbridge /path/to/build-directory --fail-fast
+
 # Override the default HALion 7 VST3 plugin search path
 ./halionbridge /path/to/build-directory --plugin /path/to/custom/HALion 7.vst3
 
@@ -106,6 +111,6 @@ Only one halionbridge build can run at a time for a user account. HALion resolve
 - **Offline Processing Loop:** Runs a manual processing loop without opening an audio device, to keep HALion alive while LUA instrument scripts execute.
 - **Generic HALion Lua Build Scripts:** The embedded builder loads build script modules listed in `halionbridge_build.lua`; the build script modules decide what to build.
 - **Converter Setup Commands:** `halionbridge convert sfz` creates a normal halionbridge build directory from `.sfz` files without launching HALion. When no output directory is provided, generated Lua/build files are written flat into the source directory; an explicit output directory can still be passed. The generated Lua build scripts can be reviewed or edited before running `halionbridge <build-directory>`. Converter-generated Lua filenames are kept inside the build root; unsafe generated paths are rejected. Converter-generated helper modules may be written beside build scripts without being listed in `halionbridge_build.lua`.
-- **Build Completion Detection:** Waits for HALion-written `.vstpreset` status marker presets in the build directory in order to know when HALion is finished. Temporary progress marker presets are cleaned after logging; failed status markers may remain after failed builds for diagnostics.
+- **Build Completion Detection:** Runs static `halionbridge_build.lua` lists in chunks of 15 scripts by default, relaunching HALion for each chunk so later chunks can continue after a failed chunk. Waits for HALion-written `.vstpreset` status marker presets in the build directory in order to know when each chunk is finished. Temporary progress marker presets are cleaned after logging; failed status markers may remain after failed builds for diagnostics.
 
 See `HALION-LUA.md` for the Lua build script API used by the generic builder workflow.

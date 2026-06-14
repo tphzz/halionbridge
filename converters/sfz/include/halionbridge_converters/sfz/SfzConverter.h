@@ -13,6 +13,7 @@ struct ConversionOptions
     std::filesystem::path sourceDirectory;
     std::filesystem::path outputDirectory;
     std::optional<std::string> name;
+    const ConverterRunContext* context = nullptr;
     bool recursive = false;
     bool overwrite = false;
 };

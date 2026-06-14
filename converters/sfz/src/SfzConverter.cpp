@@ -296,6 +296,11 @@ Diagnostic makeWarning(const std::filesystem::path& source, std::string code, st
     return makeDiagnostic(DiagnosticLevel::warning, source, std::move(code), std::move(message));
 }
 
+Diagnostic makeInfo(const std::filesystem::path& source, std::string code, std::string message)
+{
+    return makeDiagnostic(DiagnosticLevel::info, source, std::move(code), std::move(message));
+}
+
 std::string toGenericString(const std::filesystem::path& path)
 {
     return path.lexically_normal().generic_string();
@@ -1254,10 +1259,11 @@ std::string helpText()
            "  --help, -h              Show this help and exit.\n";
 }
 
-ConverterResult runConverter(std::span<const std::string> args)
+ConverterResult runConverterWithContext(std::span<const std::string> args, const ConverterRunContext& context)
 {
     auto result = ConverterResult{};
     auto options = ConversionOptions{};
+    options.context = &context;
     std::vector<std::string> positional;
 
     for (size_t i = 0; i < args.size(); ++i)
@@ -1267,6 +1273,7 @@ ConverterResult runConverter(std::span<const std::string> args)
         {
             result.exitCode = 0;
             result.diagnostics.push_back(Diagnostic{DiagnosticLevel::info, {}, 0, "help", helpText()});
+            context.report(result.diagnostics.back());
             return result;
         }
 
@@ -1287,6 +1294,7 @@ ConverterResult runConverter(std::span<const std::string> args)
             if (i + 1 >= args.size())
             {
                 result.diagnostics.push_back(makeError({}, "argument", "--name requires a value."));
+                context.report(result.diagnostics.back());
                 return result;
             }
 
@@ -1297,6 +1305,7 @@ ConverterResult runConverter(std::span<const std::string> args)
         if (!arg.empty() && arg[0] == '-')
         {
             result.diagnostics.push_back(makeError({}, "argument", "Unknown sfz converter argument: " + arg));
+            context.report(result.diagnostics.back());
             return result;
         }
 
@@ -1307,6 +1316,7 @@ ConverterResult runConverter(std::span<const std::string> args)
     {
         result.diagnostics.push_back(makeError(
             {}, "argument", "halionbridge convert sfz requires a source directory and optional output directory."));
+        context.report(result.diagnostics.back());
         return result;
     }
 
@@ -1323,9 +1333,15 @@ ConverterResult runConverter(std::span<const std::string> args)
                                                     " Lua file(s), including " + std::to_string(conversion.sfzFilesConverted) +
                                                     " build script(s), from " + std::to_string(conversion.sfzFilesConverted) +
                                                     " SFZ file(s)."});
+        context.report(result.diagnostics.back());
     }
 
     return result;
+}
+
+ConverterResult runConverter(std::span<const std::string> args)
+{
+    return runConverterWithContext(args, ConverterRunContext{});
 }
 
 } // namespace
@@ -1333,12 +1349,32 @@ ConverterResult runConverter(std::span<const std::string> args)
 ConversionResult convertDirectory(const ConversionOptions& options)
 {
     auto result = ConversionResult{};
+    size_t reportedDiagnostics = 0;
+
+    auto reportPendingDiagnostics = [&]()
+    {
+        if (options.context == nullptr)
+        {
+            reportedDiagnostics = result.diagnostics.size();
+            return;
+        }
+
+        for (; reportedDiagnostics < result.diagnostics.size(); ++reportedDiagnostics)
+            options.context->report(result.diagnostics[reportedDiagnostics]);
+    };
+
+    auto addDiagnostic = [&](Diagnostic diagnostic)
+    {
+        result.diagnostics.push_back(std::move(diagnostic));
+        reportPendingDiagnostics();
+    };
 
     std::error_code error;
     if (!std::filesystem::exists(options.sourceDirectory, error))
     {
         result.diagnostics.push_back(makeError(options.sourceDirectory, "source-missing",
                                                "SFZ source directory does not exist: " + options.sourceDirectory.string()));
+        reportPendingDiagnostics();
         return result;
     }
 
@@ -1346,11 +1382,14 @@ ConversionResult convertDirectory(const ConversionOptions& options)
     {
         result.diagnostics.push_back(makeError(options.sourceDirectory, "source-not-directory",
                                                "SFZ source path is not a directory: " + options.sourceDirectory.string()));
+        reportPendingDiagnostics();
         return result;
     }
 
+    addDiagnostic(makeInfo(options.sourceDirectory, "scan-started", "Scanning " + options.sourceDirectory.string() + " for SFZ files."));
     auto searchResult = findSfzFiles(options.sourceDirectory, options.recursive);
     result.diagnostics.insert(result.diagnostics.end(), searchResult.diagnostics.begin(), searchResult.diagnostics.end());
+    reportPendingDiagnostics();
     if (!searchResult.diagnostics.empty())
         return result;
 
@@ -1360,13 +1399,18 @@ ConversionResult convertDirectory(const ConversionOptions& options)
         result.diagnostics.push_back(makeError(options.sourceDirectory, "no-sfz",
                                                "No .sfz files were found in " + options.sourceDirectory.string() +
                                                    (options.recursive ? "." : ". Use --recursive to include nested directories.")));
+        reportPendingDiagnostics();
         return result;
     }
+
+    addDiagnostic(makeInfo(options.sourceDirectory, "scan-complete",
+                           "Found " + std::to_string(sfzFiles.size()) + " SFZ file(s) in " + options.sourceDirectory.string() + "."));
 
     if (options.name && sfzFiles.size() != 1)
     {
         result.diagnostics.push_back(makeError(options.sourceDirectory, "name-with-multiple-files",
                                                "--name can only be used when exactly one .sfz file is converted."));
+        reportPendingDiagnostics();
         return result;
     }
 
@@ -1375,18 +1419,26 @@ ConversionResult convertDirectory(const ConversionOptions& options)
 
     for (size_t i = 0; i < sfzFiles.size(); ++i)
     {
+        addDiagnostic(makeInfo(sfzFiles[i], "convert-started",
+                               "Converting " + std::to_string(i + 1) + "/" + std::to_string(sfzFiles.size()) + ": " +
+                                   sfzFiles[i].string()));
         auto converted = loadSfz(sfzFiles[i], options.name, result.diagnostics, result.regionsSkipped);
+        reportPendingDiagnostics();
         if (!converted)
             continue;
 
         ++result.sfzFilesConverted;
         result.regionsConverted += static_cast<int>(converted->regions.size());
+        addDiagnostic(makeInfo(sfzFiles[i], "convert-complete",
+                               "Converted " + sfzFiles[i].string() + " with " + std::to_string(converted->regions.size()) +
+                                   " region(s)."));
         convertedFiles.push_back(std::move(*converted));
     }
 
     if (convertedFiles.empty())
     {
         result.diagnostics.push_back(makeError(options.sourceDirectory, "no-generated-scripts", "No Lua build scripts were generated."));
+        reportPendingDiagnostics();
         return result;
     }
 
@@ -1400,6 +1452,7 @@ ConversionResult convertDirectory(const ConversionOptions& options)
             result.diagnostics.push_back(makeError(converted.sourceFile, "duplicate-preset-name",
                                                    "SFZ files generate the same preset filename '" + converted.presetFileName +
                                                        "': " + it->second.string() + " and " + converted.sourceFile.string()));
+            reportPendingDiagnostics();
             result.succeeded = false;
             return result;
         }
@@ -1417,10 +1470,14 @@ ConversionResult convertDirectory(const ConversionOptions& options)
         scripts.push_back(GeneratedLuaScript{moduleName, moduleName, buildLuaSource(convertedFiles[i])});
     }
 
+    addDiagnostic(makeInfo(options.outputDirectory, "write-started",
+                           "Writing " + std::to_string(scripts.size()) + " generated Lua file(s) to " +
+                               options.outputDirectory.string() + "."));
     auto emitResult = writeBuildDirectory(BuildDirectoryRequest{options.outputDirectory, options.overwrite, scripts});
     result.buildFile = emitResult.buildFile;
     result.generatedLuaFiles = emitResult.generatedLuaFiles;
     result.diagnostics.insert(result.diagnostics.end(), emitResult.diagnostics.begin(), emitResult.diagnostics.end());
+    reportPendingDiagnostics();
     result.succeeded = emitResult.succeeded;
     return result;
 }
@@ -1428,7 +1485,8 @@ ConversionResult convertDirectory(const ConversionOptions& options)
 void registerConverter(ConverterRegistry& registry)
 {
     registry.registerConverter(
-        ConverterDefinition{"sfz", "SFZ", "Generate HALion Lua build scripts from SFZ directories.", runConverter, helpText});
+        ConverterDefinition{"sfz", "SFZ", "Generate HALion Lua build scripts from SFZ directories.", runConverter, runConverterWithContext,
+                            helpText});
 }
 
 } // namespace halionbridge::converters::sfz

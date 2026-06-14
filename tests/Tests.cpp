@@ -276,6 +276,44 @@ class BridgeTests : public juce::UnitTest
             tempDir.deleteRecursively();
         }
 
+        beginTest("Argument Parsing - Build chunking");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_chunk_build_dir");
+            tempDir.createDirectory();
+            tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return {}");
+
+            {
+                auto options = halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString()});
+                expect(options.has_value());
+                if (options)
+                {
+                    expectEquals(options->buildChunkSize, 15);
+                    expect(!options->failFast);
+                }
+            }
+
+            {
+                auto options =
+                    halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--build-chunk-size", "3"});
+                expect(options.has_value());
+                if (options)
+                    expectEquals(options->buildChunkSize, 3);
+            }
+
+            {
+                auto options = halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--fail-fast"});
+                expect(options.has_value());
+                if (options)
+                    expect(options->failFast);
+            }
+
+            expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--build-chunk-size", "0"}).has_value());
+            expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--build-chunk-size", "abc"}).has_value());
+            expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--build-chunk-size"}).has_value());
+
+            tempDir.deleteRecursively();
+        }
+
         beginTest("Argument Parsing - No-kill inspection hold");
         {
             auto tempDir = cleanTempDirectory("halionbridge_nokill_build_dir");
@@ -532,9 +570,16 @@ class BridgeTests : public juce::UnitTest
             expect(registry.find("sfz") != nullptr);
             expect(registry.find("missing") == nullptr);
 
-            auto duplicate =
-                halionbridge::converters::ConverterDefinition{"sfz", "Duplicate", "Duplicate", converters.front().run, nullptr};
+            auto duplicate = halionbridge::converters::ConverterDefinition{"sfz", "Duplicate", "Duplicate", converters.front().run,
+                                                                           converters.front().runWithContext, nullptr};
             expect(!registry.registerConverter(duplicate));
+
+            auto contextOnly = halionbridge::converters::ConverterDefinition{
+                "context-only", "Context Only", "Context Only", nullptr,
+                [](std::span<const std::string>, const halionbridge::converters::ConverterRunContext&)
+                { return halionbridge::converters::ConverterResult{0, {}}; },
+                nullptr};
+            expect(registry.registerConverter(contextOnly));
         }
 
         beginTest("SFZ Helper Lua - exposes conservative v1 API");
@@ -753,6 +798,25 @@ class BridgeTests : public juce::UnitTest
 
             result = runSfzConverter({sourceDir.getFullPathName().toStdString(), "--overwrite"});
             expectEquals(result.exitCode, 0);
+
+            if (converter->runWithContext != nullptr)
+            {
+                std::vector<halionbridge::converters::Diagnostic> streamedDiagnostics;
+                auto context = halionbridge::converters::ConverterRunContext{
+                    [](const halionbridge::converters::Diagnostic& diagnostic, void* userData)
+                    {
+                        auto* diagnostics = static_cast<std::vector<halionbridge::converters::Diagnostic>*>(userData);
+                        diagnostics->push_back(diagnostic);
+                    },
+                    &streamedDiagnostics};
+                auto streamArgs = std::vector<std::string>{sourceDir.getFullPathName().toStdString(), "--overwrite"};
+                result = converter->runWithContext(std::span<const std::string>{streamArgs.data(), streamArgs.size()}, context);
+                expectEquals(result.exitCode, 0);
+                expect(!streamedDiagnostics.empty());
+                expect(containsDiagnosticCode(streamedDiagnostics, "scan-started"));
+                expect(containsDiagnosticCode(streamedDiagnostics, "convert-started"));
+                expect(containsDiagnosticCode(streamedDiagnostics, "generated"));
+            }
 
             auto explicitSourceDir = cleanTempDirectory("halionbridge_sfz_cli_explicit_source");
             auto explicitOutputDir = cleanTempDirectory("halionbridge_sfz_cli_explicit_output");
@@ -1647,6 +1711,12 @@ class BridgeTests : public juce::UnitTest
             expect(text.find("C:/test/halion build") != std::string::npos);
             expect(text.find("halionbridge_builder") != std::string::npos);
             expect(text.find("runtimePathPrefix") != std::string::npos);
+            expect(text.find("HALIONBRIDGE_BUILD_SLICE_START = nil") != std::string::npos);
+
+            auto slicedText = halionbridge::Bridge::createRuntimeModuleText(buildDirectory, 16, 15, 42);
+            expect(slicedText.find("HALIONBRIDGE_BUILD_SLICE_START = 16") != std::string::npos);
+            expect(slicedText.find("HALIONBRIDGE_BUILD_SLICE_COUNT = 15") != std::string::npos);
+            expect(slicedText.find("HALIONBRIDGE_BUILD_TOTAL = 42") != std::string::npos);
         }
 
         beginTest("Plugin Location - platform default path");
