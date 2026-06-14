@@ -35,6 +35,7 @@ constexpr float kHalionAmpReleaseEarlyScale = 0.097f;
 constexpr float kHalionAmpReleaseEarlyLevel = 0.35f;
 constexpr float kHalionAmpReleaseEarlyCurve = -0.24f;
 constexpr float kHalionAmpReleaseTailCurve = -1.0f;
+constexpr float kHalionAmpDecayZeroOneScale = 0.5f;
 
 struct ConvertedRegion
 {
@@ -65,10 +66,10 @@ struct ConvertedRegion
         float attack = 0.0f;
         float hold = 0.0f;
         float decay = 0.0f;
+        int decayZero = 1;
         float sustain = 1.0f;
         float release = 0.001f;
         float attackCurve = 0.0f;
-        float decayCurve = 0.0f;
     } ampEnvelope;
 };
 
@@ -486,14 +487,6 @@ float clampEnvelopeLevel(const std::filesystem::path& sourceFile, const int regi
     return clamped;
 }
 
-float decayDurationToSustain(const float decay, const float sustain, const int decayZero)
-{
-    if (decayZero == 0)
-        return decay;
-
-    return decay * std::clamp(1.0f - sustain, 0.0f, 1.0f);
-}
-
 bool differsFromDefault(const float value, const float defaultValue)
 {
     return std::abs(value - defaultValue) > 0.0001f;
@@ -629,8 +622,8 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
     converted.ampEnvelope.attack = clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_attack", region.amplitudeEG.attack, diagnostics);
     converted.ampEnvelope.hold = clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_hold", region.amplitudeEG.hold, diagnostics);
     converted.ampEnvelope.sustain = clampEnvelopeLevel(sourceFile, regionIndex, "ampeg_sustain", region.amplitudeEG.sustain, diagnostics);
-    const auto decay = clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_decay", region.amplitudeEG.decay, diagnostics);
-    converted.ampEnvelope.decay = decayDurationToSustain(decay, converted.ampEnvelope.sustain, explicitOpcodes.decayZero.value_or(1));
+    converted.ampEnvelope.decay = clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_decay", region.amplitudeEG.decay, diagnostics);
+    converted.ampEnvelope.decayZero = explicitOpcodes.decayZero.value_or(1);
     converted.ampEnvelope.release =
         clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_release", region.amplitudeEG.release, diagnostics);
 
@@ -665,9 +658,34 @@ void appendEnvelopePointLua(std::ostringstream& lua, const float level, const fl
         << " },\n";
 }
 
-void appendReleaseEnvelopePointsLua(std::ostringstream& lua, const float release)
+int appendDecayEnvelopePointsLua(std::ostringstream& lua, const float sustain, const float decay, const int decayZero)
 {
-    if (release <= 0.0f)
+    if (decay <= 0.0f || sustain >= 1.0f)
+    {
+        appendEnvelopePointLua(lua, sustain, 0.0f, 0.0f);
+        return 1;
+    }
+
+    if (sustain <= 0.0f)
+    {
+        const auto earlyDuration = decay * kHalionAmpReleaseEarlyScale;
+        const auto totalDuration = decay * kHalionAmpReleaseTotalScale;
+        const auto tailDuration = std::max(0.0f, totalDuration - earlyDuration);
+
+        appendEnvelopePointLua(lua, kHalionAmpReleaseEarlyLevel, earlyDuration, kHalionAmpReleaseEarlyCurve);
+        appendEnvelopePointLua(lua, 0.0f, tailDuration, kHalionAmpReleaseTailCurve);
+        return 2;
+    }
+
+    const auto duration = decayZero == 0 ? decay * kHalionAmpReleaseTotalScale
+                                         : decay * std::clamp(1.0f - sustain, 0.0f, 1.0f) * kHalionAmpDecayZeroOneScale;
+    appendEnvelopePointLua(lua, sustain, duration, kHalionAmpReleaseTailCurve);
+    return 1;
+}
+
+void appendReleaseEnvelopePointsLua(std::ostringstream& lua, const float release, const float releaseStartLevel)
+{
+    if (release <= 0.0f || releaseStartLevel <= 0.0f)
     {
         appendEnvelopePointLua(lua, 0.0f, 0.0f, 0.0f);
         return;
@@ -677,13 +695,21 @@ void appendReleaseEnvelopePointsLua(std::ostringstream& lua, const float release
     const auto totalDuration = release * kHalionAmpReleaseTotalScale;
     const auto tailDuration = std::max(0.0f, totalDuration - earlyDuration);
 
-    appendEnvelopePointLua(lua, kHalionAmpReleaseEarlyLevel, earlyDuration, kHalionAmpReleaseEarlyCurve);
+    appendEnvelopePointLua(lua, releaseStartLevel * kHalionAmpReleaseEarlyLevel, earlyDuration, kHalionAmpReleaseEarlyCurve);
     appendEnvelopePointLua(lua, 0.0f, tailDuration, kHalionAmpReleaseTailCurve);
 }
 
 void appendAmpEnvelopeLua(std::ostringstream& lua, const ConvertedRegion& region)
 {
-    auto sustainIndex = 3;
+    auto sustainIndex = 0;
+    auto pointIndex = 0;
+
+    auto appendPoint = [&](const float level, const float duration, const float curve)
+    {
+        appendEnvelopePointLua(lua, level, duration, curve);
+        ++pointIndex;
+    };
+
     if (region.ampEnvelope.delay > 0.0f)
         ++sustainIndex;
     if (region.ampEnvelope.hold > 0.0f)
@@ -692,18 +718,22 @@ void appendAmpEnvelopeLua(std::ostringstream& lua, const ConvertedRegion& region
     lua << "        amp_envelope = {\n"
         << "            points = {\n";
 
-    appendEnvelopePointLua(lua, region.ampEnvelope.start, 0.0f, 0.0f);
+    appendPoint(region.ampEnvelope.start, 0.0f, 0.0f);
 
     if (region.ampEnvelope.delay > 0.0f)
-        appendEnvelopePointLua(lua, region.ampEnvelope.start, region.ampEnvelope.delay, 0.0f);
+        appendPoint(region.ampEnvelope.start, region.ampEnvelope.delay, 0.0f);
 
-    appendEnvelopePointLua(lua, 1.0f, region.ampEnvelope.attack, region.ampEnvelope.attackCurve);
+    appendPoint(1.0f, region.ampEnvelope.attack, region.ampEnvelope.attackCurve);
 
     if (region.ampEnvelope.hold > 0.0f)
-        appendEnvelopePointLua(lua, 1.0f, region.ampEnvelope.hold, 0.0f);
+        appendPoint(1.0f, region.ampEnvelope.hold, 0.0f);
 
-    appendEnvelopePointLua(lua, region.ampEnvelope.sustain, region.ampEnvelope.decay, region.ampEnvelope.decayCurve);
-    appendReleaseEnvelopePointsLua(lua, region.ampEnvelope.release);
+    const auto decayPointCount =
+        appendDecayEnvelopePointsLua(lua, region.ampEnvelope.sustain, region.ampEnvelope.decay, region.ampEnvelope.decayZero);
+    pointIndex += decayPointCount;
+    sustainIndex = pointIndex;
+
+    appendReleaseEnvelopePointsLua(lua, region.ampEnvelope.release, region.ampEnvelope.sustain);
 
     lua << "            },\n"
         << "            sustain_index = " << sustainIndex << ",\n"

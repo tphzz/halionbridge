@@ -1,0 +1,18 @@
+return {
+    "000_d1_s40_dz1_linear_0p600.lua",
+    "001_d1_s40_dz1_exp_0p102_neg1.lua",
+    "002_d1_s40_dz1_0p200_neg1.lua",
+    "003_d1_s40_dz1_0p300_neg1.lua",
+    "004_d1_s40_dz0_linear_1p000.lua",
+    "005_d1_s40_dz0_0p604_neg1.lua",
+    "006_d1_s40_dz0_0p500_neg1.lua",
+    "007_d1_s40_dz0_0p200_neg1.lua",
+    "008_d0p8_s50_dz1_linear_0p400.lua",
+    "009_d0p8_s50_dz1_0p200_neg1.lua",
+    "010_d0p8_s50_dz1_exp_0p062_neg1.lua",
+    "011_d0p8_s50_dz1_0p400_neg1.lua",
+    "012_sustain_zero_current_bump.lua",
+    "013_sustain_zero_1p000_neg1_no_bump.lua",
+    "014_sustain_zero_0p604_neg1_no_bump.lua",
+    "015_sustain_zero_two_segment_decay.lua",
+}

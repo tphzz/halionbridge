@@ -1,0 +1,1 @@
+return require("amp_decay_variant")({ layer_name = "050 011 d0.8 s50 dz1 0.400 neg1", output_file = "011_d0p8_s50_dz1_0p400_neg1.vstpreset", sustain_level = 0.5, decay_duration = 0.4, decay_curve = -1 })

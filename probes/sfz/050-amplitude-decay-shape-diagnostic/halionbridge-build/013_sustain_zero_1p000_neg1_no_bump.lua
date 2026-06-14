@@ -1,0 +1,1 @@
+return require("amp_decay_variant")({ layer_name = "050 013 sustain zero 1.000 neg1 no bump", output_file = "013_sustain_zero_1p000_neg1_no_bump.vstpreset", sustain_level = 0, decay_duration = 1.0, decay_curve = -1 })

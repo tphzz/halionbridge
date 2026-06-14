@@ -1,0 +1,1 @@
+return require("amp_decay_variant")({ layer_name = "050 015 sustain zero two segment decay", output_file = "015_sustain_zero_two_segment_decay.vstpreset", sustain_level = 0, decay_points = { { level = 0.35, duration = 0.097, curve = -0.24 }, { level = 0, duration = 0.507, curve = -1 } } })

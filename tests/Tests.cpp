@@ -983,11 +983,43 @@ class BridgeTests : public juce::UnitTest
             expect(lua.contains("{ level = 0.100000001, duration = 0.0199999996, curve = 0 }"));
             expect(lua.contains("{ level = 1, duration = 0.25, curve = 0 }"));
             expect(lua.contains("{ level = 1, duration = 0.100000001, curve = 0 }"));
-            expect(lua.contains("{ level = 0.400000006, duration = 0.300000012, curve = 0 }"));
+            expect(lua.contains("{ level = 0.400000006, duration = 0.150000006, curve = -1 }"));
             expect(lua.contains("{ level = 0, duration = 0, curve = 0 }"));
             expect(lua.contains("sustain_index = 5"));
             expect(lua.contains("hb.append_sample_zone(ctx, layer, region)"));
             expect(!lua.contains("setAmpEnvelopeRequired"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - writes calibrated amp decay shapes");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_decay_shapes");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_decay_shapes_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("decay.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=60 hikey=60 pitch_keycenter=60 "
+                                        "ampeg_attack=0.01 ampeg_decay=1.0 ampeg_sustain=40 ampeg_release=0\n"
+                                        "<region> sample=sample.wav lokey=61 hikey=61 pitch_keycenter=61 "
+                                        "ampeg_attack=0.01 ampeg_decay=1.0 ampeg_decay_zero=0 ampeg_sustain=40 ampeg_release=0\n"
+                                        "<region> sample=sample.wav lokey=62 hikey=62 pitch_keycenter=62 "
+                                        "ampeg_attack=0.01 ampeg_decay=1.0 ampeg_sustain=0 ampeg_release=0.7\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_decay.lua").loadFileAsString();
+            expect(lua.contains("{ level = 0.400000006, duration = 0.300000012, curve = -1 }"));
+            expect(lua.contains("{ level = 0.400000006, duration = 0.603999"));
+            expect(lua.contains("{ level = 0.349999994, duration = 0.0970000029, curve = -0.239999995 }"));
+            expect(lua.contains("{ level = 0, duration = 0.506999969, curve = -1 }"));
+            expect(!lua.contains("{ level = 0.349999994, duration = 0.067900002"));
 
             sourceDir.deleteRecursively();
             outputDir.deleteRecursively();
