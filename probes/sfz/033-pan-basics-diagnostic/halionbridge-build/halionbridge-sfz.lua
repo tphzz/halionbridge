@@ -18,7 +18,6 @@ hb.capabilities = {
     amp_envelope = true,
     amp_velocity_to_level = true,
     volume = true,
-    pan = true,
     filter_cutoff = true,
     transpose = true,
     tune = true,
@@ -26,6 +25,7 @@ hb.capabilities = {
 
     sample_offset = false,
     sample_end = false,
+    pan = false,
     pitch_bend = false,
     crossfade = false,
     random_selection = false,
@@ -351,11 +351,6 @@ function hb.apply_optional_sample_fields(ctx, zone, region)
     local amp_velocity_to_level = type(gain) == "table" and gain.amp_velocity_to_level or region and region.amp_velocity_to_level
     if amp_velocity_to_level then
         hb.set_parameter_if_available(ctx, zone, "Amp Env.VelocityToLevel", amp_velocity_to_level)
-    end
-
-    local amp_pan = type(gain) == "table" and gain.amp_pan or region and region.amp_pan
-    if amp_pan then
-        hb.set_parameter_if_available(ctx, zone, "Amp.Pan", amp_pan)
     end
 
     local filter = region and region.filter or nil

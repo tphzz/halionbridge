@@ -46,6 +46,7 @@ struct ConvertedRegion
     int64_t loopEnd = 0;
     std::optional<float> sampleOscLevelDb;
     std::optional<float> ampVelocityToLevel;
+    std::optional<float> ampPan;
     std::optional<float> filterCutoff;
     struct
     {
@@ -468,6 +469,19 @@ float clampAmpVelocityToLevel(const std::filesystem::path& sourceFile, const int
     return clamped;
 }
 
+float clampAmpPan(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
+                  std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= -100.0f && value <= 100.0f)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, -100.0f, 100.0f) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "pan-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " pan value " + std::to_string(value) +
+                                          " is outside HALion's Amp.Pan -100..100 range; using " + std::to_string(clamped) + "."));
+    return clamped;
+}
+
 std::vector<ExplicitRegionOpcodes> collectExplicitRegionOpcodes(const std::filesystem::path& sfzFile, std::vector<Diagnostic>& diagnostics)
 {
     auto collector = ExplicitRegionOpcodeCollector{};
@@ -534,6 +548,10 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
 
     converted.ampVelocityToLevel =
         clampAmpVelocityToLevel(sourceFile, regionIndex, ::sfz::Default::ampVeltrack.denormalizeInput(region.ampVeltrack), diagnostics);
+    const auto ampPan = ::sfz::Default::pan.denormalizeInput(region.pan);
+    if (differsFromDefault(ampPan, 0.0f))
+        converted.ampPan = clampAmpPan(sourceFile, regionIndex, ampPan, diagnostics);
+
     if (!region.filters.empty())
         converted.filterCutoff = ::sfz::Default::filterCutoff.denormalizeInput(region.filters.front().cutoff);
 
@@ -619,8 +637,10 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
     {
         lua << "        gain = {\n"
             << "            sample_osc_level_db = " << luaNumber(*region.sampleOscLevelDb) << ",\n"
-            << "            amp_velocity_to_level = " << luaNumber(*region.ampVelocityToLevel) << ",\n"
-            << "        },\n";
+            << "            amp_velocity_to_level = " << luaNumber(*region.ampVelocityToLevel) << ",\n";
+        if (region.ampPan)
+            lua << "            amp_pan = " << luaNumber(*region.ampPan) << ",\n";
+        lua << "        },\n";
     }
 
     if (region.filterCutoff)
