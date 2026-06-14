@@ -1534,8 +1534,8 @@ class BridgeTests : public juce::UnitTest
             expect(firstLua.contains("hb.append_sample_zone(ctx, layer, region)"));
             expect(firstLua.contains("hb.save_layer_preset(ctx, layer, outputFile)"));
             expect(firstLua.contains("local progressInterval = 25"));
-            expect(firstLua.contains("local yieldInterval = 10"));
-            expect(firstLua.contains("ctx.yield(1)"));
+            expect(!firstLua.contains("ctx.yield"));
+            expect(!firstLua.contains("wait("));
             expect(!firstLua.contains("local function setNameIfAvailable"));
             expect(!firstLua.contains("local function setParameterRequired"));
             expect(!firstLua.contains("local function setParameterIfAvailable"));
@@ -1726,8 +1726,9 @@ class BridgeTests : public juce::UnitTest
 
             const auto builderLua =
                 juce::File::getCurrentWorkingDirectory().getChildFile("halion-lua").getChildFile("builder.lua").loadFileAsString();
-            expect(builderLua.contains("function context.yield(ms)"));
-            expect(builderLua.contains("wait(tonumber(ms) or 1)"));
+            expect(builderLua.contains("BUILD_SCRIPT_TIMEOUT_MS = 600000"));
+            expect(builderLua.contains("setScriptExecTimeOut"));
+            expect(!builderLua.contains("function context.yield"));
         }
 
         beginTest("Plugin Location - platform default path");

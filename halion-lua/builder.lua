@@ -105,6 +105,7 @@ local PROGRESS_WRITE_FAILURES = 0
 local MAX_PROGRESS_MESSAGE_BYTES = 88
 local MAX_PROGRESS_MARKER_PATH_BYTES = 240
 local TRUNCATION_SUFFIX = "..."
+local BUILD_SCRIPT_TIMEOUT_MS = 600000
 
 local function globalNumber(name)
     local value = tonumber(_G[name])
@@ -250,6 +251,38 @@ local function emit(kind, message)
     writeProgress(kind, message)
 end
 
+local function extendScriptExecutionTimeout()
+    -- HALion's default controller script timeout is short for build-time scripts
+    -- that construct hundreds or thousands of zones. This API is valid from
+    -- global controller code, unlike wait(), which HALion only allows inside
+    -- callbacks.
+    if type(getScriptExecTimeOut) ~= "function" or type(setScriptExecTimeOut) ~= "function" then
+        return nil
+    end
+
+    local okGet, current = pcall(getScriptExecTimeOut)
+    current = tonumber(current)
+    if not okGet or current == nil or current >= BUILD_SCRIPT_TIMEOUT_MS then
+        return nil
+    end
+
+    local okSet = pcall(setScriptExecTimeOut, BUILD_SCRIPT_TIMEOUT_MS)
+    if not okSet then
+        return nil
+    end
+
+    emit("info", "Raised HALion script execution timeout from " .. current .. " ms to " .. BUILD_SCRIPT_TIMEOUT_MS .. " ms.")
+    return current
+end
+
+local function restoreScriptExecutionTimeout(previousTimeout)
+    if previousTimeout == nil or type(setScriptExecTimeOut) ~= "function" then
+        return
+    end
+
+    pcall(setScriptExecTimeOut, previousTimeout)
+end
+
 local function writeStatus(status)
     -- halionbridge watches for these marker presets in the build directory.
     -- Markers are written through savePreset() because HALion scripting may not
@@ -339,20 +372,6 @@ local function makeContext(moduleName)
         end
 
         emit("info", line)
-    end
-
-    function context.yield(ms)
-        -- HALion can stop long-running Lua callbacks with "Script time out"
-        -- even when the script is making valid progress. Build scripts that
-        -- create many zones or parameters can call ctx.yield() periodically to
-        -- hand control back to HALion. Outside HALion, or in older contexts
-        -- without wait(), this is a harmless no-op.
-        if type(wait) ~= "function" then
-            return false
-        end
-
-        wait(tonumber(ms) or 1)
-        return true
     end
 
     return context
@@ -487,6 +506,7 @@ if RUN_BUILD then
     -- A status marker is written even when the runner itself throws. This gives
     -- halionbridge a concrete completion signal instead of relying only on the
     -- timeout path.
+    local previousScriptTimeout = extendScriptExecutionTimeout()
     local ok, status = pcall(runBatch)
     if not ok then
         status = {
@@ -505,4 +525,5 @@ if RUN_BUILD then
     end
 
     writeStatus(status)
+    restoreScriptExecutionTimeout(previousScriptTimeout)
 end
