@@ -67,4 +67,13 @@ High-signal interpretation:
 HALion build completed successfully on 2026-06-14: ten hand-authored scripts
 processed, ten `.vstpreset` files saved.
 
-Manual validation pending.
+Manual validation on 2026-06-14:
+
+- `000_start0_as0` matches.
+- For the `ampeg_start=50` cases, `001_start50_as0` is best.
+- For the `ampeg_start=100` cases, `005_start100_as0` is best.
+- For the `ampeg_start=25` cases, `007_start25_as0` is best.
+
+Decision: for current sforzando parity, emit a zero initial amp-envelope level
+for static `ampeg_start` cases. Generate a converter-backed implementation
+regression before moving on.

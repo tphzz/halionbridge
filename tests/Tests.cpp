@@ -979,8 +979,8 @@ class BridgeTests : public juce::UnitTest
 
             const auto lua = outputDir.getChildFile("000_envelope.lua").loadFileAsString();
             expect(lua.contains("amp_envelope = {"));
-            expect(lua.contains("{ level = 0.100000001, duration = 0, curve = 0 }"));
-            expect(lua.contains("{ level = 0.100000001, duration = 0.0199999996, curve = 0 }"));
+            expect(lua.contains("{ level = 0, duration = 0, curve = 0 }"));
+            expect(lua.contains("{ level = 0, duration = 0.0199999996, curve = 0 }"));
             expect(lua.contains("{ level = 1, duration = 0.25, curve = 0 }"));
             expect(lua.contains("{ level = 1, duration = 0.100000001, curve = 0 }"));
             expect(lua.contains("{ level = 0.400000006, duration = 0.150000006, curve = -1 }"));

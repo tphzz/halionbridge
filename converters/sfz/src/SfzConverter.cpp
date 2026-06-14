@@ -617,7 +617,8 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
     if (differsFromDefault(region.pitchKeytrack, static_cast<float>(::sfz::Default::pitchKeytrack)))
         converted.pitchKeytrack = clampPitchKeytrack(sourceFile, regionIndex, region.pitchKeytrack, diagnostics);
 
-    converted.ampEnvelope.start = clampEnvelopeLevel(sourceFile, regionIndex, "ampeg_start", region.amplitudeEG.start, diagnostics);
+    (void)clampEnvelopeLevel(sourceFile, regionIndex, "ampeg_start", region.amplitudeEG.start, diagnostics);
+    converted.ampEnvelope.start = 0.0f;
     converted.ampEnvelope.delay = clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_delay", region.amplitudeEG.delay, diagnostics);
     converted.ampEnvelope.attack = clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_attack", region.amplitudeEG.attack, diagnostics);
     converted.ampEnvelope.hold = clampEnvelopeDuration(sourceFile, regionIndex, "ampeg_hold", region.amplitudeEG.hold, diagnostics);
