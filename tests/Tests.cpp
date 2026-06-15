@@ -196,7 +196,7 @@ class BridgeTests : public juce::UnitTest
             {
                 expect(options->buildDirectory.has_value());
                 expect(*options->buildDirectory == halionbridge::detail::toStdPath(tempDir));
-                expectEquals(options->timeoutSeconds, 0);
+                expectEquals(options->timeoutSeconds, 3600);
                 expect(!options->noKill);
                 expect(!options->forceScan);
             }
@@ -241,6 +241,22 @@ class BridgeTests : public juce::UnitTest
             tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return {}");
 
             {
+                std::vector<std::string> args = {tempDir.getFullPathName().toStdString()};
+                auto options = halionbridge::Bridge::parseArguments(args);
+                expect(options.has_value());
+                if (options)
+                    expectEquals(options->timeoutSeconds, 3600);
+            }
+
+            {
+                std::vector<std::string> args = {tempDir.getFullPathName().toStdString(), "--no-timeout"};
+                auto options = halionbridge::Bridge::parseArguments(args);
+                expect(options.has_value());
+                if (options)
+                    expectEquals(options->timeoutSeconds, 0);
+            }
+
+            {
                 std::vector<std::string> args = {tempDir.getFullPathName().toStdString(), "--timeout-seconds", "0"};
                 auto options = halionbridge::Bridge::parseArguments(args);
                 expect(options.has_value());
@@ -270,6 +286,18 @@ class BridgeTests : public juce::UnitTest
 
             {
                 std::vector<std::string> args = {tempDir.getFullPathName().toStdString(), "--timeout-seconds"};
+                auto options = halionbridge::Bridge::parseArguments(args);
+                expect(!options.has_value());
+            }
+
+            {
+                std::vector<std::string> args = {tempDir.getFullPathName().toStdString(), "--no-timeout", "--timeout-seconds", "45"};
+                auto options = halionbridge::Bridge::parseArguments(args);
+                expect(!options.has_value());
+            }
+
+            {
+                std::vector<std::string> args = {tempDir.getFullPathName().toStdString(), "--timeout-seconds", "45", "--no-timeout"};
                 auto options = halionbridge::Bridge::parseArguments(args);
                 expect(!options.has_value());
             }
@@ -363,10 +391,32 @@ class BridgeTests : public juce::UnitTest
                 expect(command.contains("--plugin"));
                 expect(command.contains("--timeout-seconds"));
                 expect(command.contains("--force-scan"));
+                expect(!command.contains("--no-timeout"));
                 expect(!command.contains("--build-chunk-size"));
                 expect(!command.contains("--fail-fast"));
                 expect(!command.contains("--gui"));
                 expect(!command.contains("--nokill"));
+            }
+
+            auto noTimeoutWorkerArgs = std::vector<std::string>{halionbridge::detail::kBuildWorkerArgument,
+                                                                tempDir.getFullPathName().toStdString(),
+                                                                "--build-slice-start",
+                                                                "1",
+                                                                "--build-slice-count",
+                                                                "1",
+                                                                "--build-slice-total",
+                                                                "3",
+                                                                "--no-timeout"};
+            auto noTimeoutOptions = halionbridge::detail::parseBuildWorkerArguments(noTimeoutWorkerArgs);
+            expect(noTimeoutOptions.has_value());
+            if (noTimeoutOptions)
+            {
+                expectEquals(noTimeoutOptions->timeoutSeconds, 0);
+                const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+                noTimeoutOptions->executableFile = halionbridge::detail::toStdPath(executable);
+                const auto command = halionbridge::detail::makeBuildWorkerCommand(*noTimeoutOptions, 1, 1, 3);
+                expect(command.contains("--no-timeout"));
+                expect(!command.contains("--timeout-seconds"));
             }
 
             auto invalidZeroStart = std::vector<std::string>{halionbridge::detail::kBuildWorkerArgument,
@@ -774,6 +824,37 @@ class BridgeTests : public juce::UnitTest
             request.overwrite = true;
             auto overwritten = halionbridge::converters::writeBuildDirectory(request);
             expect(overwritten.succeeded);
+            expect(buildFile.loadFileAsString().contains("\"001_a.lua\""));
+            expect(tempDir.getChildFile("001_a.lua").loadFileAsString() == "return {}\n");
+
+            juce::Array<juce::File> transactionFiles;
+            tempDir.findChildFiles(transactionFiles, juce::File::findFiles, false, ".halionbridge-*");
+            expectEquals(transactionFiles.size(), 0);
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Converter Emitter - rejects non-regular overwrite targets before writing");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_converter_emitter_nonregular");
+            expect(tempDir.createDirectory());
+            expect(tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return { \"manual.lua\" }\n"));
+            expect(tempDir.getChildFile("valid.lua").createDirectory());
+
+            auto request = halionbridge::converters::BuildDirectoryRequest{};
+            request.outputDirectory = halionbridge::detail::toStdPath(tempDir);
+            request.overwrite = true;
+            request.scripts.push_back(halionbridge::converters::GeneratedLuaScript{"valid.lua", "valid.lua", "return {}\n"});
+
+            auto result = halionbridge::converters::writeBuildDirectory(request);
+            expect(!result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "not-regular-file"));
+            expect(tempDir.getChildFile("halionbridge_build.lua").loadFileAsString().contains("manual.lua"));
+            expect(tempDir.getChildFile("valid.lua").isDirectory());
+
+            juce::Array<juce::File> transactionFiles;
+            tempDir.findChildFiles(transactionFiles, juce::File::findFiles, false, ".halionbridge-*");
+            expectEquals(transactionFiles.size(), 0);
 
             tempDir.deleteRecursively();
         }
@@ -1860,8 +1941,9 @@ class BridgeTests : public juce::UnitTest
             expect(builderLua.contains("setScriptExecTimeOut"));
             expect(builderLua.contains("Completed %d/%d files"));
             expect(builderLua.contains("Processing %d/%d: %s"));
-            expect(builderLua.contains("TODO: Re-enable numeric progress"));
             expect(builderLua.contains("emit(\"info\", tostring(message))"));
+            expect(builderLua.contains("emit(\"info\", \"Progress marker\")"));
+            expect(!builderLua.contains("emit(\"info\", line)"));
             expect(!builderLua.contains("function context.yield"));
         }
 

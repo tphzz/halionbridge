@@ -137,6 +137,10 @@ std::optional<AppOptions> parseBuildWorkerArguments(std::span<const std::string>
             bridgeArgs.push_back(arg);
             bridgeArgs.push_back(args[++i]);
         }
+        else if (arg == "--no-timeout")
+        {
+            bridgeArgs.push_back(arg);
+        }
         else if (arg == "--force-scan")
         {
             bridgeArgs.push_back(arg);
@@ -195,6 +199,10 @@ juce::StringArray makeBuildWorkerCommand(const AppOptions& options, const int sl
     {
         command.add("--timeout-seconds");
         command.add(juce::String(options.timeoutSeconds));
+    }
+    else
+    {
+        command.add("--no-timeout");
     }
 
     if (options.forceScan)

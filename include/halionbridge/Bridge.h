@@ -24,7 +24,7 @@ struct AppOptions
     std::optional<std::filesystem::path> buildDirectory;
     std::optional<std::filesystem::path> pluginPathOverride;
     std::optional<std::filesystem::path> executableFile;
-    int timeoutSeconds = 0;
+    int timeoutSeconds = 3600;
     int buildChunkSize = 15;
     bool showGui = false;
     bool noKill = false;

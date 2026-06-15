@@ -1,9 +1,11 @@
 #include "halionbridge_converters/BuildDirectoryEmitter.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <fstream>
 #include <set>
+#include <span>
 #include <sstream>
 #include <utility>
 
@@ -28,6 +30,25 @@ bool writeTextFile(const std::filesystem::path& path, const std::string& text)
 
     stream.write(text.data(), static_cast<std::streamsize>(text.size()));
     return stream.good();
+}
+
+std::filesystem::path makeTransactionPath(const std::filesystem::path& directory, const char* label, const size_t index,
+                                          const std::filesystem::path& targetFileName)
+{
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    for (auto attempt = 0; attempt < 1000; ++attempt)
+    {
+        auto name = std::ostringstream{};
+        name << ".halionbridge-" << label << "-" << now << "-" << index << "-" << attempt << "-"
+             << targetFileName.filename().generic_string();
+
+        auto path = directory / name.str();
+        std::error_code error;
+        if (!std::filesystem::exists(path, error) && !error)
+            return path;
+    }
+
+    return {};
 }
 
 std::string normalizedKey(std::string text)
@@ -76,6 +97,49 @@ std::string normalizedModuleNameKey(std::string text)
 bool isReservedHelperEntrypointName(const GeneratedLuaScript& script)
 {
     return normalizedKey(script.fileName) == kSfzHelperFileName || normalizedModuleNameKey(script.moduleName) == "halionbridge-sfz";
+}
+
+struct PendingWrite
+{
+    std::filesystem::path target;
+    std::filesystem::path temporary;
+    std::filesystem::path backup;
+    std::string text;
+    bool includeInGeneratedFiles = false;
+    bool hadExistingTarget = false;
+    bool committed = false;
+};
+
+void cleanupTransactionFiles(std::span<const PendingWrite> writes)
+{
+    for (const auto& write : writes)
+    {
+        std::error_code error;
+        if (!write.temporary.empty())
+            std::filesystem::remove(write.temporary, error);
+        if (!write.backup.empty())
+            std::filesystem::remove(write.backup, error);
+    }
+}
+
+void rollbackWrites(std::span<PendingWrite> writes)
+{
+    for (auto it = writes.rbegin(); it != writes.rend(); ++it)
+    {
+        std::error_code error;
+        if (it->committed)
+            std::filesystem::remove(it->target, error);
+
+        if (it->hadExistingTarget && !it->backup.empty() && std::filesystem::exists(it->backup, error))
+        {
+            error.clear();
+            std::filesystem::rename(it->backup, it->target, error);
+        }
+
+        error.clear();
+        if (!it->temporary.empty())
+            std::filesystem::remove(it->temporary, error);
+    }
 }
 
 } // namespace
@@ -212,6 +276,18 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
             }
         }
     }
+    else
+    {
+        for (const auto& outputFile : outputFiles)
+        {
+            if (std::filesystem::exists(outputFile, error) && !std::filesystem::is_regular_file(outputFile, error))
+            {
+                result.diagnostics.push_back(
+                    makeError(outputFile, "not-regular-file", outputFile.string() + " exists but is not a regular file."));
+                return result;
+            }
+        }
+    }
 
     std::ostringstream buildFileText;
     buildFileText << "return {\n";
@@ -222,22 +298,88 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
     }
     buildFileText << "}\n";
 
-    if (!writeTextFile(result.buildFile, buildFileText.str()))
-    {
-        result.diagnostics.push_back(makeError(result.buildFile, "write-failed", "Failed to write " + result.buildFile.string()));
-        return result;
-    }
-
+    auto pendingWrites = std::vector<PendingWrite>();
+    pendingWrites.reserve(request.scripts.size() + 1);
+    pendingWrites.push_back(PendingWrite{result.buildFile, {}, {}, buildFileText.str(), false});
     for (const auto& script : request.scripts)
+        pendingWrites.push_back(PendingWrite{request.outputDirectory / script.fileName, {}, {}, script.luaSource, true});
+
+    for (size_t i = 0; i < pendingWrites.size(); ++i)
     {
-        const auto path = request.outputDirectory / script.fileName;
-        if (!writeTextFile(path, script.luaSource))
+        auto& write = pendingWrites[i];
+        write.temporary = makeTransactionPath(request.outputDirectory, "tmp", i, write.target.filename());
+        if (write.temporary.empty())
         {
-            result.diagnostics.push_back(makeError(path, "write-failed", "Failed to write " + path.string()));
+            result.diagnostics.push_back(
+                makeError(write.target, "write-failed", "Failed to reserve temporary path for " + write.target.string()));
+            cleanupTransactionFiles(pendingWrites);
             return result;
         }
 
-        result.generatedLuaFiles.push_back(path);
+        if (!writeTextFile(write.temporary, write.text))
+        {
+            result.diagnostics.push_back(makeError(write.target, "write-failed", "Failed to write " + write.target.string()));
+            cleanupTransactionFiles(pendingWrites);
+            return result;
+        }
+    }
+
+    for (size_t i = 0; i < pendingWrites.size(); ++i)
+    {
+        auto& write = pendingWrites[i];
+        if (std::filesystem::exists(write.target, error))
+        {
+            if (error)
+            {
+                result.diagnostics.push_back(makeError(write.target, "write-failed", "Failed to inspect " + write.target.string()));
+                rollbackWrites(pendingWrites);
+                return result;
+            }
+
+            write.hadExistingTarget = true;
+            write.backup = makeTransactionPath(request.outputDirectory, "bak", i, write.target.filename());
+            if (write.backup.empty())
+            {
+                result.diagnostics.push_back(
+                    makeError(write.target, "write-failed", "Failed to reserve backup path for " + write.target.string()));
+                rollbackWrites(pendingWrites);
+                return result;
+            }
+
+            error.clear();
+            std::filesystem::rename(write.target, write.backup, error);
+            if (error)
+            {
+                result.diagnostics.push_back(makeError(write.target, "write-failed", "Failed to back up " + write.target.string()));
+                rollbackWrites(pendingWrites);
+                return result;
+            }
+        }
+        else if (error)
+        {
+            result.diagnostics.push_back(makeError(write.target, "write-failed", "Failed to inspect " + write.target.string()));
+            rollbackWrites(pendingWrites);
+            return result;
+        }
+
+        error.clear();
+        std::filesystem::rename(write.temporary, write.target, error);
+        if (error)
+        {
+            result.diagnostics.push_back(makeError(write.target, "write-failed", "Failed to write " + write.target.string()));
+            rollbackWrites(pendingWrites);
+            return result;
+        }
+
+        write.committed = true;
+    }
+
+    cleanupTransactionFiles(pendingWrites);
+
+    for (const auto& write : pendingWrites)
+    {
+        if (write.includeInGeneratedFiles)
+            result.generatedLuaFiles.push_back(write.target);
     }
 
     result.succeeded = true;

@@ -15,7 +15,7 @@ return {
 
 Module names may be listed with or without `.lua`. They are loaded with `require`, so they must be resolvable from the build directory passed to halionbridge. The host-side helper `Bridge::parseBuildFileModuleNames()` inspects the common top-level list shape `return { "module_a", "module_b" }`; it is not a full Lua parser, and it ignores quoted strings in line comments, Lua long comments, nested tables, local variables, and metadata fields.
 
-For statically parseable build files, halionbridge runs the list in host-controlled chunks of one module by default. Each chunk launches a fresh HALion instance and the generated runtime module sets `HALIONBRIDGE_BUILD_SLICE_START`, `HALIONBRIDGE_BUILD_SLICE_COUNT`, and `HALIONBRIDGE_BUILD_TOTAL` before loading this builder. The builder uses those globals only to select the requested list slice and to report file-level progress against the full list. Build script modules and the `ctx` API are unchanged. If the host cannot statically parse the build file, it falls back to one full-list invocation.
+For statically parseable build files, halionbridge runs the list in host-controlled chunks of up to 15 modules by default. Each chunk launches a fresh HALion instance and the generated runtime module sets `HALIONBRIDGE_BUILD_SLICE_START`, `HALIONBRIDGE_BUILD_SLICE_COUNT`, and `HALIONBRIDGE_BUILD_TOTAL` before loading this builder. The builder uses those globals only to select the requested list slice and to report file-level progress against the full list. Build script modules and the `ctx` API are unchanged. If the host cannot statically parse the build file, it falls back to one full-list invocation.
 
 `halionbridge init <build-directory>` can generate a simple `halionbridge_build.lua` from top-level `.lua` files. It sorts filenames, keeps the `.lua` suffix in each entry, and excludes halionbridge infrastructure files such as `halionbridge_runtime.lua`, `halionbridge_builder.lua`, `halionbridge_build.lua`, and `builder_bootstrap.lua`; converter-owned infrastructure helpers may also be excluded. It does not recurse into subdirectories and does not launch HALion. Review the generated list before building: ordinary helper modules such as `helpers.lua` or `shared_mapping.lua` are still top-level Lua files, but they should be removed from `halionbridge_build.lua` unless they return a valid build script entrypoint.
 
@@ -92,7 +92,7 @@ ctx.progress(done, total, message)
 
 `ctx.progress` is build-script-defined progress. `done` and `total` can represent files, zones, presets, phases, or any other work unit meaningful to that build script.
 
-Before running the batch, the builder raises HALion's controller script execution timeout to 600000 ms when HALion exposes `getScriptExecTimeOut()` and `setScriptExecTimeOut()`, then restores the previous value after writing the final status marker. Build scripts should not call HALion `wait()` for this purpose; HALion only allows `wait()` inside callbacks, while build script entrypoints run as controller global/module code.
+Before running the batch, the builder raises HALion's controller script execution timeout to 600000 ms when HALion exposes `getScriptExecTimeOut()` and `setScriptExecTimeOut()`, then restores the previous value after the final status-marker write attempt even if marker writing fails. Build scripts should not call HALion `wait()` for this purpose; HALion only allows `wait()` inside callbacks, while build script entrypoints run as controller global/module code.
 
 ## Build Script Result
 

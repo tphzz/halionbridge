@@ -809,6 +809,8 @@ std::optional<AppOptions> Bridge::parseArguments(const std::vector<std::string>&
 {
     AppOptions options;
     std::optional<juce::File> positionalBuildDirectory;
+    auto noTimeoutRequested = false;
+    auto positiveTimeoutRequested = false;
 
     for (int i = 0; i < static_cast<int>(args.size()); ++i)
     {
@@ -840,6 +842,17 @@ std::optional<AppOptions> Bridge::parseArguments(const std::vector<std::string>&
         {
             options.failFast = true;
         }
+        else if (arg == "--no-timeout")
+        {
+            if (positiveTimeoutRequested)
+            {
+                log::error("--no-timeout cannot be combined with a positive --timeout-seconds value.");
+                return std::nullopt;
+            }
+
+            noTimeoutRequested = true;
+            options.timeoutSeconds = 0;
+        }
         else if (arg == "--timeout-seconds" && i + 1 < static_cast<int>(args.size()))
         {
             auto parsed = parseNonNegativeInt(toJuceString(std::string_view(args[static_cast<size_t>(++i)])));
@@ -847,6 +860,27 @@ std::optional<AppOptions> Bridge::parseArguments(const std::vector<std::string>&
             {
                 log::error("--timeout-seconds must be a non-negative integer.");
                 return std::nullopt;
+            }
+
+            if (*parsed == 0)
+            {
+                if (positiveTimeoutRequested)
+                {
+                    log::error("--timeout-seconds 0 cannot be combined with a positive --timeout-seconds value.");
+                    return std::nullopt;
+                }
+
+                noTimeoutRequested = true;
+            }
+            else
+            {
+                if (noTimeoutRequested)
+                {
+                    log::error("--timeout-seconds cannot be combined with --no-timeout or --timeout-seconds 0.");
+                    return std::nullopt;
+                }
+
+                positiveTimeoutRequested = true;
             }
 
             options.timeoutSeconds = *parsed;
