@@ -24,6 +24,7 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <thread>
 #include <utility>
 
 namespace halionbridge
@@ -46,6 +47,7 @@ constexpr double kBuildWaitProgressLogIntervalSeconds = 5.0;
 constexpr double kNoKillHeartbeatIntervalSeconds = 30.0;
 constexpr double kBuildWorkerStopGraceMs = 5000.0;
 constexpr double kBuildWorkerProgressPollMs = 100.0;
+constexpr double kBuildWorkerHeartbeatIntervalMs = 5000.0;
 constexpr int kDefaultBuildChunkSize = 15;
 constexpr const char* kBuildStatusOkPresetFileName = "halionbridge_status_ok.vstpreset";
 constexpr const char* kBuildStatusFailedPresetFileName = "halionbridge_status_failed.vstpreset";
@@ -1198,11 +1200,14 @@ RunResult Bridge::Impl::runWorkerInvocation(const AppOptions& options, const Bui
         return RunResult::runtimeSetupFailed;
     }
 
-    detail::ChildProcessOutputBuffer childOutput;
     auto stopLogged = false;
     auto stopDeadline = 0.0;
     auto nextProgressPoll = 0.0;
+    const auto workerStartTime = juce::Time::getMillisecondCounterHiRes();
+    auto nextHeartbeat = workerStartTime + kBuildWorkerHeartbeatIntervalMs;
     auto seenProgressMarkers = std::set<std::string>();
+    detail::ChildProcessOutputBuffer childOutput;
+    auto outputThread = std::thread([&process, &childOutput] { detail::forwardChildOutputToConsole(process, childOutput); });
 
     if (options.buildDirectory)
     {
@@ -1213,13 +1218,19 @@ RunResult Bridge::Impl::runWorkerInvocation(const AppOptions& options, const Bui
 
     while (process.isRunning())
     {
-        detail::forwardChildOutputToConsole(process, childOutput);
-
         const auto now = juce::Time::getMillisecondCounterHiRes();
         if (options.buildDirectory && now >= nextProgressPoll)
         {
             detail::logNewProgressMarkers(toJuceFile(*options.buildDirectory), seenProgressMarkers);
             nextProgressPoll = now + kBuildWorkerProgressPollMs;
+        }
+
+        if (now >= nextHeartbeat)
+        {
+            const auto elapsedSeconds = static_cast<int>((now - workerStartTime) / 1000.0);
+            log::info("Build worker still running for chunk entries {}-{} of {} ({}s elapsed).", slice.start, slice.end(), slice.total,
+                      elapsedSeconds);
+            nextHeartbeat = now + kBuildWorkerHeartbeatIntervalMs;
         }
 
         if (isStopRequested())
@@ -1235,7 +1246,9 @@ RunResult Bridge::Impl::runWorkerInvocation(const AppOptions& options, const Bui
             if (now >= stopDeadline)
             {
                 process.kill();
-                detail::forwardChildOutputToConsole(process, childOutput);
+                if (outputThread.joinable())
+                    outputThread.join();
+
                 detail::flushChildOutputToConsole(childOutput);
                 log::warn("HALion worker killed after Ctrl+C grace period.");
                 return RunResult::stopped;
@@ -1245,7 +1258,9 @@ RunResult Bridge::Impl::runWorkerInvocation(const AppOptions& options, const Bui
         juce::Thread::sleep(10);
     }
 
-    detail::forwardChildOutputToConsole(process, childOutput);
+    if (outputThread.joinable())
+        outputThread.join();
+
     detail::flushChildOutputToConsole(childOutput);
     if (options.buildDirectory)
         detail::logNewProgressMarkers(toJuceFile(*options.buildDirectory), seenProgressMarkers);
