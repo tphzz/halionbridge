@@ -23,6 +23,7 @@ struct AppOptionsAccess;
 struct AppOptions
 {
     std::optional<std::filesystem::path> buildDirectory;
+    std::optional<std::filesystem::path> outputDirectory;
     std::optional<std::filesystem::path> pluginPathOverride;
     std::optional<std::filesystem::path> executableFile;
     int timeoutSeconds = 3600;
@@ -170,6 +171,7 @@ class HALIONBRIDGE_EXPORT Bridge
     // This helper is for source inspection by tooling and is not a full Lua parser.
     static std::vector<std::string> parseBuildFileModuleNames(std::string_view luaText);
     static std::string createRuntimeModuleText(const std::filesystem::path& runtimeRoot);
+    static std::string createRuntimeModuleText(const std::filesystem::path& runtimeRoot, const std::filesystem::path& outputRoot);
     static std::string createRuntimeModuleText(const std::filesystem::path& runtimeRoot, int sliceStart, int sliceCount, int totalScripts);
 
     // Core execution loop. While running, halionbridge temporarily mutates the

@@ -148,7 +148,7 @@ return function(ctx)
         ctx.progress(i, #regions, "Mapped " .. region.sample)
     end
 
-    local outputPath = ctx.path_join(ctx.script_dir, outputFile)
+    local outputPath = ctx.path_join(ctx.output_dir, outputFile)
     ctx.progress(#regions, #regions + 1, "Saving " .. outputFile)
     local saved = ctx.save_preset(outputPath, layer, "H7")
 

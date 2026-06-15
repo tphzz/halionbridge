@@ -93,33 +93,38 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
   --new-root /path/to/new-samples
 
 # Run the generic HALion Lua builder against a build directory
-./halionbridge /path/to/build-directory
+./halionbridge build /path/to/build-directory
+
+# Write generated presets to a separate output directory
+./halionbridge build /path/to/build-directory --output-directory /path/to/preset-output
 
 # Builds time out after 3600 seconds by default.
-./halionbridge /path/to/build-directory --timeout-seconds 1800
+./halionbridge build /path/to/build-directory --timeout-seconds 1800
 
 # Explicitly wait forever when manually inspecting a problematic build.
-./halionbridge /path/to/build-directory --no-timeout
+./halionbridge build /path/to/build-directory --no-timeout
 
 # Build scripts run up to 15 scripts per HALion process by default and continue after failed chunks.
 # Use --build-chunk-size 1 for maximum isolation, or tune chunk size when desired.
-./halionbridge /path/to/build-directory --build-chunk-size 30
-./halionbridge /path/to/build-directory --fail-fast
+./halionbridge build /path/to/build-directory --build-chunk-size 30
+./halionbridge build /path/to/build-directory --fail-fast
 
 # Override the default HALion 7 VST3 plugin search path
-./halionbridge /path/to/build-directory --plugin /path/to/custom/HALion 7.vst3
+./halionbridge build /path/to/build-directory --plugin /path/to/custom/HALion 7.vst3
 
 # Open the HALion editor and keep running until the window is closed
-./halionbridge /path/to/build-directory --gui
+./halionbridge build /path/to/build-directory --gui
 
 # Open the HALion editor and keep running no matter what the lua script returned.
 # Close the GUI window or press Ctrl+C to stop inspection and clean up.
-./halionbridge /path/to/build-directory --gui --nokill
+./halionbridge build /path/to/build-directory --gui --nokill
 ```
 
 The SFZ converter is a setup step: it generates normal Lua build files and does not launch HALion. When no output directory is passed, generated files are written flat beside the source `.sfz` files; otherwise they are written to the requested build directory. Existing generated files are refused unless `--overwrite` is supplied, and conversion fails before writing if two inputs would produce the same output preset name. Generated build files are staged before commit so a write failure does not leave a half-updated build directory.
 
 Generated SFZ output includes an inspectable helper module, `halionbridge-sfz.lua`, plus one build entrypoint script per source `.sfz`. The current converter covers the common sample-mapping path: sample filenames, key/velocity ranges, root keys, playback ranges, sustain loops, gain, pan, static amplitude envelopes, static pitch/tuning, a simple static pitch-envelope subset, and rough static filter approximations. Unsupported or unverified SFZ features are reported as warnings instead of being silently treated as exact conversions. Detailed mapping notes and current parity limits live in `DEVELOPMENT.md`.
+
+Build scripts receive `ctx.output_dir`, which equals `ctx.script_dir` unless `--output-directory` is supplied. The builder's `ctx.save_preset()` wrapper redirects ordinary build-directory preset saves into `ctx.output_dir`, so generated SFZ builds and older scripts that save to `ctx.path_join(ctx.script_dir, "name.vstpreset")` can write their presets to a separate output tree without moving Lua source or samples.
 
 `remap-vstpresets` is for moved sample libraries. It scans the input directory recursively for `.vstpreset` files, works on temporary copies in HALion's user preset area, and leaves the input directory untouched. The output directory must be missing or empty; halionbridge refuses to merge into an existing tree. The command rewrites exact normalized path prefixes only, so choose `--old-root` and `--new-root` as directory roots, not partial filename fragments.
 

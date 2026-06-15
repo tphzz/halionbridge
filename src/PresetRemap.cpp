@@ -22,8 +22,7 @@ std::string genericPathString(const std::filesystem::path& path)
 
 std::string toLowerAscii(std::string text)
 {
-    std::transform(text.begin(), text.end(), text.begin(),
-                   [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::transform(text.begin(), text.end(), text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return text;
 }
 
@@ -172,8 +171,7 @@ PresetRemapCollectionResult collectPresetRemapFiles(const std::filesystem::path&
     if (ec)
         result.errors.push_back("Could not recursively scan input directory " + inputDirectory.string() + ": " + ec.message());
 
-    std::sort(result.files.begin(), result.files.end(),
-              [](const PresetRemapFile& lhs, const PresetRemapFile& rhs)
+    std::sort(result.files.begin(), result.files.end(), [](const PresetRemapFile& lhs, const PresetRemapFile& rhs)
               { return toLowerAscii(genericPathString(lhs.relativePath)) < toLowerAscii(genericPathString(rhs.relativePath)); });
 
     if (result.files.empty() && result.errors.empty())

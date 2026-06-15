@@ -127,7 +127,7 @@ std::optional<AppOptions> parseBuildWorkerArguments(std::span<const std::string>
             if (!parseSliceValue(sliceTotal, "--build-slice-total"))
                 return std::nullopt;
         }
-        else if (arg == "--plugin" || arg == "--timeout-seconds")
+        else if (arg == "--plugin" || arg == "--timeout-seconds" || arg == "--output-directory")
         {
             if (i + 1 >= args.size())
             {
@@ -207,6 +207,12 @@ juce::StringArray makeBuildWorkerCommand(const AppOptions& options, const int sl
     {
         command.add("--plugin");
         command.add(toJuceString(*options.pluginPathOverride));
+    }
+
+    if (options.outputDirectory)
+    {
+        command.add("--output-directory");
+        command.add(toJuceString(*options.outputDirectory));
     }
 
     if (options.timeoutSeconds > 0)

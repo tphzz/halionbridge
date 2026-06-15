@@ -2,6 +2,7 @@
 #include "halionbridge/BuildInfo.h"
 #include "BuildFile.h"
 #include "BuildWorker.h"
+#include "CliCommand.h"
 #include "Log.h"
 #include "ChildProcessOutput.h"
 #include "PathUtils.h"
@@ -20,6 +21,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <initializer_list>
 #include <iostream>
 #include <span>
 #include <string_view>
@@ -197,6 +199,7 @@ class BridgeTests : public juce::UnitTest
             {
                 expect(options->buildDirectory.has_value());
                 expect(*options->buildDirectory == halionbridge::detail::toStdPath(tempDir));
+                expect(!options->outputDirectory.has_value());
                 expectEquals(options->timeoutSeconds, 3600);
                 expect(!options->noKill);
                 expect(!options->forceScan);
@@ -344,6 +347,69 @@ class BridgeTests : public juce::UnitTest
             tempDir.deleteRecursively();
         }
 
+        beginTest("CLI Command Classification - Explicit build command");
+        {
+            const auto classify = [](std::initializer_list<const char*> values)
+            {
+                auto args = std::vector<std::string>{};
+                args.reserve(values.size());
+                for (const auto* value : values)
+                    args.emplace_back(value);
+
+                return halionbridge::detail::classifyCliCommand(args);
+            };
+
+            expect(classify({}) == halionbridge::detail::CliCommandKind::help);
+            expect(classify({"--help"}) == halionbridge::detail::CliCommandKind::help);
+            expect(classify({"--version"}) == halionbridge::detail::CliCommandKind::version);
+            expect(classify({"build", "C:/build"}) == halionbridge::detail::CliCommandKind::build);
+            expect(classify({"init", "C:/build"}) == halionbridge::detail::CliCommandKind::init);
+            expect(classify({"convert", "sfz"}) == halionbridge::detail::CliCommandKind::convert);
+            expect(classify({"remap-vstpresets"}) == halionbridge::detail::CliCommandKind::remapVstPresets);
+            expect(classify({"--halionbridge-build-worker", "C:/build"}) == halionbridge::detail::CliCommandKind::buildWorker);
+            expect(classify({"--halionbridge-scan-plugin"}) == halionbridge::detail::CliCommandKind::scanPluginWorker);
+            expect(classify({"C:/build"}) == halionbridge::detail::CliCommandKind::unknown);
+        }
+
+        beginTest("Argument Parsing - Build output directory");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_output_build_dir");
+            auto outputDir = cleanTempDirectory("halionbridge_output_target_dir");
+            tempDir.createDirectory();
+            outputDir.deleteRecursively();
+            tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return {}");
+
+            {
+                auto options = halionbridge::Bridge::parseArguments(
+                    {tempDir.getFullPathName().toStdString(), "--output-directory", outputDir.getFullPathName().toStdString()});
+                expect(options.has_value());
+                if (options)
+                {
+                    expect(options->outputDirectory.has_value());
+                    expect(*options->outputDirectory == halionbridge::detail::toStdPath(outputDir));
+                }
+            }
+
+            {
+                auto outputFile = tempDir.getChildFile("output-file");
+                expect(outputFile.replaceWithText("not a directory"));
+
+                auto options = halionbridge::Bridge::parseArguments(
+                    {tempDir.getFullPathName().toStdString(), "--output-directory", outputFile.getFullPathName().toStdString()});
+                expect(options.has_value());
+                if (options)
+                {
+                    halionbridge::Bridge bridge;
+                    expect(bridge.runDetailed(*options) == halionbridge::RunResult::invalidOptions);
+                }
+            }
+
+            expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--output-directory"}).has_value());
+
+            tempDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
         beginTest("VSTPreset Remap - argument parsing");
         {
             auto inputDir = cleanTempDirectory("halionbridge_remap_input");
@@ -464,7 +530,9 @@ class BridgeTests : public juce::UnitTest
         beginTest("Build Worker - argument parsing and command construction");
         {
             auto tempDir = cleanTempDirectory("halionbridge_worker_build_dir");
+            auto outputDir = cleanTempDirectory("halionbridge_worker_output_dir");
             tempDir.createDirectory();
+            outputDir.deleteRecursively();
             tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return { \"one\", \"two\", \"three\" }");
 
             auto pluginFile = tempDir.getChildFile("HALion 7.vst3");
@@ -480,6 +548,8 @@ class BridgeTests : public juce::UnitTest
                                                        "3",
                                                        "--plugin",
                                                        pluginFile.getFullPathName().toStdString(),
+                                                       "--output-directory",
+                                                       outputDir.getFullPathName().toStdString(),
                                                        "--timeout-seconds",
                                                        "5",
                                                        "--force-scan"};
@@ -507,6 +577,7 @@ class BridgeTests : public juce::UnitTest
                 expect(command.contains("--build-slice-count"));
                 expect(command.contains("--build-slice-total"));
                 expect(command.contains("--plugin"));
+                expect(command.contains("--output-directory"));
                 expect(command.contains("--timeout-seconds"));
                 expect(command.contains("--force-scan"));
                 expect(!command.contains("--no-timeout"));
@@ -569,6 +640,7 @@ class BridgeTests : public juce::UnitTest
             expect(!halionbridge::detail::parseBuildWorkerArguments(invalidGui).has_value());
 
             tempDir.deleteRecursively();
+            outputDir.deleteRecursively();
         }
 
         beginTest("Build Worker - RunResult exit-code mapping");
@@ -2048,7 +2120,12 @@ class BridgeTests : public juce::UnitTest
             expect(text.find("C:/test/halion build") != std::string::npos);
             expect(text.find("halionbridge_builder") != std::string::npos);
             expect(text.find("runtimePathPrefix") != std::string::npos);
+            expect(text.find("HALIONBRIDGE_OUTPUT_ROOT") != std::string::npos);
             expect(text.find("HALIONBRIDGE_BUILD_SLICE_START = nil") != std::string::npos);
+
+            auto outputText = halionbridge::Bridge::createRuntimeModuleText(buildDirectory, std::filesystem::path("D:\\halion output"));
+            expect(outputText.find("D:/halion output") != std::string::npos);
+            expect(outputText.find("HALIONBRIDGE_OUTPUT_ROOT") != std::string::npos);
 
             auto slicedText = halionbridge::Bridge::createRuntimeModuleText(buildDirectory, 16, 15, 42);
             expect(slicedText.find("HALIONBRIDGE_BUILD_SLICE_START = 16") != std::string::npos);
@@ -2058,6 +2135,9 @@ class BridgeTests : public juce::UnitTest
             const auto builderLua =
                 juce::File::getCurrentWorkingDirectory().getChildFile("halion-lua").getChildFile("builder.lua").loadFileAsString();
             expect(builderLua.contains("BUILD_SCRIPT_TIMEOUT_MS = 600000"));
+            expect(builderLua.contains("ctx.output_dir"));
+            expect(builderLua.contains("HALIONBRIDGE_OUTPUT_ROOT"));
+            expect(builderLua.contains("outputPresetPath(path)"));
             expect(builderLua.contains("setScriptExecTimeOut"));
             expect(builderLua.contains("Completed %d/%d files"));
             expect(builderLua.contains("Processing %d/%d: %s"));

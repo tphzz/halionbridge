@@ -98,6 +98,7 @@ set(HALIONBRIDGE_LIBRARY_SOURCES
     src/Bridge.cpp
     src/BuildWorker.cpp
     src/ChildProcessOutput.cpp
+    src/CliCommand.cpp
     src/CrashDiagnostics.cpp
     src/Log.cpp
     src/BuildFile.cpp

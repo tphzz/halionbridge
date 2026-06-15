@@ -1,5 +1,6 @@
 #include "halionbridge/Bridge.h"
 #include "halionbridge/BuildInfo.h"
+#include "CliCommand.h"
 #include "halionbridge/CrashDiagnostics.h"
 #include "BuildWorker.h"
 #include "BuildFile.h"
@@ -63,14 +64,15 @@ void printHelp()
     std::cout << "halionbridge " << buildInfo.versionString << "\n"
               << "\n"
               << "Usage:\n"
-              << "  halionbridge <build-directory> [options]\n"
+              << "  halionbridge build <build-directory> [--output-directory <dir>] [options]\n"
               << "  halionbridge init <build-directory> [--overwrite]\n"
               << "  halionbridge remap-vstpresets --input-directory <dir> --output-directory <dir> --old-root <path> --new-root <path>\n"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
               << "  halionbridge convert <converter-id> <source-directory> [output-directory] [converter-options]\n"
 #endif
               << "\n"
-              << "Required argument:\n"
+              << "Build command:\n"
+              << "  build <build-directory> Run HALion Lua build scripts from a build directory.\n"
               << "  <build-directory>        Directory containing halionbridge_build.lua and build script Lua files.\n"
               << "\n"
               << "Setup command:\n"
@@ -96,6 +98,7 @@ void printHelp()
               << "  --plugin <path>          Override the HALion 7 VST3 path.\n"
               << "\n"
               << "Runtime options:\n"
+              << "  --output-directory <dir> Write build-script preset outputs under this directory.\n"
               << "  --timeout-seconds <n>    Build completion timeout. Defaults to 3600 seconds.\n"
               << "  --no-timeout             Wait indefinitely. Equivalent to --timeout-seconds 0.\n"
               << "  --build-chunk-size <n>   Number of Lua build scripts per HALion run. Defaults to 15.\n"
@@ -112,6 +115,25 @@ void printHelp()
               << "\n"
               << "Default behavior:\n"
               << "  Without --gui, halionbridge uses JUCE's headless VST3 host format and does not open an audio device.\n";
+}
+
+void printBuildHelp()
+{
+    std::cout << "halionbridge build\n"
+              << "\n"
+              << "Usage:\n"
+              << "  halionbridge build <build-directory> [--output-directory <dir>] [options]\n"
+              << "\n"
+              << "Options:\n"
+              << "  --output-directory <dir> Write build-script preset outputs under this directory.\n"
+              << "  --plugin <path>          Override the HALion 7 VST3 path.\n"
+              << "  --timeout-seconds <n>    Build completion timeout. Defaults to 3600 seconds.\n"
+              << "  --no-timeout             Wait indefinitely.\n"
+              << "  --build-chunk-size <n>   Number of Lua build scripts per HALion run. Defaults to 15.\n"
+              << "  --fail-fast              Stop after the first failed Lua build chunk.\n"
+              << "  --gui                    Use JUCE's GUI-capable VST3 host format and show HALion's editor.\n"
+              << "  --nokill                 Keep HALion loaded after completion or failure for inspection.\n"
+              << "  --force-scan             Force VST3 plugin scanning instead of using the embedded class ID shortcut.\n";
 }
 
 void printRemapVstPresetsHelp()
@@ -155,7 +177,14 @@ void printVersion()
 
 bool isInternalWorkerCommand(const juce::StringArray& args)
 {
-    return args.size() > 0 && (args[0] == halionbridge::detail::kBuildWorkerArgument || args[0] == "--halionbridge-scan-plugin");
+    std::vector<std::string> commandArgs;
+    commandArgs.reserve(static_cast<size_t>(args.size()));
+    for (const auto& arg : args)
+        commandArgs.push_back(arg.toStdString());
+
+    const auto command = halionbridge::detail::classifyCliCommand(commandArgs);
+    return command == halionbridge::detail::CliCommandKind::buildWorker ||
+           command == halionbridge::detail::CliCommandKind::scanPluginWorker;
 }
 
 #if HALIONBRIDGE_ENABLE_CONVERTERS
@@ -301,15 +330,23 @@ int main(int argc, char* argv[])
         args.emplace_back(argv[i]);
     }
 
-    if ((juceArgs.isEmpty() || juceArgs[0] == "--help" || juceArgs[0] == "-h") && !isInternalWorkerCommand(juceArgs))
+    const auto command = halionbridge::detail::classifyCliCommand(args);
+
+    if (command == halionbridge::detail::CliCommandKind::help && !isInternalWorkerCommand(juceArgs))
     {
         printHelp();
         return 0;
     }
 
-    if (juceArgs[0] == "--version" && !isInternalWorkerCommand(juceArgs))
+    if (command == halionbridge::detail::CliCommandKind::version && !isInternalWorkerCommand(juceArgs))
     {
         printVersion();
+        return 0;
+    }
+
+    if (juceArgs.size() > 0 && juceArgs[0] == "build" && juceArgs.size() > 1 && (juceArgs[1] == "--help" || juceArgs[1] == "-h"))
+    {
+        printBuildHelp();
         return 0;
     }
 
@@ -320,9 +357,24 @@ int main(int argc, char* argv[])
     }
 
     halionbridge::log::configureFromEnvironment();
+
+    if (command == halionbridge::detail::CliCommandKind::unknown)
+    {
+        if (!args.empty() && args.front().starts_with("-"))
+            halionbridge::log::error("Unknown argument: {}", args.front());
+        else if (!args.empty())
+            halionbridge::log::error("Unknown command: {}", args.front());
+        else
+            halionbridge::log::error("Missing command.");
+
+        halionbridge::log::error("Run \"halionbridge build <build-directory>\" for HALion Lua builds, or \"halionbridge --help\".");
+        halionbridge::log::flush();
+        return 1;
+    }
+
     installStopHandlers();
 
-    if (juceArgs.size() > 0 && juceArgs[0] == "init")
+    if (command == halionbridge::detail::CliCommandKind::init)
     {
         const auto initResult = halionbridge::detail::runInitCommand(juceArgs);
         if (initResult.exitCode == 0)
@@ -346,7 +398,7 @@ int main(int argc, char* argv[])
     }
 
 #if HALIONBRIDGE_ENABLE_CONVERTERS
-    if (juceArgs.size() > 0 && juceArgs[0] == "convert")
+    if (command == halionbridge::detail::CliCommandKind::convert)
     {
         const auto convertArgs = std::span<const std::string>(args.data() + 1, args.size() - 1);
         const auto exitCode = runConvertCommand(convertArgs);
@@ -361,7 +413,7 @@ int main(int argc, char* argv[])
     ConsoleLogger logger;
     juce::Logger::setCurrentLogger(&logger);
 
-    if (juceArgs.size() > 0 && juceArgs[0] == "--halionbridge-scan-plugin")
+    if (command == halionbridge::detail::CliCommandKind::scanPluginWorker)
     {
         const auto exitCode = halionbridge::detail::runPluginScanWorker(juceArgs);
         juce::Logger::setCurrentLogger(nullptr);
@@ -369,7 +421,7 @@ int main(int argc, char* argv[])
         return exitCode;
     }
 
-    if (juceArgs.size() > 0 && juceArgs[0] == halionbridge::detail::kBuildWorkerArgument)
+    if (command == halionbridge::detail::CliCommandKind::buildWorker)
     {
         auto options = halionbridge::detail::parseBuildWorkerArguments(args);
         if (!options)
@@ -397,7 +449,7 @@ int main(int argc, char* argv[])
         return exitCode;
     }
 
-    if (juceArgs.size() > 0 && juceArgs[0] == "remap-vstpresets")
+    if (command == halionbridge::detail::CliCommandKind::remapVstPresets)
     {
         const auto remapArgs = std::vector<std::string>(args.begin() + 1, args.end());
         auto options = halionbridge::Bridge::parseVstPresetRemapArguments(remapArgs);
@@ -430,7 +482,19 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    auto options = halionbridge::Bridge::parseArguments(args);
+    if (command != halionbridge::detail::CliCommandKind::build)
+    {
+        halionbridge::log::error("Command is not available in this build.");
+        halionbridge::log::error("Run \"halionbridge --help\" to see available commands.");
+        juce::Logger::setCurrentLogger(nullptr);
+        halionbridge::log::flush();
+        return 1;
+    }
+
+    auto buildArgs = args;
+    buildArgs.erase(buildArgs.begin());
+
+    auto options = halionbridge::Bridge::parseArguments(buildArgs);
     if (!options)
     {
         juce::Logger::setCurrentLogger(nullptr);

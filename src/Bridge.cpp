@@ -439,9 +439,14 @@ class ScopedTemporaryTextFile
     bool changed = false;
 };
 
-juce::String createRuntimeModuleTextForFile(const juce::File& runtimeRoot, const BuildSlice& slice = {})
+juce::String createRuntimeModuleTextForFile(const juce::File& runtimeRoot, const std::optional<juce::File>& outputRoot = std::nullopt,
+                                            const BuildSlice& slice = {})
 {
     auto root = runtimeRoot.getFullPathName().replace("\\", "/");
+    auto output = juce::String();
+    if (outputRoot)
+        output = outputRoot->getFullPathName().replace("\\", "/");
+
     auto sliceText = juce::String();
     if (slice.enabled())
     {
@@ -473,7 +478,15 @@ juce::String createRuntimeModuleTextForFile(const juce::File& runtimeRoot, const
            "if runtimeRoot:sub(-1) ~= \"/\" then\n"
            "    runtimeRoot = runtimeRoot .. \"/\"\n"
            "end\n"
-           "HALIONBRIDGE_RUNTIME_ROOT = runtimeRoot\n\n" +
+           "HALIONBRIDGE_RUNTIME_ROOT = runtimeRoot\n\n"
+           "local outputRoot = " +
+           luaQuotedString(output) +
+           "\n"
+           "outputRoot = outputRoot:gsub(\"\\\\\", \"/\")\n"
+           "if outputRoot ~= \"\" and outputRoot:sub(-1) ~= \"/\" then\n"
+           "    outputRoot = outputRoot .. \"/\"\n"
+           "end\n"
+           "HALIONBRIDGE_OUTPUT_ROOT = outputRoot ~= \"\" and outputRoot or nil\n\n" +
            sliceText +
            "local runtimePathPrefix = runtimeRoot .. \"?.lua;\" .. runtimeRoot .. \"?/init.lua;\"\n"
            "if not package.path:find(runtimePathPrefix, 1, true) then\n"
@@ -495,7 +508,8 @@ juce::String createRuntimeModuleTextForFile(const juce::File& runtimeRoot, const
 class ScopedPresetRuntimeRoot
 {
   public:
-    explicit ScopedPresetRuntimeRoot(const std::optional<juce::File>& runtimeRootIn, const BuildSlice& slice = {})
+    explicit ScopedPresetRuntimeRoot(const std::optional<juce::File>& runtimeRootIn,
+                                     const std::optional<juce::File>& outputRootIn = std::nullopt, const BuildSlice& slice = {})
     {
         if (!runtimeRootIn)
         {
@@ -536,7 +550,8 @@ class ScopedPresetRuntimeRoot
         const auto runtimeModuleFile = scriptDirectory.getChildFile(kRuntimeModuleFileName);
         const auto builderModuleFile = scriptDirectory.getChildFile(kBuilderModuleFileName);
 
-        if (!runtimeModule.write(runtimeModuleFile, createRuntimeModuleTextForFile(runtimeRoot, slice), "halionbridge runtime module"))
+        if (!runtimeModule.write(runtimeModuleFile, createRuntimeModuleTextForFile(runtimeRoot, outputRootIn, slice),
+                                 "halionbridge runtime module"))
             return;
 
         if (!builderModule.write(builderModuleFile, getEmbeddedBuilderModuleText(), "halionbridge builder module"))
@@ -987,6 +1002,10 @@ std::optional<AppOptions> Bridge::parseArguments(const std::vector<std::string>&
             }
             options.pluginPathOverride = toStdPath(file);
         }
+        else if (arg == "--output-directory" && i + 1 < static_cast<int>(args.size()))
+        {
+            options.outputDirectory = toStdPath(normalizeCliPath(toJuceString(std::string_view(args[static_cast<size_t>(++i)]))));
+        }
         else if (arg == "--gui")
         {
             options.showGui = true;
@@ -1065,6 +1084,11 @@ std::optional<AppOptions> Bridge::parseArguments(const std::vector<std::string>&
         else if (arg == "--build-chunk-size")
         {
             log::error("--build-chunk-size requires a value.");
+            return std::nullopt;
+        }
+        else if (arg == "--output-directory")
+        {
+            log::error("--output-directory requires a value.");
             return std::nullopt;
         }
         else if (arg == "--plugin")
@@ -1364,10 +1388,16 @@ std::string Bridge::createRuntimeModuleText(const std::filesystem::path& runtime
     return toStdString(createRuntimeModuleTextForFile(toJuceFile(runtimeRoot)));
 }
 
+std::string Bridge::createRuntimeModuleText(const std::filesystem::path& runtimeRoot, const std::filesystem::path& outputRoot)
+{
+    return toStdString(createRuntimeModuleTextForFile(toJuceFile(runtimeRoot), toJuceFile(outputRoot)));
+}
+
 std::string Bridge::createRuntimeModuleText(const std::filesystem::path& runtimeRoot, const int sliceStart, const int sliceCount,
                                             const int totalScripts)
 {
-    return toStdString(createRuntimeModuleTextForFile(toJuceFile(runtimeRoot), BuildSlice{sliceStart, sliceCount, totalScripts}));
+    return toStdString(
+        createRuntimeModuleTextForFile(toJuceFile(runtimeRoot), std::nullopt, BuildSlice{sliceStart, sliceCount, totalScripts}));
 }
 
 RunResult Bridge::Impl::runDetailed(const AppOptions& options)
@@ -1399,6 +1429,24 @@ RunResult Bridge::Impl::runDetailed(const AppOptions& options)
 
         log::error("Build directory must contain {} at {}", kBuildFileName, buildFile.getFullPathName().toStdString());
         return RunResult::invalidOptions;
+    }
+
+    if (options.outputDirectory)
+    {
+        const auto outputRoot = toJuceFile(*options.outputDirectory);
+        if (outputRoot.exists() && !outputRoot.isDirectory())
+        {
+            log::error("Output directory path exists but is not a directory: {}", outputRoot.getFullPathName().toStdString());
+            return RunResult::invalidOptions;
+        }
+
+        if (!outputRoot.createDirectory())
+        {
+            log::error("Could not create output directory: {}", outputRoot.getFullPathName().toStdString());
+            return RunResult::invalidOptions;
+        }
+
+        log::info("Build output directory: {}", outputRoot.getFullPathName().toStdString());
     }
 
     if (options.timeoutSeconds == 0)
@@ -1706,7 +1754,8 @@ RunResult Bridge::Impl::runSingleInvocation(const AppOptions& options, const juc
 {
     pluginInstance = nullptr;
 
-    ScopedPresetRuntimeRoot presetRuntimeRoot{std::optional<juce::File>(runtimeRoot), slice};
+    const auto outputRoot = options.outputDirectory ? std::optional<juce::File>(toJuceFile(*options.outputDirectory)) : std::nullopt;
+    ScopedPresetRuntimeRoot presetRuntimeRoot{std::optional<juce::File>(runtimeRoot), outputRoot, slice};
     if (!presetRuntimeRoot.isReady())
         return presetRuntimeRoot.getFailureResult();
 
