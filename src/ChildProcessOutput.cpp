@@ -88,18 +88,25 @@ void flushChildOutput(ChildProcessOutputBuffer& output)
         logLine(*line);
 }
 
+void forwardAvailableChildOutputToConsole(juce::ChildProcess& process, ChildProcessOutputBuffer& output)
+{
+    char buffer[1]{};
+
+    const auto bytesRead = process.readProcessOutput(buffer, static_cast<int>(sizeof(buffer)));
+    if (bytesRead <= 0)
+        return;
+
+    for (const auto& line : output.append(std::string_view(buffer, static_cast<size_t>(bytesRead))))
+        printLine(line);
+}
+
 void forwardChildOutputToConsole(juce::ChildProcess& process, ChildProcessOutputBuffer& output)
 {
-    char buffer[1024]{};
-
     for (;;)
     {
-        const auto bytesRead = process.readProcessOutput(buffer, static_cast<int>(sizeof(buffer)));
-        if (bytesRead <= 0)
+        forwardAvailableChildOutputToConsole(process, output);
+        if (!process.isRunning())
             break;
-
-        for (const auto& line : output.append(std::string_view(buffer, static_cast<size_t>(bytesRead))))
-            printLine(line);
     }
 }
 

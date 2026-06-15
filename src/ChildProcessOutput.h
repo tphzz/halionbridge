@@ -22,6 +22,7 @@ class ChildProcessOutputBuffer
 
 void forwardChildOutput(juce::ChildProcess& process, ChildProcessOutputBuffer& output);
 void flushChildOutput(ChildProcessOutputBuffer& output);
+void forwardAvailableChildOutputToConsole(juce::ChildProcess& process, ChildProcessOutputBuffer& output);
 void forwardChildOutputToConsole(juce::ChildProcess& process, ChildProcessOutputBuffer& output);
 void flushChildOutputToConsole(ChildProcessOutputBuffer& output);
 
