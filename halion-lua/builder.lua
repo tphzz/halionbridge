@@ -251,6 +251,13 @@ local function emit(kind, message)
     writeProgress(kind, message)
 end
 
+local function emitSafely(kind, message)
+    local ok = pcall(emit, kind, message)
+    if not ok then
+        pcall(print, tostring(message or ""))
+    end
+end
+
 local function extendScriptExecutionTimeout()
     -- HALion's default controller script timeout is short for build-time scripts
     -- that construct hundreds or thousands of zones. This API is valid from
@@ -271,7 +278,7 @@ local function extendScriptExecutionTimeout()
         return nil
     end
 
-    emit("info", "Raised HALion script execution timeout from " .. current .. " ms to " .. BUILD_SCRIPT_TIMEOUT_MS .. " ms.")
+    emitSafely("info", "Raised HALion script execution timeout from " .. current .. " ms to " .. BUILD_SCRIPT_TIMEOUT_MS .. " ms.")
     return current
 end
 
@@ -287,16 +294,29 @@ local function writeStatus(status)
     -- halionbridge watches for these marker presets in the build directory.
     -- Markers are written through savePreset() because HALion scripting may not
     -- have general filesystem write access in every context.
-    local markerLayer = Layer()
-    local markerName = status.ok and "halionbridge_status_ok" or "halionbridge_status_failed"
-    local markerPath = status.ok and STATUS_OK_PATH or STATUS_FAILED_PATH
-    markerLayer:setName(markerName)
+    local ok, success, errorMessage = pcall(function()
+        local markerLayer = Layer()
+        local markerName = status.ok and "halionbridge_status_ok" or "halionbridge_status_failed"
+        local markerPath = status.ok and STATUS_OK_PATH or STATUS_FAILED_PATH
+        markerLayer:setName(markerName)
 
-    local success = savePreset(markerPath, markerLayer, "H7")
-    if not success then
-        emit("warning", "Warning: Could not write build status marker: " .. markerPath)
+        local markerSaved = savePreset(markerPath, markerLayer, "H7")
+        if markerSaved then
+            return true, nil
+        end
+
+        return false, "Could not write build status marker: " .. markerPath
+    end)
+
+    if not ok then
+        return false, tostring(success)
     end
-    return success
+
+    if success then
+        return true, nil
+    end
+
+    return false, tostring(errorMessage)
 end
 
 local function normalizeModuleName(moduleName)
@@ -520,7 +540,7 @@ if RUN_BUILD then
             failed = 1,
             message = "Unhandled Lua error: " .. tostring(status),
         }
-        emit("error", "Error: " .. status.message)
+        emitSafely("error", "Error: " .. status.message)
     end
 
     status = normalizeResult(status)
@@ -528,6 +548,10 @@ if RUN_BUILD then
         status.message = status.ok and "Batch complete." or "Batch failed."
     end
 
-    writeStatus(status)
+    local statusWritten, statusError = writeStatus(status)
     restoreScriptExecutionTimeout(previousScriptTimeout)
+
+    if not statusWritten then
+        emitSafely("error", "Error: " .. tostring(statusError))
+    end
 end

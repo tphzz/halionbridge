@@ -2,6 +2,8 @@
 
 #include "Log.h"
 
+#include <optional>
+
 namespace halionbridge::detail
 {
 namespace
@@ -16,6 +18,77 @@ void logLine(const std::string& line)
 {
     if (!line.empty())
         log::debug("{}", line);
+}
+
+struct ParsedLogLine
+{
+    log::Level level = log::Level::info;
+    std::string message;
+};
+
+std::optional<ParsedLogLine> parseChildLogLine(const std::string& line)
+{
+    if (line.empty() || line.front() != '[')
+        return std::nullopt;
+
+    const auto timestampEnd = line.find("] [");
+    if (timestampEnd == std::string::npos)
+        return std::nullopt;
+
+    const auto levelStart = timestampEnd + 3;
+    const auto levelEnd = line.find("] ", levelStart);
+    if (levelEnd == std::string::npos)
+        return std::nullopt;
+
+    const auto parsedLevel = log::parseLevel(std::string_view(line).substr(levelStart, levelEnd - levelStart));
+    if (!parsedLevel.valid)
+        return std::nullopt;
+
+    return ParsedLogLine{parsedLevel.level, line.substr(levelEnd + 2)};
+}
+
+void forwardConsoleLine(const std::string& line)
+{
+    if (line.empty())
+        return;
+
+    const auto parsed = parseChildLogLine(line);
+    const auto level = parsed ? parsed->level : log::Level::info;
+    const auto& message = parsed ? parsed->message : line;
+
+    switch (level)
+    {
+    case log::Level::trace:
+        log::trace("{}", message);
+        break;
+    case log::Level::debug:
+        log::debug("{}", message);
+        break;
+    case log::Level::info:
+        log::info("{}", message);
+        break;
+    case log::Level::warn:
+        log::warn("{}", message);
+        break;
+    case log::Level::error:
+        log::error("{}", message);
+        break;
+    case log::Level::off:
+        break;
+    }
+}
+
+bool forwardChildOutputToConsole(juce::ChildProcess& process, ChildProcessOutputBuffer& output, const int bufferSize)
+{
+    std::vector<char> buffer(static_cast<size_t>(bufferSize));
+    const auto bytesRead = process.readProcessOutput(buffer.data(), static_cast<int>(buffer.size()));
+    if (bytesRead <= 0)
+        return false;
+
+    for (const auto& line : output.append(std::string_view(buffer.data(), static_cast<size_t>(bytesRead))))
+        forwardConsoleLine(line);
+
+    return true;
 }
 
 } // namespace
@@ -75,6 +148,22 @@ void flushChildOutput(ChildProcessOutputBuffer& output)
 {
     if (auto line = output.flush())
         logLine(*line);
+}
+
+void forwardChildOutputToConsole(juce::ChildProcess& process, ChildProcessOutputBuffer& output)
+{
+    while (process.isRunning())
+        forwardChildOutputToConsole(process, output, 1);
+
+    while (forwardChildOutputToConsole(process, output, 1024))
+    {
+    }
+}
+
+void flushChildOutputToConsole(ChildProcessOutputBuffer& output)
+{
+    if (auto line = output.flush())
+        forwardConsoleLine(*line);
 }
 
 } // namespace halionbridge::detail

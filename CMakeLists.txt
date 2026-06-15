@@ -94,6 +94,7 @@ set(HALIONBRIDGE_DIAGNOSTIC_DEFINITIONS
 
 set(HALIONBRIDGE_LIBRARY_SOURCES
     src/Bridge.cpp
+    src/BuildWorker.cpp
     src/ChildProcessOutput.cpp
     src/CrashDiagnostics.cpp
     src/Log.cpp

@@ -1,6 +1,7 @@
 #include "halionbridge/Bridge.h"
 #include "halionbridge/BuildInfo.h"
 #include "halionbridge/CrashDiagnostics.h"
+#include "BuildWorker.h"
 #include "BuildFile.h"
 #include "Log.h"
 #include "PathUtils.h"
@@ -85,7 +86,8 @@ void printHelp()
               << "  --plugin <path>          Override the HALion 7 VST3 path.\n"
               << "\n"
               << "Runtime options:\n"
-              << "  --timeout-seconds <n>    Build completion timeout. Defaults to 0, which waits forever.\n"
+              << "  --timeout-seconds <n>    Build completion timeout. Defaults to 3600 seconds.\n"
+              << "  --no-timeout             Wait indefinitely. Equivalent to --timeout-seconds 0.\n"
               << "  --build-chunk-size <n>   Number of Lua build scripts per HALion run. Defaults to 15.\n"
               << "  --fail-fast              Stop after the first failed Lua build chunk.\n"
               << "  --gui                    Use JUCE's GUI-capable VST3 host format and show HALion's editor.\n"
@@ -112,6 +114,11 @@ void printVersion()
               << "git: " << buildInfo.gitShaShort << "\n"
               << "ref: " << ref << "\n"
               << "source: " << (buildInfo.isDirty ? "modified" : "clean") << "\n";
+}
+
+bool isInternalWorkerCommand(const juce::StringArray& args)
+{
+    return args.size() > 0 && (args[0] == halionbridge::detail::kBuildWorkerArgument || args[0] == "--halionbridge-scan-plugin");
 }
 
 #if HALIONBRIDGE_ENABLE_CONVERTERS
@@ -257,14 +264,13 @@ int main(int argc, char* argv[])
         args.emplace_back(argv[i]);
     }
 
-    if ((juceArgs.isEmpty() || juceArgs[0] == "--help" || juceArgs[0] == "-h") &&
-        (juceArgs.size() == 0 || juceArgs[0] != "--halionbridge-scan-plugin"))
+    if ((juceArgs.isEmpty() || juceArgs[0] == "--help" || juceArgs[0] == "-h") && !isInternalWorkerCommand(juceArgs))
     {
         printHelp();
         return 0;
     }
 
-    if (juceArgs[0] == "--version" && (juceArgs.size() == 1 || juceArgs[0] != "--halionbridge-scan-plugin"))
+    if (juceArgs[0] == "--version" && !isInternalWorkerCommand(juceArgs))
     {
         printVersion();
         return 0;
@@ -316,7 +322,28 @@ int main(int argc, char* argv[])
     {
         const auto exitCode = halionbridge::detail::runPluginScanWorker(juceArgs);
         juce::Logger::setCurrentLogger(nullptr);
+        halionbridge::log::flush();
         return exitCode;
+    }
+
+    if (juceArgs.size() > 0 && juceArgs[0] == halionbridge::detail::kBuildWorkerArgument)
+    {
+        auto options = halionbridge::detail::parseBuildWorkerArguments(args);
+        if (!options)
+        {
+            juce::Logger::setCurrentLogger(nullptr);
+            halionbridge::log::flush();
+            return halionbridge::detail::runResultToBuildWorkerExitCode(halionbridge::RunResult::invalidOptions);
+        }
+
+        const auto executableFile = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        options->executableFile = halionbridge::detail::toStdPath(executableFile);
+
+        halionbridge::Bridge app;
+        const auto runResult = app.runDetailed(*options);
+        juce::Logger::setCurrentLogger(nullptr);
+        halionbridge::log::flush();
+        return halionbridge::detail::runResultToBuildWorkerExitCode(runResult);
     }
 
     auto options = halionbridge::Bridge::parseArguments(args);

@@ -14,18 +14,64 @@
 namespace halionbridge
 {
 
+namespace detail
+{
+struct AppOptionsAccess;
+}
+
 struct AppOptions
 {
     std::optional<std::filesystem::path> buildDirectory;
     std::optional<std::filesystem::path> pluginPathOverride;
     std::optional<std::filesystem::path> executableFile;
-    int timeoutSeconds = 0;
+    int timeoutSeconds = 3600;
     int buildChunkSize = 15;
     bool showGui = false;
     bool noKill = false;
     bool forceScan = false;
     bool failFast = false;
+
+  private:
+    friend struct detail::AppOptionsAccess;
+
+    bool buildWorkerMode = false;
+    int buildSliceStart = 0;
+    int buildSliceCount = 0;
+    int buildSliceTotal = 0;
 };
+
+namespace detail
+{
+
+struct AppOptionsAccess
+{
+    static void setBuildWorkerSlice(AppOptions& options, const int start, const int count, const int total) noexcept
+    {
+        options.buildWorkerMode = true;
+        options.buildSliceStart = start;
+        options.buildSliceCount = count;
+        options.buildSliceTotal = total;
+    }
+
+    static bool isBuildWorkerMode(const AppOptions& options) noexcept
+    {
+        return options.buildWorkerMode;
+    }
+    static int buildSliceStart(const AppOptions& options) noexcept
+    {
+        return options.buildSliceStart;
+    }
+    static int buildSliceCount(const AppOptions& options) noexcept
+    {
+        return options.buildSliceCount;
+    }
+    static int buildSliceTotal(const AppOptions& options) noexcept
+    {
+        return options.buildSliceTotal;
+    }
+};
+
+} // namespace detail
 
 struct BuildStatusMarkerFiles
 {
