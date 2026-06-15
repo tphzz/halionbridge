@@ -8,6 +8,7 @@
 #include "Log.h"
 #include "PathUtils.h"
 #include "PluginScan.h"
+#include "PresetRemap.h"
 #include "ProgressMarkers.h"
 #include <juce_core/juce_core.h>
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -54,6 +55,8 @@ constexpr const char* kBuildStatusFailedPresetFileName = "halionbridge_status_fa
 constexpr const char* kPresetDirEnvironmentVariable = "HALIONBRIDGE_PRESET_DIR";
 constexpr const char* kRuntimeModuleFileName = "halionbridge_runtime.lua";
 constexpr const char* kBuilderModuleFileName = "halionbridge_builder.lua";
+constexpr const char* kPresetRemapModuleFileName = "halionbridge_preset_remap.lua";
+constexpr const char* kPresetRemapListFileName = "00_preset-remap-list.txt";
 constexpr const char* kBuildFileName = "halionbridge_build.lua";
 constexpr const char* kScriptDirectoryLockName = "halionbridge_halion_user_scripts";
 
@@ -381,6 +384,11 @@ juce::String getEmbeddedBuilderModuleText()
     return juce::String::fromUTF8(halionbridge_assets::builder_lua, halionbridge_assets::builder_luaSize);
 }
 
+juce::String getEmbeddedPresetRemapModuleText()
+{
+    return juce::String::fromUTF8(halionbridge_assets::preset_remap_lua, halionbridge_assets::preset_remap_luaSize);
+}
+
 class ScopedTemporaryTextFile
 {
   public:
@@ -581,6 +589,124 @@ class ScopedPresetRuntimeRoot
     bool ready = false;
 };
 
+class ScopedPresetRemapRuntimeRoot
+{
+  public:
+    explicit ScopedPresetRemapRuntimeRoot(const detail::PresetRemapRuntimeConfig& config)
+    {
+        runtimeRoot = toJuceFile(config.runtimeRoot);
+
+        if (!scriptDirectoryLock.enter(0))
+        {
+            log::error("Another halionbridge instance is already using HALion's user script directory. Wait for it to finish and retry.");
+            failureResult = RunResult::anotherInstanceRunning;
+            return;
+        }
+
+        lockAcquired = true;
+        previousWorkingDirectory = juce::File::getCurrentWorkingDirectory();
+        previousEnvironmentValue = getEnvironmentVariableIfSet(kPresetDirEnvironmentVariable);
+
+        if (!setEnvironmentVariable(kPresetDirEnvironmentVariable, runtimeRoot.getFullPathName()))
+        {
+            log::error("Failed to set {} for HALion Lua bootstrap.", kPresetDirEnvironmentVariable);
+            return;
+        }
+
+        environmentChanged = true;
+
+        if (!runtimeRoot.setAsCurrentWorkingDirectory())
+        {
+            log::error("Failed to set working directory to {}", runtimeRoot.getFullPathName().toStdString());
+            return;
+        }
+
+        workingDirectoryChanged = true;
+
+        const auto scriptDirectory = getHalionUserScriptDirectory();
+        const auto runtimeModuleFile = scriptDirectory.getChildFile(kRuntimeModuleFileName);
+        const auto remapModuleFile = scriptDirectory.getChildFile(kPresetRemapModuleFileName);
+        const auto runtimeTextSource = detail::createPresetRemapRuntimeModuleText(config);
+        const auto runtimeText = juce::String::fromUTF8(runtimeTextSource.c_str());
+
+        if (!runtimeModule.write(runtimeModuleFile, runtimeText, "halionbridge preset-remap runtime module"))
+            return;
+
+        if (!remapModule.write(remapModuleFile, getEmbeddedPresetRemapModuleText(), "halionbridge preset-remap module"))
+            return;
+
+        log::debug("HALion Lua runtime module written temporarily: {}", runtimeModuleFile.getFullPathName().toStdString());
+        log::debug("HALion Lua preset-remap module written temporarily: {}", remapModuleFile.getFullPathName().toStdString());
+
+        ready = true;
+    }
+
+    ~ScopedPresetRemapRuntimeRoot()
+    {
+        if (workingDirectoryChanged)
+            previousWorkingDirectory.setAsCurrentWorkingDirectory();
+
+        if (environmentChanged)
+        {
+            if (previousEnvironmentValue)
+                setEnvironmentVariable(kPresetDirEnvironmentVariable, *previousEnvironmentValue);
+            else
+                clearEnvironmentVariable(kPresetDirEnvironmentVariable);
+        }
+
+        if (lockAcquired)
+            scriptDirectoryLock.exit();
+    }
+
+    bool isReady() const noexcept
+    {
+        return ready;
+    }
+
+    RunResult getFailureResult() const noexcept
+    {
+        return failureResult;
+    }
+
+  private:
+    juce::InterProcessLock scriptDirectoryLock{kScriptDirectoryLockName};
+    juce::File runtimeRoot;
+    juce::File previousWorkingDirectory;
+    std::optional<juce::String> previousEnvironmentValue;
+    ScopedTemporaryTextFile remapModule;
+    ScopedTemporaryTextFile runtimeModule;
+    RunResult failureResult = RunResult::runtimeSetupFailed;
+    bool lockAcquired = false;
+    bool environmentChanged = false;
+    bool workingDirectoryChanged = false;
+    bool ready = false;
+};
+
+class ScopedTemporaryDirectory
+{
+  public:
+    explicit ScopedTemporaryDirectory(std::filesystem::path directoryIn) : directory(std::move(directoryIn)) {}
+
+    ~ScopedTemporaryDirectory()
+    {
+        if (directory.empty())
+            return;
+
+        std::error_code ec;
+        std::filesystem::remove_all(directory, ec);
+        if (ec)
+            log::warn("Failed to delete temporary preset-remap directory {}: {}", directory.string(), ec.message());
+    }
+
+    const std::filesystem::path& get() const noexcept
+    {
+        return directory;
+    }
+
+  private:
+    std::filesystem::path directory;
+};
+
 struct BuildMarkerSet
 {
     juce::File builderRoot;
@@ -765,6 +891,18 @@ bool isInfrastructureChunkFailure(const RunResult result) noexcept
     return !isRecoverableChunkFailure(result) && result != RunResult::success;
 }
 
+AppOptions toRuntimeOptions(const VstPresetRemapOptions& options)
+{
+    AppOptions runtimeOptions;
+    runtimeOptions.pluginPathOverride = options.pluginPathOverride;
+    runtimeOptions.executableFile = options.executableFile;
+    runtimeOptions.timeoutSeconds = options.timeoutSeconds;
+    runtimeOptions.showGui = options.showGui;
+    runtimeOptions.noKill = options.noKill;
+    runtimeOptions.forceScan = options.forceScan;
+    return runtimeOptions;
+}
+
 std::optional<int> readBuildWorkerResultFile(const juce::File& resultFile)
 {
     if (!resultFile.existsAsFile())
@@ -808,7 +946,10 @@ struct Bridge::Impl
     RunResult runChunkedInProcess(const AppOptions& options, const juce::File& runtimeRoot, std::span<const BuildSlice> slices);
     RunResult runChunkedInWorkers(const AppOptions& options, std::span<const BuildSlice> slices);
     RunResult runWorkerInvocation(const AppOptions& options, const BuildSlice& slice);
+    RunResult remapVstPresetsDetailed(const VstPresetRemapOptions& options);
+    RunResult runPresetRemapInvocation(const VstPresetRemapOptions& options, const detail::PresetRemapRuntimeConfig& config);
     bool loadPlugin(const juce::File& pluginFile, const AppOptions& options);
+    bool loadPlugin(const juce::File& pluginFile, const VstPresetRemapOptions& options);
     bool applyVstPresetData(const juce::MemoryBlock& presetData);
     RunResult runProcessingLoop(const AppOptions& options, const juce::File& builderRoot);
 
@@ -975,6 +1116,181 @@ std::optional<AppOptions> Bridge::parseArguments(const std::vector<std::string>&
     }
 
     options.buildDirectory = toStdPath(*positionalBuildDirectory);
+    return options;
+}
+
+std::optional<VstPresetRemapOptions> Bridge::parseVstPresetRemapArguments(const std::vector<std::string>& args)
+{
+    VstPresetRemapOptions options;
+    auto noTimeoutRequested = false;
+    auto positiveTimeoutRequested = false;
+    auto hasInputDirectory = false;
+    auto hasOutputDirectory = false;
+    auto hasOldRoot = false;
+    auto hasNewRoot = false;
+
+    for (int i = 0; i < static_cast<int>(args.size()); ++i)
+    {
+        const auto arg = toJuceString(std::string_view(args[static_cast<size_t>(i)]));
+        const auto requireValue = [&](const char* name) -> std::optional<juce::String>
+        {
+            if (i + 1 >= static_cast<int>(args.size()))
+            {
+                log::error("{} requires a value.", name);
+                return std::nullopt;
+            }
+
+            return toJuceString(std::string_view(args[static_cast<size_t>(++i)]));
+        };
+
+        if (arg == "--input-directory")
+        {
+            auto value = requireValue("--input-directory");
+            if (!value)
+                return std::nullopt;
+
+            const auto directory = normalizeCliPath(*value);
+            if (!directory.isDirectory())
+            {
+                log::error("Input directory does not exist at {}", directory.getFullPathName().toStdString());
+                return std::nullopt;
+            }
+
+            options.inputDirectory = toStdPath(directory);
+            hasInputDirectory = true;
+        }
+        else if (arg == "--output-directory")
+        {
+            auto value = requireValue("--output-directory");
+            if (!value)
+                return std::nullopt;
+
+            options.outputDirectory = toStdPath(normalizeCliPath(*value));
+            hasOutputDirectory = true;
+        }
+        else if (arg == "--old-root")
+        {
+            auto value = requireValue("--old-root");
+            if (!value)
+                return std::nullopt;
+
+            options.oldRoot = value->trim().toStdString();
+            hasOldRoot = !options.oldRoot.empty();
+        }
+        else if (arg == "--new-root")
+        {
+            auto value = requireValue("--new-root");
+            if (!value)
+                return std::nullopt;
+
+            options.newRoot = value->trim().toStdString();
+            hasNewRoot = !options.newRoot.empty();
+        }
+        else if (arg == "--preset-plugin-code")
+        {
+            auto value = requireValue("--preset-plugin-code");
+            if (!value)
+                return std::nullopt;
+
+            options.presetPluginCode = value->trim().toUpperCase().toStdString();
+            if (options.presetPluginCode != "H7" && options.presetPluginCode != "HS")
+            {
+                log::error("--preset-plugin-code must be H7 or HS.");
+                return std::nullopt;
+            }
+        }
+        else if (arg == "--plugin")
+        {
+            auto value = requireValue("--plugin");
+            if (!value)
+                return std::nullopt;
+
+            juce::File file(normalizeCliPath(*value));
+            if (!file.existsAsFile() && !file.isDirectory())
+            {
+                log::error("Override plugin path does not exist at {}", file.getFullPathName().toStdString());
+                return std::nullopt;
+            }
+            options.pluginPathOverride = toStdPath(file);
+        }
+        else if (arg == "--gui")
+        {
+            options.showGui = true;
+        }
+        else if (arg == "--force-scan")
+        {
+            options.forceScan = true;
+        }
+        else if (arg == "--nokill")
+        {
+            options.noKill = true;
+        }
+        else if (arg == "--no-timeout")
+        {
+            if (positiveTimeoutRequested)
+            {
+                log::error("--no-timeout cannot be combined with a positive --timeout-seconds value.");
+                return std::nullopt;
+            }
+
+            noTimeoutRequested = true;
+            options.timeoutSeconds = 0;
+        }
+        else if (arg == "--timeout-seconds")
+        {
+            auto value = requireValue("--timeout-seconds");
+            if (!value)
+                return std::nullopt;
+
+            auto parsed = parseNonNegativeInt(*value);
+            if (!parsed)
+            {
+                log::error("--timeout-seconds must be a non-negative integer.");
+                return std::nullopt;
+            }
+
+            if (*parsed == 0)
+            {
+                if (positiveTimeoutRequested)
+                {
+                    log::error("--timeout-seconds 0 cannot be combined with a positive --timeout-seconds value.");
+                    return std::nullopt;
+                }
+
+                noTimeoutRequested = true;
+            }
+            else
+            {
+                if (noTimeoutRequested)
+                {
+                    log::error("--timeout-seconds cannot be combined with --no-timeout or --timeout-seconds 0.");
+                    return std::nullopt;
+                }
+
+                positiveTimeoutRequested = true;
+            }
+
+            options.timeoutSeconds = *parsed;
+        }
+        else if (arg.startsWith("-"))
+        {
+            log::error("Unknown remap-vstpresets argument: {}", arg.toStdString());
+            log::error("Run halionbridge remap-vstpresets --help to see available options.");
+            return std::nullopt;
+        }
+        else
+        {
+            log::error("remap-vstpresets uses named options. Unexpected positional argument: {}", arg.toStdString());
+            return std::nullopt;
+        }
+    }
+
+    if (!hasInputDirectory || !hasOutputDirectory || !hasOldRoot || !hasNewRoot)
+    {
+        log::error("remap-vstpresets requires --input-directory, --output-directory, --old-root, and --new-root.");
+        return std::nullopt;
+    }
+
     return options;
 }
 
@@ -1447,6 +1763,147 @@ RunResult Bridge::runDetailed(const AppOptions& options)
     return impl->runDetailed(options);
 }
 
+RunResult Bridge::remapVstPresetsDetailed(const VstPresetRemapOptions& options)
+{
+    if (impl == nullptr)
+        return RunResult::invalidBridge;
+
+    return impl->remapVstPresetsDetailed(options);
+}
+
+RunResult Bridge::Impl::remapVstPresetsDetailed(const VstPresetRemapOptions& options)
+{
+    setCrashDiagnosticPhase("halionbridge::remapVstPresets startup");
+    log::info("Starting halionbridge preset remap {}...", getBuildInfo().versionString);
+
+    if (options.oldRoot.empty() || options.newRoot.empty())
+    {
+        log::error("Both --old-root and --new-root are required.");
+        return RunResult::invalidOptions;
+    }
+
+    if (options.presetPluginCode != "H7" && options.presetPluginCode != "HS")
+    {
+        log::error("Preset plugin code must be H7 or HS.");
+        return RunResult::invalidOptions;
+    }
+
+    std::string outputError;
+    if (!detail::isDirectoryEmpty(options.outputDirectory, outputError))
+    {
+        log::error("{}", outputError);
+        return RunResult::invalidOptions;
+    }
+
+    auto collection = detail::collectPresetRemapFiles(options.inputDirectory);
+    if (!collection.errors.empty())
+    {
+        for (const auto& error : collection.errors)
+            log::error("{}", error);
+        return RunResult::invalidOptions;
+    }
+
+    const auto userPresetRoot = detail::getDefaultHalionUserPresetDirectory();
+    const auto stageDirectory = userPresetRoot / ("halionbridge-remap-" + juce::Uuid().toString().toStdString());
+    ScopedTemporaryDirectory temporaryDirectory(stageDirectory);
+
+    std::error_code ec;
+    std::filesystem::create_directories(stageDirectory, ec);
+    if (ec)
+    {
+        log::error("Could not create temporary preset-remap directory {}: {}", stageDirectory.string(), ec.message());
+        return RunResult::runtimeSetupFailed;
+    }
+
+    log::info("Staging {} .vstpreset file(s) for HALion remap.", static_cast<int>(collection.files.size()));
+
+    std::vector<std::string> copyErrors;
+    if (!detail::copyPresetRemapFilesToStage(collection.files, stageDirectory, copyErrors))
+    {
+        for (const auto& error : copyErrors)
+            log::error("{}", error);
+        return RunResult::runtimeSetupFailed;
+    }
+
+    const auto listFile = stageDirectory / kPresetRemapListFileName;
+    const auto listText = detail::createPresetRemapListText(collection.files);
+    if (!toJuceFile(listFile).replaceWithText(juce::String::fromUTF8(listText.c_str()), false, false, "\n"))
+    {
+        log::error("Could not write preset-remap list file: {}", listFile.string());
+        return RunResult::runtimeSetupFailed;
+    }
+
+    auto runtimeConfig = detail::PresetRemapRuntimeConfig{stageDirectory, listFile, detail::normalizePresetRemapRoot(options.oldRoot),
+                                                          detail::normalizePresetRemapRoot(options.newRoot), options.presetPluginCode};
+
+    const auto remapResult = runPresetRemapInvocation(options, runtimeConfig);
+    if (remapResult != RunResult::success)
+        return remapResult;
+
+    std::string outputCreatedError;
+    if (!detail::isDirectoryEmpty(options.outputDirectory, outputCreatedError))
+    {
+        log::error("{}", outputCreatedError);
+        return RunResult::cleanupFailed;
+    }
+
+    copyErrors.clear();
+    if (!detail::copyPresetRemapFilesFromStage(collection.files, stageDirectory, options.outputDirectory, copyErrors))
+    {
+        for (const auto& error : copyErrors)
+            log::error("{}", error);
+        return RunResult::cleanupFailed;
+    }
+
+    log::info("Copied remapped .vstpreset files to {}.", options.outputDirectory.string());
+    return RunResult::success;
+}
+
+RunResult Bridge::Impl::runPresetRemapInvocation(const VstPresetRemapOptions& options, const detail::PresetRemapRuntimeConfig& config)
+{
+    pluginInstance = nullptr;
+
+    ScopedPresetRemapRuntimeRoot presetRuntimeRoot{config};
+    if (!presetRuntimeRoot.isReady())
+        return presetRuntimeRoot.getFailureResult();
+
+    const auto runtimeOptions = toRuntimeOptions(options);
+    if (!pluginFormatsRegistered && options.showGui)
+    {
+        log::debug("Registering GUI-capable plugin formats...");
+        juce::addDefaultFormatsToManager(formatManager);
+        pluginFormatsRegistered = true;
+    }
+    else if (!pluginFormatsRegistered)
+    {
+        log::debug("Registering headless plugin formats...");
+        juce::addHeadlessDefaultFormatsToManager(formatManager);
+        pluginFormatsRegistered = true;
+    }
+
+    auto pluginFile = Bridge::findHalionPlugin(options.pluginPathOverride);
+    if (!pluginFile)
+        return RunResult::pluginNotFound;
+
+    if (!loadPlugin(toJuceFile(*pluginFile), options))
+        return RunResult::pluginLoadFailed;
+
+    log::info("Plugin loaded.");
+    log::debug("Initializing message loops...");
+    for (int i = 0; i < kInitialMessagePumpIterations; ++i)
+    {
+        if (isStopRequested())
+        {
+            log::warn("Startup stopped by user request.");
+            return RunResult::startupStopped;
+        }
+
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(kInitialMessagePumpMs);
+    }
+
+    return runProcessingLoop(runtimeOptions, toJuceFile(config.runtimeRoot));
+}
+
 bool Bridge::Impl::loadPlugin(const juce::File& pluginFile, const AppOptions& options)
 {
     setCrashDiagnosticPhase("loadPlugin: preparing plugin description");
@@ -1541,6 +1998,11 @@ bool Bridge::Impl::loadPlugin(const juce::File& pluginFile, const AppOptions& op
 
     setCrashDiagnosticPhase("loadPlugin: completed");
     return true;
+}
+
+bool Bridge::Impl::loadPlugin(const juce::File& pluginFile, const VstPresetRemapOptions& options)
+{
+    return loadPlugin(pluginFile, toRuntimeOptions(options));
 }
 
 bool Bridge::Impl::applyVstPresetData(const juce::MemoryBlock& presetData)

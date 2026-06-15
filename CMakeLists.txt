@@ -75,6 +75,7 @@ juce_add_binary_data(halionbridge_assets
     SOURCES
         halion-lua/builder_bootstrap.vstpreset
         halion-lua/builder.lua
+        halion-lua/preset_remap.lua
 )
 
 set(HALIONBRIDGE_COMMON_DEFINITIONS
@@ -103,6 +104,7 @@ set(HALIONBRIDGE_LIBRARY_SOURCES
     src/PathUtils.cpp
     src/PluginScan.cpp
     src/ProgressMarkers.cpp
+    src/PresetRemap.cpp
     "${HALIONBRIDGE_BUILD_INFO_CPP}"
 )
 

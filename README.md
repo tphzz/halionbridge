@@ -39,6 +39,7 @@ For source formats such as SFZ, halionbridge can also generate the Lua build dir
 * **Programmatic Instrument Creation:** Build sample-mapped instruments—including layers, zones, key ranges, velocity ranges, sample assignments, and parameters—directly via Lua instead of manually assembling them in the HALion GUI.
 * **Automated Converter Workflows:** Generate `.vstpreset` files automatically from structured data (e.g., CSV databases) or existing source formats (like SFZ) by bridging them through Lua build scripts.
 * **Reproducible Preset Libraries:** Treat HALion presets as reliable build artifacts that can be entirely regenerated from source Lua scripts and sample files.
+* **Preset Relocation:** Copy existing HALion `.vstpreset` trees and ask HALion to rewrite embedded sample path prefixes after moving a sample library.
 * **CI and Headless Automation:** Execute scripted HALion builds seamlessly on build servers or CI pipelines without opening an audio device.
 * **Script Debugging:** Visually inspect scripted builds by using `--gui` or `--nokill` flags to keep the HALion GUI open after a run.
 
@@ -46,6 +47,7 @@ For source formats such as SFZ, halionbridge can also generate the Lua build dir
 
 * **Headless & Offline Processing Loop:** Runs as an embeddable standalone console app. It utilizes an offline manual processing loop to keep the HALion plugin alive while Lua scripts execute, completely bypassing the need for an active audio device.
 * **Native Format Conversion Setup:** Commands like `halionbridge convert sfz` parse source directories and generate a flat or explicitly routed `halionbridge` build directory. Users can review or edit these generated Lua scripts before triggering the final build.
+* **Preset Path Remapping:** `halionbridge remap-vstpresets` stages copied presets, lets HALion rewrite matching `SampleOsc.Filename` prefixes, and copies the remapped presets to a clean output directory.
 * **Marker-Based Status Detection:** Tracks build progress and completion by waiting for HALion to write `.vstpreset` status markers into the build directory. Temporary progress markers are automatically cleaned up, while failure markers are preserved for diagnostics.
 * **Embedded Bootstrap:** Automatically applies the bundled HALion bootstrap `.vstpreset` internally, meaning users only ever need to pass their target build directory to the CLI.
 * **Generic Script Delegation:** The embedded builder acts as a blank slate; it simply loads the modules listed in `halionbridge_build.lua`, leaving the actual decision of *what* to build entirely to the Lua scripts.
@@ -61,8 +63,6 @@ halionbridge looks for the HALion 7 VST3 plugin at the normal Steinberg install 
 
 - Windows: `C:\Program Files\Common Files\VST3\Steinberg\HALion 7.vst3`
 - macOS: `/Library/Audio/Plug-Ins/VST3/Steinberg/HALion 7.vst3`
-
-The packaged macOS CLI is signed for plugin hosting so it can load the installed HALion VST3 under macOS hardened runtime rules.
 
 The build directory must contain `halionbridge_build.lua` and the Lua build script files referenced from that file. You can find examples in `examples`. If you already have Lua build scripts in a directory, run `halionbridge init <directory>` to create a simple sorted `halionbridge_build.lua` for them. Review the generated file before building: `init` lists every top-level non-infrastructure `.lua` file, so helper modules that are required by build scripts but are not build entrypoints should be removed from the list. Converter-owned infrastructure helpers such as `halionbridge-sfz.lua` are excluded automatically.
 
@@ -84,6 +84,13 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 
 # Include nested .sfz files below the source directory; generated Lua stays flat in the build root
 ./halionbridge convert sfz /path/to/sfz-source-directory --recursive
+
+# Copy a preset tree and remap embedded sample path prefixes through HALion
+./halionbridge remap-vstpresets \
+  --input-directory /path/to/old-presets \
+  --output-directory /path/to/remapped-presets \
+  --old-root /path/to/old-samples \
+  --new-root /path/to/new-samples
 
 # Run the generic HALion Lua builder against a build directory
 ./halionbridge /path/to/build-directory
@@ -113,6 +120,8 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 The SFZ converter is a setup step: it generates normal Lua build files and does not launch HALion. When no output directory is passed, generated files are written flat beside the source `.sfz` files; otherwise they are written to the requested build directory. Existing generated files are refused unless `--overwrite` is supplied, and conversion fails before writing if two inputs would produce the same output preset name. Generated build files are staged before commit so a write failure does not leave a half-updated build directory.
 
 Generated SFZ output includes an inspectable helper module, `halionbridge-sfz.lua`, plus one build entrypoint script per source `.sfz`. The current converter covers the common sample-mapping path: sample filenames, key/velocity ranges, root keys, playback ranges, sustain loops, gain, pan, static amplitude envelopes, static pitch/tuning, a simple static pitch-envelope subset, and rough static filter approximations. Unsupported or unverified SFZ features are reported as warnings instead of being silently treated as exact conversions. Detailed mapping notes and current parity limits live in `DEVELOPMENT.md`.
+
+`remap-vstpresets` is for moved sample libraries. It scans the input directory recursively for `.vstpreset` files, works on temporary copies in HALion's user preset area, and leaves the input directory untouched. The output directory must be missing or empty; halionbridge refuses to merge into an existing tree. The command rewrites exact normalized path prefixes only, so choose `--old-root` and `--new-root` as directory roots, not partial filename fragments.
 
 halionbridge prints timestamped console logs. The default log level is `info`, which keeps build script progress and important state changes visible while hiding host internals. Set `HALIONBRIDGE_LOGLEVEL=debug` when you need plugin loading, VST3 preset, and cleanup diagnostics. Supported values are `trace`, `debug`, `info`, `warn`, `error`, and `off`.
 

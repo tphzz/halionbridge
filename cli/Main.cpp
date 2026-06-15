@@ -65,6 +65,7 @@ void printHelp()
               << "Usage:\n"
               << "  halionbridge <build-directory> [options]\n"
               << "  halionbridge init <build-directory> [--overwrite]\n"
+              << "  halionbridge remap-vstpresets --input-directory <dir> --output-directory <dir> --old-root <path> --new-root <path>\n"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
               << "  halionbridge convert <converter-id> <source-directory> [output-directory] [converter-options]\n"
 #endif
@@ -82,6 +83,15 @@ void printHelp()
               << "  convert <id> --help      Show converter-specific options.\n"
               << "\n"
 #endif
+              << "Preset remap command:\n"
+              << "  remap-vstpresets       Copy .vstpreset files, ask HALion to rewrite matching sample paths, then copy results out.\n"
+              << "  --input-directory <d>  Directory scanned recursively for .vstpreset files.\n"
+              << "  --output-directory <d> Empty or missing destination directory for remapped presets.\n"
+              << "  --old-root <path>      Existing sample path prefix to replace.\n"
+              << "  --new-root <path>      New sample path prefix.\n"
+              << "  --preset-plugin-code <H7|HS>\n"
+              << "                          HALion savePreset plugin code for remapped presets. Defaults to H7.\n"
+              << "\n"
               << "Plugin selection:\n"
               << "  --plugin <path>          Override the HALion 7 VST3 path.\n"
               << "\n"
@@ -102,6 +112,33 @@ void printHelp()
               << "\n"
               << "Default behavior:\n"
               << "  Without --gui, halionbridge uses JUCE's headless VST3 host format and does not open an audio device.\n";
+}
+
+void printRemapVstPresetsHelp()
+{
+    std::cout << "halionbridge remap-vstpresets\n"
+              << "\n"
+              << "Usage:\n"
+              << "  halionbridge remap-vstpresets --input-directory <dir> --output-directory <dir> --old-root <path> --new-root <path> "
+                 "[options]\n"
+              << "\n"
+              << "Required options:\n"
+              << "  --input-directory <dir>     Directory scanned recursively for .vstpreset files.\n"
+              << "  --output-directory <dir>    Empty or missing destination directory for remapped presets.\n"
+              << "  --old-root <path>           Existing SampleOsc.Filename prefix.\n"
+              << "  --new-root <path>           Replacement SampleOsc.Filename prefix.\n"
+              << "\n"
+              << "Remap options:\n"
+              << "  --preset-plugin-code <H7|HS>\n"
+              << "                              savePreset plugin code. Defaults to H7.\n"
+              << "\n"
+              << "Runtime options:\n"
+              << "  --plugin <path>             Override the HALion 7 VST3 path.\n"
+              << "  --timeout-seconds <n>       Completion timeout. Defaults to 3600 seconds.\n"
+              << "  --no-timeout                Wait indefinitely.\n"
+              << "  --gui                       Use JUCE's GUI-capable VST3 host format and show HALion's editor.\n"
+              << "  --nokill                    Keep HALion loaded after completion or failure for inspection.\n"
+              << "  --force-scan                Force VST3 plugin scanning instead of using the embedded class ID shortcut.\n";
 }
 
 void printVersion()
@@ -276,6 +313,12 @@ int main(int argc, char* argv[])
         return 0;
     }
 
+    if (juceArgs.size() > 0 && juceArgs[0] == "remap-vstpresets" && juceArgs.size() > 1 && (juceArgs[1] == "--help" || juceArgs[1] == "-h"))
+    {
+        printRemapVstPresetsHelp();
+        return 0;
+    }
+
     halionbridge::log::configureFromEnvironment();
     installStopHandlers();
 
@@ -352,6 +395,39 @@ int main(int argc, char* argv[])
         juce::Logger::setCurrentLogger(nullptr);
         halionbridge::log::flush();
         return exitCode;
+    }
+
+    if (juceArgs.size() > 0 && juceArgs[0] == "remap-vstpresets")
+    {
+        const auto remapArgs = std::vector<std::string>(args.begin() + 1, args.end());
+        auto options = halionbridge::Bridge::parseVstPresetRemapArguments(remapArgs);
+        if (!options)
+        {
+            juce::Logger::setCurrentLogger(nullptr);
+            halionbridge::log::flush();
+            return 1;
+        }
+
+        const auto executableFile = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        options->executableFile = halionbridge::detail::toStdPath(executableFile);
+
+        halionbridge::Bridge app;
+        const auto runResult = app.remapVstPresetsDetailed(*options);
+        if (runResult != halionbridge::RunResult::success)
+        {
+            if (runResult == halionbridge::RunResult::stopped)
+                halionbridge::log::warn("halionbridge preset remap stopped by user request.");
+            else
+                halionbridge::log::error("Failed to run halionbridge preset remap.");
+
+            juce::Logger::setCurrentLogger(nullptr);
+            halionbridge::log::flush();
+            return 1;
+        }
+
+        juce::Logger::setCurrentLogger(nullptr);
+        halionbridge::log::flush();
+        return 0;
     }
 
     auto options = halionbridge::Bridge::parseArguments(args);

@@ -6,6 +6,7 @@
 #include "ChildProcessOutput.h"
 #include "PathUtils.h"
 #include "PluginScan.h"
+#include "PresetRemap.h"
 #include "ProgressMarkers.h"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
 #include "halionbridge_converters/BuildDirectoryEmitter.h"
@@ -341,6 +342,123 @@ class BridgeTests : public juce::UnitTest
             expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--build-chunk-size"}).has_value());
 
             tempDir.deleteRecursively();
+        }
+
+        beginTest("VSTPreset Remap - argument parsing");
+        {
+            auto inputDir = cleanTempDirectory("halionbridge_remap_input");
+            auto outputDir = cleanTempDirectory("halionbridge_remap_output");
+            inputDir.createDirectory();
+            outputDir.deleteRecursively();
+
+            {
+                auto options = halionbridge::Bridge::parseVstPresetRemapArguments(
+                    {"--input-directory", inputDir.getFullPathName().toStdString(), "--output-directory",
+                     outputDir.getFullPathName().toStdString(), "--old-root", "C:/old/Samples", "--new-root", "D:/new/Samples"});
+                expect(options.has_value());
+                if (options)
+                {
+                    expect(options->inputDirectory == halionbridge::detail::toStdPath(inputDir));
+                    expect(options->outputDirectory == halionbridge::detail::toStdPath(outputDir));
+                    expectEquals(options->oldRoot, std::string("C:/old/Samples"));
+                    expectEquals(options->newRoot, std::string("D:/new/Samples"));
+                    expectEquals(options->presetPluginCode, std::string("H7"));
+                    expectEquals(options->timeoutSeconds, 3600);
+                }
+            }
+
+            {
+                auto options = halionbridge::Bridge::parseVstPresetRemapArguments(
+                    {"--input-directory", inputDir.getFullPathName().toStdString(), "--output-directory",
+                     outputDir.getFullPathName().toStdString(), "--old-root", "C:/old", "--new-root", "D:/new", "--preset-plugin-code",
+                     "hs", "--timeout-seconds", "5", "--gui", "--nokill", "--force-scan"});
+                expect(options.has_value());
+                if (options)
+                {
+                    expectEquals(options->presetPluginCode, std::string("HS"));
+                    expectEquals(options->timeoutSeconds, 5);
+                    expect(options->showGui);
+                    expect(options->noKill);
+                    expect(options->forceScan);
+                }
+            }
+
+            expect(!halionbridge::Bridge::parseVstPresetRemapArguments({"--input-directory", inputDir.getFullPathName().toStdString()})
+                        .has_value());
+            expect(!halionbridge::Bridge::parseVstPresetRemapArguments({"--input-directory", inputDir.getFullPathName().toStdString(),
+                                                                        "--output-directory", outputDir.getFullPathName().toStdString(),
+                                                                        "--old-root", "C:/old", "--new-root", "D:/new",
+                                                                        "--preset-plugin-code", "XX"})
+                        .has_value());
+            expect(!halionbridge::Bridge::parseVstPresetRemapArguments({"--input-directory", inputDir.getFullPathName().toStdString(),
+                                                                        "--output-directory", outputDir.getFullPathName().toStdString(),
+                                                                        "--old-root", "C:/old", "--new-root", "D:/new", "--no-timeout",
+                                                                        "--timeout-seconds", "5"})
+                        .has_value());
+
+            inputDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("VSTPreset Remap - collection list runtime and copy helpers");
+        {
+            auto inputDir = cleanTempDirectory("halionbridge_remap_collect_input");
+            auto stageDir = cleanTempDirectory("halionbridge_remap_collect_stage");
+            auto outputDir = cleanTempDirectory("halionbridge_remap_collect_output");
+            inputDir.createDirectory();
+            stageDir.deleteRecursively();
+            outputDir.deleteRecursively();
+
+            expect(inputDir.getChildFile("alpha.vstpreset").replaceWithText("alpha"));
+            expect(inputDir.getChildFile("nested").createDirectory());
+            expect(inputDir.getChildFile("nested").getChildFile("beta.VSTPRESET").replaceWithText("beta"));
+            expect(inputDir.getChildFile("ignore.txt").replaceWithText("ignore"));
+
+            auto collection = halionbridge::detail::collectPresetRemapFiles(halionbridge::detail::toStdPath(inputDir));
+            expect(collection.errors.empty());
+            expectEquals(static_cast<int>(collection.files.size()), 2);
+            if (collection.files.size() == 2)
+            {
+                expectEquals(collection.files[0].relativePath.generic_string(), std::string("alpha.vstpreset"));
+                expectEquals(collection.files[1].relativePath.generic_string(), std::string("nested/beta.VSTPRESET"));
+            }
+
+            const auto listText = halionbridge::detail::createPresetRemapListText(collection.files);
+            expect(listText.find("alpha.vstpreset\n") != std::string::npos);
+            expect(listText.find("nested/beta.VSTPRESET\n") != std::string::npos);
+
+            const auto runtimeText = halionbridge::detail::createPresetRemapRuntimeModuleText(
+                {halionbridge::detail::toStdPath(stageDir),
+                 halionbridge::detail::toStdPath(stageDir.getChildFile("00_preset-remap-list.txt")), "C:\\old\\Samples", "D:\\new\\Samples",
+                 "HS"});
+            expect(runtimeText.find("HALIONBRIDGE_PRESET_REMAP_ROOT") != std::string::npos);
+            expect(runtimeText.find("C:/old/Samples/") != std::string::npos);
+            expect(runtimeText.find("D:/new/Samples/") != std::string::npos);
+            expect(runtimeText.find("halionbridge_preset_remap") != std::string::npos);
+
+            std::vector<std::string> copyErrors;
+            expect(
+                halionbridge::detail::copyPresetRemapFilesToStage(collection.files, halionbridge::detail::toStdPath(stageDir), copyErrors));
+            expect(copyErrors.empty());
+            expect(stageDir.getChildFile("alpha.vstpreset").existsAsFile());
+            expect(stageDir.getChildFile("nested").getChildFile("beta.VSTPRESET").existsAsFile());
+
+            expect(!halionbridge::detail::copyPresetRemapFilesToStage(collection.files, halionbridge::detail::toStdPath(stageDir),
+                                                                      copyErrors));
+
+            copyErrors.clear();
+            expect(halionbridge::detail::copyPresetRemapFilesFromStage(collection.files, halionbridge::detail::toStdPath(stageDir),
+                                                                       halionbridge::detail::toStdPath(outputDir), copyErrors));
+            expect(outputDir.getChildFile("alpha.vstpreset").existsAsFile());
+            expect(outputDir.getChildFile("nested").getChildFile("beta.VSTPRESET").existsAsFile());
+
+            auto emptyError = std::string();
+            expect(!halionbridge::detail::isDirectoryEmpty(halionbridge::detail::toStdPath(outputDir), emptyError));
+            expect(!emptyError.empty());
+
+            inputDir.deleteRecursively();
+            stageDir.deleteRecursively();
+            outputDir.deleteRecursively();
         }
 
         beginTest("Build Worker - argument parsing and command construction");
