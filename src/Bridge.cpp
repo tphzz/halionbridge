@@ -764,6 +764,26 @@ bool isInfrastructureChunkFailure(const RunResult result) noexcept
 {
     return !isRecoverableChunkFailure(result) && result != RunResult::success;
 }
+
+std::optional<int> readBuildWorkerResultFile(const juce::File& resultFile)
+{
+    if (!resultFile.existsAsFile())
+        return std::nullopt;
+
+    const auto text = resultFile.loadFileAsString().trim();
+    if (text.isEmpty())
+        return std::nullopt;
+
+    for (const auto c : text)
+        if (c < '0' || c > '9')
+            return std::nullopt;
+
+    const auto value = text.getLargeIntValue();
+    if (value < 0 || value > std::numeric_limits<int>::max())
+        return std::nullopt;
+
+    return static_cast<int>(value);
+}
 } // namespace
 
 void requestStop() noexcept
@@ -1227,12 +1247,17 @@ RunResult Bridge::Impl::runChunkedInWorkers(const AppOptions& options, std::span
 
 RunResult Bridge::Impl::runWorkerInvocation(const AppOptions& options, const BuildSlice& slice)
 {
-    const auto command = detail::makeBuildWorkerCommand(options, slice.start, slice.count, slice.total);
+    auto command = detail::makeBuildWorkerCommand(options, slice.start, slice.count, slice.total);
     if (command.isEmpty())
     {
         log::error("Could not create HALion build worker command.");
         return RunResult::runtimeSetupFailed;
     }
+
+    const auto resultFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                .getNonexistentChildFile("halionbridge_build_worker_result", ".txt", false);
+    command.add("--worker-result-file");
+    command.add(resultFile.getFullPathName());
 
     auto seenProgressMarkers = std::set<std::string>();
     if (options.buildDirectory)
@@ -1325,7 +1350,32 @@ RunResult Bridge::Impl::runWorkerInvocation(const AppOptions& options, const Bui
     if (options.buildDirectory)
         detail::logNewProgressMarkers(toJuceFile(*options.buildDirectory), seenProgressMarkers);
 
-    const auto exitCode = static_cast<int>(process->getExitCode());
+    if (!process->waitForProcessToFinish(2000))
+    {
+        log::error("HALion build worker stopped running but its exit status could not be collected.");
+        return RunResult::buildFailed;
+    }
+
+    const auto processExitCode = static_cast<int>(process->getExitCode());
+    auto exitCode = processExitCode;
+    if (const auto resultFileExitCode = readBuildWorkerResultFile(resultFile))
+    {
+        exitCode = *resultFileExitCode;
+        log::debug("HALion build worker result file reported code {}.", exitCode);
+    }
+    else if (processExitCode != 0)
+    {
+        log::warn("HALion build worker result file was not available; using nonzero process exit code {}.", processExitCode);
+    }
+    else
+    {
+        log::error("HALion build worker did not write its result file.");
+        return RunResult::buildFailed;
+    }
+
+    if (resultFile.existsAsFile() && !resultFile.deleteFile())
+        log::warn("Failed to delete HALion build worker result file: {}", resultFile.getFullPathName().toStdString());
+
     const auto result = detail::buildWorkerExitCodeToRunResult(exitCode);
     if (!result)
     {

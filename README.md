@@ -62,6 +62,8 @@ halionbridge looks for the HALion 7 VST3 plugin at the normal Steinberg install 
 - Windows: `C:\Program Files\Common Files\VST3\Steinberg\HALion 7.vst3`
 - macOS: `/Library/Audio/Plug-Ins/VST3/Steinberg/HALion 7.vst3`
 
+The packaged macOS CLI is signed for plugin hosting so it can load the installed HALion VST3 under macOS hardened runtime rules.
+
 The build directory must contain `halionbridge_build.lua` and the Lua build script files referenced from that file. You can find examples in `examples`. If you already have Lua build scripts in a directory, run `halionbridge init <directory>` to create a simple sorted `halionbridge_build.lua` for them. Review the generated file before building: `init` lists every top-level non-infrastructure `.lua` file, so helper modules that are required by build scripts but are not build entrypoints should be removed from the list. Converter-owned infrastructure helpers such as `halionbridge-sfz.lua` are excluded automatically.
 
 ```bash
@@ -117,4 +119,3 @@ halionbridge prints timestamped console logs. The default log level is `info`, w
 Only one halionbridge build can run at a time for a user account. HALion resolves temporary runtime modules from the shared HALion user script directory, so a second overlapping run exits with a clear error instead of corrupting build output.
 
 Press Ctrl+C to stop a run. Conversion commands stop at converter checkpoints before writing more generated files. Normal headless HALion builds stop the active worker process and do not start later chunks. GUI and `--nokill` inspection runs remain cooperative so HALion can clean up normally.
-

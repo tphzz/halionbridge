@@ -456,9 +456,11 @@ class BridgeTests : public juce::UnitTest
         beginTest("Build Worker - RunResult exit-code mapping");
         {
             for (const auto result :
-                 {halionbridge::RunResult::success, halionbridge::RunResult::invalidOptions, halionbridge::RunResult::runtimeSetupFailed,
-                  halionbridge::RunResult::buildFailed, halionbridge::RunResult::stopped, halionbridge::RunResult::timedOut,
-                  halionbridge::RunResult::cleanupFailed})
+                 {halionbridge::RunResult::success, halionbridge::RunResult::invalidOptions, halionbridge::RunResult::invalidBridge,
+                  halionbridge::RunResult::runtimeSetupFailed, halionbridge::RunResult::anotherInstanceRunning,
+                  halionbridge::RunResult::pluginNotFound, halionbridge::RunResult::pluginLoadFailed,
+                  halionbridge::RunResult::startupStopped, halionbridge::RunResult::presetApplyFailed, halionbridge::RunResult::buildFailed,
+                  halionbridge::RunResult::stopped, halionbridge::RunResult::timedOut, halionbridge::RunResult::cleanupFailed})
             {
                 const auto exitCode = halionbridge::detail::runResultToBuildWorkerExitCode(result);
                 const auto mapped = halionbridge::detail::buildWorkerExitCodeToRunResult(exitCode);

@@ -283,8 +283,11 @@ jobs:
 
           lipo -info "$binary"
           xattr -cr "$binary"
-          codesign --force --verify --timestamp --options runtime --sign "$MACOS_DEV_ID_CERT_NAME" "$binary"
+          codesign --force --verify --timestamp --options runtime \
+            --entitlements packaging/macos/halionbridge.entitlements \
+            --sign "$MACOS_DEV_ID_CERT_NAME" "$binary"
           codesign -vvv --strict "$binary"
+          codesign -d --entitlements :- "$binary"
 
       - name: Stage Windows CLI
         if: runner.os == 'Windows'
