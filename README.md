@@ -107,7 +107,7 @@ halionbridge prints timestamped console logs. The default log level is `info`, w
 
 Only one halionbridge build can run at a time for a user account. HALion resolves temporary runtime modules from the shared HALion user script directory, so a second overlapping run exits with a clear error instead of corrupting build output.
 
-Press Ctrl+C to request a graceful stop. Conversion commands stop at converter checkpoints before writing more generated files. HALion builds stop as soon as control returns from the currently running HALion script or between chunks, then normal cleanup runs.
+Press Ctrl+C to stop a run. Conversion commands stop at converter checkpoints before writing more generated files. Normal headless HALion builds stop the active worker process and do not start later chunks. GUI and `--nokill` inspection runs remain cooperative so HALion can clean up normally.
 
 ## Features
 - **Headless Execution:** Runs as a standalone console app.
@@ -115,6 +115,6 @@ Press Ctrl+C to request a graceful stop. Conversion commands stop at converter c
 - **Offline Processing Loop:** Runs a manual processing loop without opening an audio device, to keep HALion alive while LUA instrument scripts execute.
 - **Generic HALion Lua Build Scripts:** The embedded builder loads build script modules listed in `halionbridge_build.lua`; the build script modules decide what to build.
 - **Converter Setup Commands:** `halionbridge convert sfz` creates a normal halionbridge build directory from `.sfz` files without launching HALion. When no output directory is provided, generated Lua/build files are written flat into the source directory; an explicit output directory can still be passed. The generated Lua build scripts can be reviewed or edited before running `halionbridge <build-directory>`. Converter-generated Lua filenames are kept inside the build root; unsafe generated paths are rejected. Converter-generated helper modules may be written beside build scripts without being listed in `halionbridge_build.lua`.
-- **Build Completion Detection:** Runs static `halionbridge_build.lua` lists in chunks of up to 15 scripts per HALion process by default, relaunching HALion for each chunk so later chunks can continue after a failed chunk. Waits for HALion-written `.vstpreset` status marker presets in the build directory in order to know when each chunk is finished. Temporary progress marker presets are cleaned after logging; failed status markers may remain after failed builds for diagnostics.
+- **Build Completion Detection:** Runs static `halionbridge_build.lua` lists in chunks of up to 15 scripts per HALion worker process by default, relaunching HALion for each chunk so later chunks can continue after a failed chunk and Ctrl+C can interrupt stuck headless builds. Waits for HALion-written `.vstpreset` status marker presets in the build directory in order to know when each chunk is finished. Temporary progress marker presets are cleaned after logging; failed status markers may remain after failed builds for diagnostics.
 
 See `HALION-LUA.md` for the Lua build script API used by the generic builder workflow.

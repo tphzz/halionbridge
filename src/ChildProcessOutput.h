@@ -22,5 +22,7 @@ class ChildProcessOutputBuffer
 
 void forwardChildOutput(juce::ChildProcess& process, ChildProcessOutputBuffer& output);
 void flushChildOutput(ChildProcessOutputBuffer& output);
+void forwardChildOutputToConsole(juce::ChildProcess& process, ChildProcessOutputBuffer& output);
+void flushChildOutputToConsole(ChildProcessOutputBuffer& output);
 
 } // namespace halionbridge::detail

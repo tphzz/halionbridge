@@ -1,6 +1,7 @@
 #include "halionbridge/Bridge.h"
 #include "halionbridge/BuildInfo.h"
 #include "BuildFile.h"
+#include "BuildWorker.h"
 #include "Log.h"
 #include "ChildProcessOutput.h"
 #include "PathUtils.h"
@@ -312,6 +313,111 @@ class BridgeTests : public juce::UnitTest
             expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--build-chunk-size"}).has_value());
 
             tempDir.deleteRecursively();
+        }
+
+        beginTest("Build Worker - argument parsing and command construction");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_worker_build_dir");
+            tempDir.createDirectory();
+            tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return { \"one\", \"two\", \"three\" }");
+
+            auto pluginFile = tempDir.getChildFile("HALion 7.vst3");
+            expect(pluginFile.replaceWithText("plugin"));
+
+            auto workerArgs = std::vector<std::string>{halionbridge::detail::kBuildWorkerArgument,
+                                                       tempDir.getFullPathName().toStdString(),
+                                                       "--build-slice-start",
+                                                       "2",
+                                                       "--build-slice-count",
+                                                       "1",
+                                                       "--build-slice-total",
+                                                       "3",
+                                                       "--plugin",
+                                                       pluginFile.getFullPathName().toStdString(),
+                                                       "--timeout-seconds",
+                                                       "5",
+                                                       "--force-scan"};
+            auto options = halionbridge::detail::parseBuildWorkerArguments(workerArgs);
+
+            expect(options.has_value());
+            if (options)
+            {
+                expect(options->buildWorkerMode);
+                expectEquals(options->buildSliceStart, 2);
+                expectEquals(options->buildSliceCount, 1);
+                expectEquals(options->buildSliceTotal, 3);
+                expectEquals(options->timeoutSeconds, 5);
+                expect(options->forceScan);
+                expect(options->pluginPathOverride.has_value());
+
+                const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+                options->executableFile = halionbridge::detail::toStdPath(executable);
+                const auto command = halionbridge::detail::makeBuildWorkerCommand(*options, 2, 1, 3);
+                expect(command.size() >= 12);
+                expectEquals(command[0], executable.getFullPathName());
+                expectEquals(command[1], juce::String(halionbridge::detail::kBuildWorkerArgument));
+                expectEquals(command[2], tempDir.getFullPathName());
+                expect(command.contains("--build-slice-start"));
+                expect(command.contains("--build-slice-count"));
+                expect(command.contains("--build-slice-total"));
+                expect(command.contains("--plugin"));
+                expect(command.contains("--timeout-seconds"));
+                expect(command.contains("--force-scan"));
+                expect(!command.contains("--build-chunk-size"));
+                expect(!command.contains("--fail-fast"));
+                expect(!command.contains("--gui"));
+                expect(!command.contains("--nokill"));
+            }
+
+            auto invalidZeroStart = std::vector<std::string>{halionbridge::detail::kBuildWorkerArgument,
+                                                             tempDir.getFullPathName().toStdString(),
+                                                             "--build-slice-start",
+                                                             "0",
+                                                             "--build-slice-count",
+                                                             "1",
+                                                             "--build-slice-total",
+                                                             "3"};
+            expect(!halionbridge::detail::parseBuildWorkerArguments(invalidZeroStart).has_value());
+
+            auto invalidOutsideTotal = std::vector<std::string>{halionbridge::detail::kBuildWorkerArgument,
+                                                                tempDir.getFullPathName().toStdString(),
+                                                                "--build-slice-start",
+                                                                "3",
+                                                                "--build-slice-count",
+                                                                "2",
+                                                                "--build-slice-total",
+                                                                "3"};
+            expect(!halionbridge::detail::parseBuildWorkerArguments(invalidOutsideTotal).has_value());
+
+            auto invalidGui = std::vector<std::string>{halionbridge::detail::kBuildWorkerArgument,
+                                                       tempDir.getFullPathName().toStdString(),
+                                                       "--build-slice-start",
+                                                       "1",
+                                                       "--build-slice-count",
+                                                       "1",
+                                                       "--build-slice-total",
+                                                       "3",
+                                                       "--gui"};
+            expect(!halionbridge::detail::parseBuildWorkerArguments(invalidGui).has_value());
+
+            tempDir.deleteRecursively();
+        }
+
+        beginTest("Build Worker - RunResult exit-code mapping");
+        {
+            for (const auto result :
+                 {halionbridge::RunResult::success, halionbridge::RunResult::invalidOptions, halionbridge::RunResult::runtimeSetupFailed,
+                  halionbridge::RunResult::buildFailed, halionbridge::RunResult::stopped, halionbridge::RunResult::timedOut,
+                  halionbridge::RunResult::cleanupFailed})
+            {
+                const auto exitCode = halionbridge::detail::runResultToBuildWorkerExitCode(result);
+                const auto mapped = halionbridge::detail::buildWorkerExitCodeToRunResult(exitCode);
+                expect(mapped.has_value());
+                if (mapped)
+                    expect(*mapped == result);
+            }
+
+            expect(!halionbridge::detail::buildWorkerExitCodeToRunResult(9999).has_value());
         }
 
         beginTest("Argument Parsing - No-kill inspection hold");
@@ -1555,7 +1661,7 @@ class BridgeTests : public juce::UnitTest
             expect(firstLua.contains("hb.create_layer(ctx, layerName)"));
             expect(firstLua.contains("hb.append_sample_zone(ctx, layer, region)"));
             expect(firstLua.contains("hb.save_layer_preset(ctx, layer, outputFile)"));
-            expect(firstLua.contains("local progressInterval = 25"));
+            expect(firstLua.contains("local progressInterval = 5"));
             expect(firstLua.contains("if i == 1 then"));
             expect(!firstLua.contains("((i - 1) % progressInterval)"));
             expect(!firstLua.contains("ctx.yield"));

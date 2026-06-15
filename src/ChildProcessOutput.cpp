@@ -2,6 +2,8 @@
 
 #include "Log.h"
 
+#include <iostream>
+
 namespace halionbridge::detail
 {
 namespace
@@ -16,6 +18,15 @@ void logLine(const std::string& line)
 {
     if (!line.empty())
         log::debug("{}", line);
+}
+
+void printLine(const std::string& line)
+{
+    if (!line.empty())
+    {
+        std::cout << line << '\n';
+        std::cout.flush();
+    }
 }
 
 } // namespace
@@ -75,6 +86,27 @@ void flushChildOutput(ChildProcessOutputBuffer& output)
 {
     if (auto line = output.flush())
         logLine(*line);
+}
+
+void forwardChildOutputToConsole(juce::ChildProcess& process, ChildProcessOutputBuffer& output)
+{
+    char buffer[1024]{};
+
+    for (;;)
+    {
+        const auto bytesRead = process.readProcessOutput(buffer, static_cast<int>(sizeof(buffer)));
+        if (bytesRead <= 0)
+            break;
+
+        for (const auto& line : output.append(std::string_view(buffer, static_cast<size_t>(bytesRead))))
+            printLine(line);
+    }
+}
+
+void flushChildOutputToConsole(ChildProcessOutputBuffer& output)
+{
+    if (auto line = output.flush())
+        printLine(*line);
 }
 
 } // namespace halionbridge::detail

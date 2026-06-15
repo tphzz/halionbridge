@@ -3,6 +3,8 @@
 #include "halionbridge/BuildInfo.h"
 #include "halionbridge_assets.h"
 #include "BuildFile.h"
+#include "BuildWorker.h"
+#include "ChildProcessOutput.h"
 #include "Log.h"
 #include "PathUtils.h"
 #include "PluginScan.h"
@@ -42,6 +44,8 @@ constexpr int kTerminalProgressDrainMaxMs = 1500;
 constexpr int kTerminalProgressDrainQuietMs = 300;
 constexpr double kBuildWaitProgressLogIntervalSeconds = 5.0;
 constexpr double kNoKillHeartbeatIntervalSeconds = 30.0;
+constexpr double kBuildWorkerStopGraceMs = 5000.0;
+constexpr double kBuildWorkerProgressPollMs = 100.0;
 constexpr int kDefaultBuildChunkSize = 15;
 constexpr const char* kBuildStatusOkPresetFileName = "halionbridge_status_ok.vstpreset";
 constexpr const char* kBuildStatusFailedPresetFileName = "halionbridge_status_failed.vstpreset";
@@ -753,6 +757,11 @@ bool isRecoverableChunkFailure(const RunResult result) noexcept
 {
     return result == RunResult::buildFailed || result == RunResult::timedOut;
 }
+
+bool isInfrastructureChunkFailure(const RunResult result) noexcept
+{
+    return !isRecoverableChunkFailure(result) && result != RunResult::success;
+}
 } // namespace
 
 void requestStop() noexcept
@@ -774,6 +783,9 @@ struct Bridge::Impl
 {
     RunResult runDetailed(const AppOptions& options);
     RunResult runSingleInvocation(const AppOptions& options, const juce::File& runtimeRoot, const BuildSlice& slice);
+    RunResult runChunkedInProcess(const AppOptions& options, const juce::File& runtimeRoot, std::span<const BuildSlice> slices);
+    RunResult runChunkedInWorkers(const AppOptions& options, std::span<const BuildSlice> slices);
+    RunResult runWorkerInvocation(const AppOptions& options, const BuildSlice& slice);
     bool loadPlugin(const juce::File& pluginFile, const AppOptions& options);
     bool applyVstPresetData(const juce::MemoryBlock& presetData);
     RunResult runProcessingLoop(const AppOptions& options, const juce::File& builderRoot);
@@ -1025,6 +1037,20 @@ RunResult Bridge::Impl::runDetailed(const AppOptions& options)
     const auto chunkSize = options.buildChunkSize > 0 ? options.buildChunkSize : kDefaultBuildChunkSize;
     const auto slices = makeBuildSlices(static_cast<int>(moduleNames.size()), chunkSize);
 
+    if (options.buildWorkerMode)
+    {
+        if (options.buildSliceStart <= 0 || options.buildSliceCount <= 0 || options.buildSliceTotal <= 0 ||
+            options.buildSliceStart > options.buildSliceTotal ||
+            options.buildSliceCount > (options.buildSliceTotal - options.buildSliceStart + 1))
+        {
+            log::error("Invalid build-worker slice configuration.");
+            return RunResult::invalidOptions;
+        }
+
+        return runSingleInvocation(options, runtimeRoot,
+                                   BuildSlice{options.buildSliceStart, options.buildSliceCount, options.buildSliceTotal});
+    }
+
     if (slices.empty())
     {
         log::warn("Could not statically split {} into build chunks; running it as one HALion Lua invocation.", kBuildFileName);
@@ -1034,6 +1060,19 @@ RunResult Bridge::Impl::runDetailed(const AppOptions& options)
     log::info("Running {} Lua build script file(s) in {} chunk(s) of up to {}.", static_cast<int>(moduleNames.size()),
               static_cast<int>(slices.size()), chunkSize);
 
+    if (!options.showGui && !options.noKill)
+    {
+        if (options.executableFile)
+            return runChunkedInWorkers(options, slices);
+
+        log::warn("No executable path is available; running HALion chunks in-process without hard Ctrl+C isolation.");
+    }
+
+    return runChunkedInProcess(options, runtimeRoot, slices);
+}
+
+RunResult Bridge::Impl::runChunkedInProcess(const AppOptions& options, const juce::File& runtimeRoot, std::span<const BuildSlice> slices)
+{
     auto failedChunks = 0;
     auto lastFailure = RunResult::success;
 
@@ -1084,6 +1123,142 @@ RunResult Bridge::Impl::runDetailed(const AppOptions& options)
 
     log::info("HALion Lua build completed.");
     return RunResult::success;
+}
+
+RunResult Bridge::Impl::runChunkedInWorkers(const AppOptions& options, std::span<const BuildSlice> slices)
+{
+    auto failedChunks = 0;
+    auto lastFailure = RunResult::success;
+
+    for (size_t i = 0; i < slices.size(); ++i)
+    {
+        if (isStopRequested())
+        {
+            log::warn("HALion Lua build stopped by user request before starting build chunk {}/{}.", static_cast<int>(i + 1),
+                      static_cast<int>(slices.size()));
+            return RunResult::stopped;
+        }
+
+        const auto& slice = slices[i];
+        log::info("Starting build chunk {}/{}: entries {}-{} of {}.", static_cast<int>(i + 1), static_cast<int>(slices.size()), slice.start,
+                  slice.end(), slice.total);
+
+        const auto result = runWorkerInvocation(options, slice);
+        if (result == RunResult::success)
+        {
+            if (isStopRequested())
+            {
+                log::warn("HALion Lua build stopped by user request after build chunk {}/{}.", static_cast<int>(i + 1),
+                          static_cast<int>(slices.size()));
+                return RunResult::stopped;
+            }
+
+            log::info("Build chunk {}/{} completed.", static_cast<int>(i + 1), static_cast<int>(slices.size()));
+            continue;
+        }
+
+        if (result == RunResult::stopped)
+            return RunResult::stopped;
+
+        ++failedChunks;
+        lastFailure = result;
+        log::error("Build chunk {}/{} failed; entries {}-{} were not completed successfully.", static_cast<int>(i + 1),
+                   static_cast<int>(slices.size()), slice.start, slice.end());
+
+        if (options.failFast || isInfrastructureChunkFailure(result))
+        {
+            log::error("Stopping after failed build chunk.");
+            return result;
+        }
+    }
+
+    if (failedChunks > 0)
+    {
+        log::error("HALion Lua build completed with {} failed chunk(s).", failedChunks);
+        return lastFailure == RunResult::success ? RunResult::buildFailed : lastFailure;
+    }
+
+    log::info("HALion Lua build completed.");
+    return RunResult::success;
+}
+
+RunResult Bridge::Impl::runWorkerInvocation(const AppOptions& options, const BuildSlice& slice)
+{
+    const auto command = detail::makeBuildWorkerCommand(options, slice.start, slice.count, slice.total);
+    if (command.isEmpty())
+    {
+        log::error("Could not create HALion build worker command.");
+        return RunResult::runtimeSetupFailed;
+    }
+
+    juce::ChildProcess process;
+    if (!process.start(command, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
+    {
+        log::error("Failed to launch HALion build worker.");
+        return RunResult::runtimeSetupFailed;
+    }
+
+    detail::ChildProcessOutputBuffer childOutput;
+    auto stopLogged = false;
+    auto stopDeadline = 0.0;
+    auto nextProgressPoll = 0.0;
+    auto seenProgressMarkers = std::set<std::string>();
+
+    if (options.buildDirectory)
+    {
+        const auto builderRoot = toJuceFile(*options.buildDirectory);
+        const auto staleMarkers = detail::deleteProgressMarkers(builderRoot, "stale HALion Lua progress marker before worker run");
+        seenProgressMarkers = std::move(staleMarkers.remainingNames);
+    }
+
+    while (process.isRunning())
+    {
+        detail::forwardChildOutputToConsole(process, childOutput);
+
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        if (options.buildDirectory && now >= nextProgressPoll)
+        {
+            detail::logNewProgressMarkers(toJuceFile(*options.buildDirectory), seenProgressMarkers);
+            nextProgressPoll = now + kBuildWorkerProgressPollMs;
+        }
+
+        if (isStopRequested())
+        {
+            if (!stopLogged)
+            {
+                stopLogged = true;
+                stopDeadline = now + kBuildWorkerStopGraceMs;
+                log::warn("Stop requested; waiting up to {} seconds for current HALion worker to exit.",
+                          static_cast<int>(kBuildWorkerStopGraceMs / 1000.0));
+            }
+
+            if (now >= stopDeadline)
+            {
+                process.kill();
+                detail::forwardChildOutputToConsole(process, childOutput);
+                detail::flushChildOutputToConsole(childOutput);
+                log::warn("HALion worker killed after Ctrl+C grace period.");
+                return RunResult::stopped;
+            }
+        }
+
+        juce::Thread::sleep(10);
+    }
+
+    detail::forwardChildOutputToConsole(process, childOutput);
+    detail::flushChildOutputToConsole(childOutput);
+    if (options.buildDirectory)
+        detail::logNewProgressMarkers(toJuceFile(*options.buildDirectory), seenProgressMarkers);
+
+    const auto exitCode = static_cast<int>(process.getExitCode());
+    const auto result = detail::buildWorkerExitCodeToRunResult(exitCode);
+    if (!result)
+    {
+        log::error("HALion build worker exited with unexpected code {}.", exitCode);
+        return RunResult::buildFailed;
+    }
+
+    return *result;
 }
 
 RunResult Bridge::Impl::runSingleInvocation(const AppOptions& options, const juce::File& runtimeRoot, const BuildSlice& slice)

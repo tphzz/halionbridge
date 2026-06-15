@@ -25,6 +25,10 @@ struct AppOptions
     bool noKill = false;
     bool forceScan = false;
     bool failFast = false;
+    bool buildWorkerMode = false;
+    int buildSliceStart = 0;
+    int buildSliceCount = 0;
+    int buildSliceTotal = 0;
 };
 
 struct BuildStatusMarkerFiles
