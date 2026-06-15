@@ -201,7 +201,7 @@ Private or release-only converters are build-time drop-ins. A private converter 
 - `src/Bridge.cpp`: Core bridge orchestration for preparing the embedded bootstrap preset, supervising headless build workers, hosting the HALion 7 VST3 format inside a worker or in-process inspection run, applying preset data, and driving the processing loop.
 - `src/BuildWorker.cpp`: Hidden build-worker argument parsing, command construction, and worker exit-code mapping used by the CLI and bridge chunk supervisor.
 - `src/CrashDiagnostics.cpp`: Windows crash-dump support for failures that occur inside JUCE or a hosted VST3 before normal error reporting can run.
-- `src/ChildProcessOutput.cpp`: Byte-buffered subprocess output forwarding. It preserves split UTF-8 sequences across reads before logging scan-worker output or forwarding build-worker logs unchanged to the parent console.
+- `src/ChildProcessOutput.cpp`: Byte-buffered subprocess output forwarding. It preserves split UTF-8 sequences across reads before logging scan-worker output or forwarding build-worker log lines through the parent logger.
 - `src/Log.cpp`: Private spdlog setup and log-level parsing. spdlog must not appear in the public `include/halionbridge` API.
 - `src/BuildFile.cpp`: Host-side build file inspection for the top-level string list returned by `halionbridge_build.lua`, plus deterministic generation of a simple build file for `halionbridge init`.
 - `src/PathUtils.cpp`: Private JUCE/std filesystem conversion and CLI path normalization helpers shared by the library, CLI, and tests.

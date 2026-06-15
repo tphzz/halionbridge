@@ -342,10 +342,10 @@ class BridgeTests : public juce::UnitTest
             expect(options.has_value());
             if (options)
             {
-                expect(options->buildWorkerMode);
-                expectEquals(options->buildSliceStart, 2);
-                expectEquals(options->buildSliceCount, 1);
-                expectEquals(options->buildSliceTotal, 3);
+                expect(halionbridge::detail::AppOptionsAccess::isBuildWorkerMode(*options));
+                expectEquals(halionbridge::detail::AppOptionsAccess::buildSliceStart(*options), 2);
+                expectEquals(halionbridge::detail::AppOptionsAccess::buildSliceCount(*options), 1);
+                expectEquals(halionbridge::detail::AppOptionsAccess::buildSliceTotal(*options), 3);
                 expectEquals(options->timeoutSeconds, 5);
                 expect(options->forceScan);
                 expect(options->pluginPathOverride.has_value());

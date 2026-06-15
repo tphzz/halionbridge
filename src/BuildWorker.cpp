@@ -165,10 +165,7 @@ std::optional<AppOptions> parseBuildWorkerArguments(std::span<const std::string>
     if (!options)
         return std::nullopt;
 
-    options->buildWorkerMode = true;
-    options->buildSliceStart = *sliceStart;
-    options->buildSliceCount = *sliceCount;
-    options->buildSliceTotal = *sliceTotal;
+    AppOptionsAccess::setBuildWorkerSlice(*options, *sliceStart, *sliceCount, *sliceTotal);
     return options;
 }
 

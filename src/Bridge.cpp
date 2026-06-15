@@ -1039,18 +1039,25 @@ RunResult Bridge::Impl::runDetailed(const AppOptions& options)
     const auto chunkSize = options.buildChunkSize > 0 ? options.buildChunkSize : kDefaultBuildChunkSize;
     const auto slices = makeBuildSlices(static_cast<int>(moduleNames.size()), chunkSize);
 
-    if (options.buildWorkerMode)
+    if (detail::AppOptionsAccess::isBuildWorkerMode(options))
     {
-        if (options.buildSliceStart <= 0 || options.buildSliceCount <= 0 || options.buildSliceTotal <= 0 ||
-            options.buildSliceStart > options.buildSliceTotal ||
-            options.buildSliceCount > (options.buildSliceTotal - options.buildSliceStart + 1))
+        const auto sliceStart = detail::AppOptionsAccess::buildSliceStart(options);
+        const auto sliceCount = detail::AppOptionsAccess::buildSliceCount(options);
+        const auto sliceTotal = detail::AppOptionsAccess::buildSliceTotal(options);
+        if (sliceStart <= 0 || sliceCount <= 0 || sliceTotal <= 0 || sliceStart > sliceTotal || sliceCount > (sliceTotal - sliceStart + 1))
         {
             log::error("Invalid build-worker slice configuration.");
             return RunResult::invalidOptions;
         }
 
-        return runSingleInvocation(options, runtimeRoot,
-                                   BuildSlice{options.buildSliceStart, options.buildSliceCount, options.buildSliceTotal});
+        if (sliceTotal != static_cast<int>(moduleNames.size()))
+        {
+            log::error("Build-worker slice total {} does not match {} entries parsed from {}.", sliceTotal,
+                       static_cast<int>(moduleNames.size()), kBuildFileName);
+            return RunResult::invalidOptions;
+        }
+
+        return runSingleInvocation(options, runtimeRoot, BuildSlice{sliceStart, sliceCount, sliceTotal});
     }
 
     if (slices.empty())
@@ -1193,8 +1200,16 @@ RunResult Bridge::Impl::runWorkerInvocation(const AppOptions& options, const Bui
         return RunResult::runtimeSetupFailed;
     }
 
-    juce::ChildProcess process;
-    if (!process.start(command, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
+    auto seenProgressMarkers = std::set<std::string>();
+    if (options.buildDirectory)
+    {
+        const auto builderRoot = toJuceFile(*options.buildDirectory);
+        const auto staleMarkers = detail::deleteProgressMarkers(builderRoot, "stale HALion Lua progress marker before worker run");
+        seenProgressMarkers = std::move(staleMarkers.remainingNames);
+    }
+
+    auto process = std::make_shared<juce::ChildProcess>();
+    if (!process->start(command, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
     {
         log::error("Failed to launch HALion build worker.");
         return RunResult::runtimeSetupFailed;
@@ -1205,18 +1220,10 @@ RunResult Bridge::Impl::runWorkerInvocation(const AppOptions& options, const Bui
     auto nextProgressPoll = 0.0;
     const auto workerStartTime = juce::Time::getMillisecondCounterHiRes();
     auto nextHeartbeat = workerStartTime + kBuildWorkerHeartbeatIntervalMs;
-    auto seenProgressMarkers = std::set<std::string>();
-    detail::ChildProcessOutputBuffer childOutput;
-    auto outputThread = std::thread([&process, &childOutput] { detail::forwardChildOutputToConsole(process, childOutput); });
+    auto childOutput = std::make_shared<detail::ChildProcessOutputBuffer>();
+    auto outputThread = std::thread([process, childOutput] { detail::forwardChildOutputToConsole(*process, *childOutput); });
 
-    if (options.buildDirectory)
-    {
-        const auto builderRoot = toJuceFile(*options.buildDirectory);
-        const auto staleMarkers = detail::deleteProgressMarkers(builderRoot, "stale HALion Lua progress marker before worker run");
-        seenProgressMarkers = std::move(staleMarkers.remainingNames);
-    }
-
-    while (process.isRunning())
+    while (process->isRunning())
     {
         const auto now = juce::Time::getMillisecondCounterHiRes();
         if (options.buildDirectory && now >= nextProgressPoll)
@@ -1245,11 +1252,30 @@ RunResult Bridge::Impl::runWorkerInvocation(const AppOptions& options, const Bui
 
             if (now >= stopDeadline)
             {
-                process.kill();
+                const auto killed = process->kill();
+                if (!killed && process->isRunning())
+                {
+                    log::error("Failed to terminate HALion build worker after Ctrl+C grace period; leaving worker output reader detached.");
+                    if (outputThread.joinable())
+                        outputThread.detach();
+
+                    return RunResult::stopped;
+                }
+
+                if (!process->waitForProcessToFinish(2000))
+                {
+                    log::error(
+                        "HALion build worker did not exit within 2 seconds after termination request; leaving output reader detached.");
+                    if (outputThread.joinable())
+                        outputThread.detach();
+
+                    return RunResult::stopped;
+                }
+
                 if (outputThread.joinable())
                     outputThread.join();
 
-                detail::flushChildOutputToConsole(childOutput);
+                detail::flushChildOutputToConsole(*childOutput);
                 log::warn("HALion worker killed after Ctrl+C grace period.");
                 return RunResult::stopped;
             }
@@ -1261,11 +1287,11 @@ RunResult Bridge::Impl::runWorkerInvocation(const AppOptions& options, const Bui
     if (outputThread.joinable())
         outputThread.join();
 
-    detail::flushChildOutputToConsole(childOutput);
+    detail::flushChildOutputToConsole(*childOutput);
     if (options.buildDirectory)
         detail::logNewProgressMarkers(toJuceFile(*options.buildDirectory), seenProgressMarkers);
 
-    const auto exitCode = static_cast<int>(process.getExitCode());
+    const auto exitCode = static_cast<int>(process->getExitCode());
     const auto result = detail::buildWorkerExitCodeToRunResult(exitCode);
     if (!result)
     {
