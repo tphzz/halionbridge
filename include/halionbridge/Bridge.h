@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace halionbridge
@@ -38,6 +39,7 @@ struct AppOptions
     int buildSliceStart = 0;
     int buildSliceCount = 0;
     int buildSliceTotal = 0;
+    std::optional<std::filesystem::path> buildWorkerResultFile;
 };
 
 namespace detail
@@ -68,6 +70,16 @@ struct AppOptionsAccess
     static int buildSliceTotal(const AppOptions& options) noexcept
     {
         return options.buildSliceTotal;
+    }
+
+    static void setBuildWorkerResultFile(AppOptions& options, std::filesystem::path path)
+    {
+        options.buildWorkerResultFile = std::move(path);
+    }
+
+    static const std::optional<std::filesystem::path>& buildWorkerResultFile(const AppOptions& options) noexcept
+    {
+        return options.buildWorkerResultFile;
     }
 };
 

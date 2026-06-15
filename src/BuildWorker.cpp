@@ -87,6 +87,7 @@ std::optional<AppOptions> parseBuildWorkerArguments(std::span<const std::string>
     std::optional<int> sliceStart;
     std::optional<int> sliceCount;
     std::optional<int> sliceTotal;
+    std::optional<std::filesystem::path> resultFile;
 
     for (size_t i = 2; i < args.size(); ++i)
     {
@@ -137,6 +138,16 @@ std::optional<AppOptions> parseBuildWorkerArguments(std::span<const std::string>
             bridgeArgs.push_back(arg);
             bridgeArgs.push_back(args[++i]);
         }
+        else if (arg == "--worker-result-file")
+        {
+            if (i + 1 >= args.size())
+            {
+                log::error("{} requires a value.", arg);
+                return std::nullopt;
+            }
+
+            resultFile = std::filesystem::path(args[++i]);
+        }
         else if (arg == "--no-timeout")
         {
             bridgeArgs.push_back(arg);
@@ -170,6 +181,9 @@ std::optional<AppOptions> parseBuildWorkerArguments(std::span<const std::string>
         return std::nullopt;
 
     AppOptionsAccess::setBuildWorkerSlice(*options, *sliceStart, *sliceCount, *sliceTotal);
+    if (resultFile)
+        AppOptionsAccess::setBuildWorkerResultFile(*options, *resultFile);
+
     return options;
 }
 

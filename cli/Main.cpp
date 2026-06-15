@@ -341,9 +341,17 @@ int main(int argc, char* argv[])
 
         halionbridge::Bridge app;
         const auto runResult = app.runDetailed(*options);
+        const auto exitCode = halionbridge::detail::runResultToBuildWorkerExitCode(runResult);
+        if (const auto& resultFile = halionbridge::detail::AppOptionsAccess::buildWorkerResultFile(*options))
+        {
+            const auto resultPath = halionbridge::detail::toJuceString(*resultFile);
+            if (!juce::File(resultPath).replaceWithText(juce::String(exitCode)))
+                halionbridge::log::warn("Failed to write HALion build worker result file: {}", resultFile->string());
+        }
+
         juce::Logger::setCurrentLogger(nullptr);
         halionbridge::log::flush();
-        return halionbridge::detail::runResultToBuildWorkerExitCode(runResult);
+        return exitCode;
     }
 
     auto options = halionbridge::Bridge::parseArguments(args);
