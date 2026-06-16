@@ -22,7 +22,6 @@
 
 namespace
 {
-
 void signalStopHandler(int)
 {
     halionbridge::requestStop();

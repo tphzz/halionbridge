@@ -23,7 +23,7 @@ struct PresetRemapCollectionResult
 struct PresetRemapRuntimeConfig
 {
     std::filesystem::path runtimeRoot;
-    std::filesystem::path listFile;
+    std::vector<std::string> relativePresetPaths;
     std::string oldRoot;
     std::string newRoot;
     std::string pluginCode = "H7";
@@ -40,5 +40,7 @@ bool copyPresetRemapFilesToStage(std::span<const PresetRemapFile> files, const s
                                  std::vector<std::string>& errors);
 bool copyPresetRemapFilesFromStage(std::span<const PresetRemapFile> files, const std::filesystem::path& stageDirectory,
                                    const std::filesystem::path& outputDirectory, std::vector<std::string>& errors);
+bool cleanupPresetRemapStageDirectory(const std::filesystem::path& stageDirectory, const std::filesystem::path& expectedUserPresetRoot,
+                                      std::string& errorMessage);
 
 } // namespace halionbridge::detail

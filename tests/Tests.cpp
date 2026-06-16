@@ -368,6 +368,7 @@ class BridgeTests : public juce::UnitTest
             expect(classify({"remap-vstpresets"}) == halionbridge::detail::CliCommandKind::remapVstPresets);
             expect(classify({"--halionbridge-build-worker", "C:/build"}) == halionbridge::detail::CliCommandKind::buildWorker);
             expect(classify({"--halionbridge-scan-plugin"}) == halionbridge::detail::CliCommandKind::scanPluginWorker);
+            expect(classify({"--halionbridge-cleanup-directory", "C:/temp"}) == halionbridge::detail::CliCommandKind::unknown);
             expect(classify({"C:/build"}) == halionbridge::detail::CliCommandKind::unknown);
         }
 
@@ -493,11 +494,17 @@ class BridgeTests : public juce::UnitTest
             expect(listText.find("alpha.vstpreset\n") != std::string::npos);
             expect(listText.find("nested/beta.VSTPRESET\n") != std::string::npos);
 
+            auto relativePresetPaths = std::vector<std::string>();
+            for (const auto& file : collection.files)
+                relativePresetPaths.push_back(file.relativePath.generic_string());
+
             const auto runtimeText = halionbridge::detail::createPresetRemapRuntimeModuleText(
-                {halionbridge::detail::toStdPath(stageDir),
-                 halionbridge::detail::toStdPath(stageDir.getChildFile("00_preset-remap-list.txt")), "C:\\old\\Samples", "D:\\new\\Samples",
-                 "HS"});
+                {halionbridge::detail::toStdPath(stageDir), relativePresetPaths, "C:\\old\\Samples", "D:\\new\\Samples", "HS"});
             expect(runtimeText.find("HALIONBRIDGE_PRESET_REMAP_ROOT") != std::string::npos);
+            expect(runtimeText.find("HALIONBRIDGE_PRESET_REMAP_PRESETS") != std::string::npos);
+            expect(runtimeText.find("\"alpha.vstpreset\"") != std::string::npos);
+            expect(runtimeText.find("\"nested/beta.VSTPRESET\"") != std::string::npos);
+            expect(runtimeText.find("HALIONBRIDGE_PRESET_REMAP_LIST") == std::string::npos);
             expect(runtimeText.find("C:/old/Samples/") != std::string::npos);
             expect(runtimeText.find("D:/new/Samples/") != std::string::npos);
             expect(runtimeText.find("halionbridge_preset_remap") != std::string::npos);
@@ -525,6 +532,59 @@ class BridgeTests : public juce::UnitTest
             inputDir.deleteRecursively();
             stageDir.deleteRecursively();
             outputDir.deleteRecursively();
+        }
+
+        beginTest("VSTPreset Remap - cleanup deletes staged tree");
+        {
+            auto rootDir = cleanTempDirectory("halionbridge_remap_cleanup_root");
+            rootDir.createDirectory();
+            auto stageDir = rootDir.getChildFile("halionbridge-remap-unit");
+            expect(stageDir.createDirectory());
+            expect(stageDir.getChildFile("nested").createDirectory());
+            expect(stageDir.getChildFile("alpha.vstpreset").replaceWithText("alpha"));
+            expect(stageDir.getChildFile("nested").getChildFile("beta.VSTPRESET").replaceWithText("beta"));
+            expect(stageDir.getChildFile("hbp_000001_i_50726F6772657373.vstpreset").replaceWithText("marker"));
+            expect(stageDir.getChildFile("leftover.txt").replaceWithText("leftover"));
+
+            auto cleanupError = std::string();
+            expect(halionbridge::detail::cleanupPresetRemapStageDirectory(halionbridge::detail::toStdPath(stageDir),
+                                                                          halionbridge::detail::toStdPath(rootDir), cleanupError));
+            expect(cleanupError.empty());
+            expect(!stageDir.exists());
+
+            rootDir.deleteRecursively();
+        }
+
+        beginTest("VSTPreset Remap - cleanup tolerates missing staged directory");
+        {
+            auto rootDir = cleanTempDirectory("halionbridge_remap_cleanup_missing_known_root");
+            rootDir.createDirectory();
+            auto stageDir = rootDir.getChildFile("halionbridge-remap-missing-known");
+            stageDir.deleteRecursively();
+
+            auto cleanupError = std::string();
+            expect(halionbridge::detail::cleanupPresetRemapStageDirectory(halionbridge::detail::toStdPath(stageDir),
+                                                                          halionbridge::detail::toStdPath(rootDir), cleanupError));
+            expect(cleanupError.empty());
+            expect(!stageDir.exists());
+
+            rootDir.deleteRecursively();
+        }
+
+        beginTest("VSTPreset Remap - cleanup refuses non-remap staging paths");
+        {
+            auto rootDir = cleanTempDirectory("halionbridge_remap_cleanup_refuse_root");
+            rootDir.createDirectory();
+            auto stageDir = rootDir.getChildFile("not-remap");
+            expect(stageDir.createDirectory());
+
+            auto cleanupError = std::string();
+            expect(!halionbridge::detail::cleanupPresetRemapStageDirectory(halionbridge::detail::toStdPath(stageDir),
+                                                                           halionbridge::detail::toStdPath(rootDir), cleanupError));
+            expect(!cleanupError.empty());
+            expect(stageDir.isDirectory());
+
+            rootDir.deleteRecursively();
         }
 
         beginTest("Build Worker - argument parsing and command construction");

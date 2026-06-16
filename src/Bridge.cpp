@@ -19,12 +19,14 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <set>
+#include <span>
 #include <thread>
 #include <utility>
 
@@ -56,7 +58,7 @@ constexpr const char* kPresetDirEnvironmentVariable = "HALIONBRIDGE_PRESET_DIR";
 constexpr const char* kRuntimeModuleFileName = "halionbridge_runtime.lua";
 constexpr const char* kBuilderModuleFileName = "halionbridge_builder.lua";
 constexpr const char* kPresetRemapModuleFileName = "halionbridge_preset_remap.lua";
-constexpr const char* kPresetRemapListFileName = "00_preset-remap-list.txt";
+constexpr const char* kPresetRemapTemporaryDirectoryPrefix = "halionbridge-remap-";
 constexpr const char* kBuildFileName = "halionbridge_build.lua";
 constexpr const char* kScriptDirectoryLockName = "halionbridge_halion_user_scripts";
 
@@ -609,8 +611,6 @@ class ScopedPresetRemapRuntimeRoot
   public:
     explicit ScopedPresetRemapRuntimeRoot(const detail::PresetRemapRuntimeConfig& config)
     {
-        runtimeRoot = toJuceFile(config.runtimeRoot);
-
         if (!scriptDirectoryLock.enter(0))
         {
             log::error("Another halionbridge instance is already using HALion's user script directory. Wait for it to finish and retry.");
@@ -619,24 +619,6 @@ class ScopedPresetRemapRuntimeRoot
         }
 
         lockAcquired = true;
-        previousWorkingDirectory = juce::File::getCurrentWorkingDirectory();
-        previousEnvironmentValue = getEnvironmentVariableIfSet(kPresetDirEnvironmentVariable);
-
-        if (!setEnvironmentVariable(kPresetDirEnvironmentVariable, runtimeRoot.getFullPathName()))
-        {
-            log::error("Failed to set {} for HALion Lua bootstrap.", kPresetDirEnvironmentVariable);
-            return;
-        }
-
-        environmentChanged = true;
-
-        if (!runtimeRoot.setAsCurrentWorkingDirectory())
-        {
-            log::error("Failed to set working directory to {}", runtimeRoot.getFullPathName().toStdString());
-            return;
-        }
-
-        workingDirectoryChanged = true;
 
         const auto scriptDirectory = getHalionUserScriptDirectory();
         const auto runtimeModuleFile = scriptDirectory.getChildFile(kRuntimeModuleFileName);
@@ -658,17 +640,6 @@ class ScopedPresetRemapRuntimeRoot
 
     ~ScopedPresetRemapRuntimeRoot()
     {
-        if (workingDirectoryChanged)
-            previousWorkingDirectory.setAsCurrentWorkingDirectory();
-
-        if (environmentChanged)
-        {
-            if (previousEnvironmentValue)
-                setEnvironmentVariable(kPresetDirEnvironmentVariable, *previousEnvironmentValue);
-            else
-                clearEnvironmentVariable(kPresetDirEnvironmentVariable);
-        }
-
         if (lockAcquired)
             scriptDirectoryLock.exit();
     }
@@ -685,32 +656,79 @@ class ScopedPresetRemapRuntimeRoot
 
   private:
     juce::InterProcessLock scriptDirectoryLock{kScriptDirectoryLockName};
-    juce::File runtimeRoot;
-    juce::File previousWorkingDirectory;
-    std::optional<juce::String> previousEnvironmentValue;
     ScopedTemporaryTextFile remapModule;
     ScopedTemporaryTextFile runtimeModule;
     RunResult failureResult = RunResult::runtimeSetupFailed;
     bool lockAcquired = false;
-    bool environmentChanged = false;
-    bool workingDirectoryChanged = false;
     bool ready = false;
 };
+
+bool cleanupPresetRemapTemporaryDirectory(const std::filesystem::path& directory, const std::filesystem::path& userPresetRoot,
+                                          const bool warnOnFailure)
+{
+    if (directory.empty())
+        return true;
+
+    auto error = std::string();
+    if (detail::cleanupPresetRemapStageDirectory(directory, userPresetRoot, error))
+        return true;
+
+    if (warnOnFailure)
+    {
+        log::warn("{} If remapped presets were already copied, this temporary directory can be deleted later.", error);
+    }
+    else
+    {
+        log::debug("Temporary preset-remap directory cleanup did not complete: {}", error);
+    }
+
+    return false;
+}
+
+void cleanupStalePresetRemapTemporaryDirectories(const std::filesystem::path& userPresetRoot)
+{
+    std::error_code error;
+    auto iterator = std::filesystem::directory_iterator(userPresetRoot, error);
+    if (error)
+    {
+        log::debug("Could not scan HALion user preset root for stale preset-remap directories {}: {}", userPresetRoot.string(),
+                   error.message());
+        return;
+    }
+
+    for (; iterator != std::filesystem::directory_iterator(); iterator.increment(error))
+    {
+        if (error)
+        {
+            log::debug("Could not continue stale preset-remap directory scan below {}: {}", userPresetRoot.string(), error.message());
+            return;
+        }
+
+        const auto path = iterator->path();
+        std::error_code statusError;
+        if (!iterator->is_directory(statusError))
+            continue;
+
+        const auto name = path.filename().string();
+        if (name.rfind(kPresetRemapTemporaryDirectoryPrefix, 0) != 0)
+            continue;
+
+        log::debug("Attempting cleanup of stale temporary preset-remap directory {}.", path.string());
+        cleanupPresetRemapTemporaryDirectory(path, userPresetRoot, false);
+    }
+}
 
 class ScopedTemporaryDirectory
 {
   public:
-    explicit ScopedTemporaryDirectory(std::filesystem::path directoryIn) : directory(std::move(directoryIn)) {}
+    ScopedTemporaryDirectory(std::filesystem::path directoryIn, std::filesystem::path userPresetRootIn)
+        : directory(std::move(directoryIn)), userPresetRoot(std::move(userPresetRootIn))
+    {
+    }
 
     ~ScopedTemporaryDirectory()
     {
-        if (directory.empty())
-            return;
-
-        std::error_code ec;
-        std::filesystem::remove_all(directory, ec);
-        if (ec)
-            log::warn("Failed to delete temporary preset-remap directory {}: {}", directory.string(), ec.message());
+        cleanup();
     }
 
     const std::filesystem::path& get() const noexcept
@@ -718,8 +736,19 @@ class ScopedTemporaryDirectory
         return directory;
     }
 
+    bool cleanup(const bool warnOnFailure = false)
+    {
+        return cleanupPresetRemapTemporaryDirectory(directory, userPresetRoot, warnOnFailure);
+    }
+
+    void dismiss() noexcept
+    {
+        directory.clear();
+    }
+
   private:
     std::filesystem::path directory;
+    std::filesystem::path userPresetRoot;
 };
 
 struct BuildMarkerSet
@@ -1853,8 +1882,11 @@ RunResult Bridge::Impl::remapVstPresetsDetailed(const VstPresetRemapOptions& opt
     }
 
     const auto userPresetRoot = detail::getDefaultHalionUserPresetDirectory();
-    const auto stageDirectory = userPresetRoot / ("halionbridge-remap-" + juce::Uuid().toString().toStdString());
-    ScopedTemporaryDirectory temporaryDirectory(stageDirectory);
+    cleanupStalePresetRemapTemporaryDirectories(userPresetRoot);
+
+    const auto stageDirectory =
+        userPresetRoot / (std::string{kPresetRemapTemporaryDirectoryPrefix} + juce::Uuid().toString().toStdString());
+    ScopedTemporaryDirectory temporaryDirectory(stageDirectory, userPresetRoot);
 
     std::error_code ec;
     std::filesystem::create_directories(stageDirectory, ec);
@@ -1874,16 +1906,14 @@ RunResult Bridge::Impl::remapVstPresetsDetailed(const VstPresetRemapOptions& opt
         return RunResult::runtimeSetupFailed;
     }
 
-    const auto listFile = stageDirectory / kPresetRemapListFileName;
-    const auto listText = detail::createPresetRemapListText(collection.files);
-    if (!toJuceFile(listFile).replaceWithText(juce::String::fromUTF8(listText.c_str()), false, false, "\n"))
-    {
-        log::error("Could not write preset-remap list file: {}", listFile.string());
-        return RunResult::runtimeSetupFailed;
-    }
+    auto relativePresetPaths = std::vector<std::string>();
+    relativePresetPaths.reserve(collection.files.size());
+    for (const auto& file : collection.files)
+        relativePresetPaths.push_back(file.relativePath.generic_string());
 
-    auto runtimeConfig = detail::PresetRemapRuntimeConfig{stageDirectory, listFile, detail::normalizePresetRemapRoot(options.oldRoot),
-                                                          detail::normalizePresetRemapRoot(options.newRoot), options.presetPluginCode};
+    auto runtimeConfig =
+        detail::PresetRemapRuntimeConfig{stageDirectory, std::move(relativePresetPaths), detail::normalizePresetRemapRoot(options.oldRoot),
+                                         detail::normalizePresetRemapRoot(options.newRoot), options.presetPluginCode};
 
     const auto remapResult = runPresetRemapInvocation(options, runtimeConfig);
     if (remapResult != RunResult::success)
@@ -1905,6 +1935,8 @@ RunResult Bridge::Impl::remapVstPresetsDetailed(const VstPresetRemapOptions& opt
     }
 
     log::info("Copied remapped .vstpreset files to {}.", options.outputDirectory.string());
+    temporaryDirectory.cleanup(true);
+    temporaryDirectory.dismiss();
     return RunResult::success;
 }
 
@@ -2165,11 +2197,12 @@ RunResult Bridge::Impl::runProcessingLoop(const AppOptions& options, const juce:
         log::debug("Releasing plugin resources...");
         pluginInstance->releaseResources();
 
-        if (markersToClean != nullptr && !cleanupPostReleaseMarkers(*markersToClean, result) && result == RunResult::success)
-            return RunResult::cleanupFailed;
-
         log::debug("Unloading plugin instance...");
         pluginInstance = nullptr;
+        pumpMessages(kPrepareMessagePumpMs);
+
+        if (markersToClean != nullptr && !cleanupPostReleaseMarkers(*markersToClean, result) && result == RunResult::success)
+            return RunResult::cleanupFailed;
 
         return result;
     };

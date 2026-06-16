@@ -8,7 +8,7 @@
 -- used by the generic build runner.
 
 local RUNTIME_ROOT = tostring(HALIONBRIDGE_PRESET_REMAP_ROOT or ""):gsub("\\", "/")
-local LIST_FILE = tostring(HALIONBRIDGE_PRESET_REMAP_LIST or ""):gsub("\\", "/")
+local PRESET_PATHS = HALIONBRIDGE_PRESET_REMAP_PRESETS or {}
 local OLD_ROOT = tostring(HALIONBRIDGE_PRESET_REMAP_OLD_ROOT or ""):gsub("\\", "/")
 local NEW_ROOT = tostring(HALIONBRIDGE_PRESET_REMAP_NEW_ROOT or ""):gsub("\\", "/")
 local PLUGIN_CODE = tostring(HALIONBRIDGE_PRESET_REMAP_PLUGIN_CODE or "H7")
@@ -31,12 +31,6 @@ local function pathJoin(root, rel)
     rel = tostring(rel or ""):gsub("\\", "/")
     if root ~= "" and root:sub(-1) ~= "/" then root = root .. "/" end
     return root .. rel
-end
-
-local function trimLine(line)
-    line = tostring(line or ""):gsub("^\239\187\191", "")
-    line = line:gsub("^%s+", ""):gsub("%s+$", "")
-    return line
 end
 
 local function progressLevel(value)
@@ -176,15 +170,6 @@ local function writeStatus(ok)
     return false, tostring(errorMessage)
 end
 
-local function readList()
-    local list = {}
-    for line in io.lines(LIST_FILE) do
-        line = trimLine(line)
-        if line ~= "" then table.insert(list, line) end
-    end
-    return list
-end
-
 local function remapPreset(relativePath)
     local presetPath = pathJoin(RUNTIME_ROOT, relativePath)
     emit("info", "Processing " .. relativePath)
@@ -240,8 +225,8 @@ local function runRemap()
     if RUNTIME_ROOT == "" then
         return { ok = false, total = 0, changed = 0, failed = 1, message = "Missing remap runtime root." }
     end
-    if LIST_FILE == "" then
-        return { ok = false, total = 0, changed = 0, failed = 1, message = "Missing remap list file." }
+    if type(PRESET_PATHS) ~= "table" then
+        return { ok = false, total = 0, changed = 0, failed = 1, message = "Missing remap preset path table." }
     end
     if OLD_ROOT == "" or NEW_ROOT == "" then
         return { ok = false, total = 0, changed = 0, failed = 1, message = "Both old and new sample roots are required." }
@@ -249,13 +234,12 @@ local function runRemap()
 
     emit("info", "Starting HALion preset remap...")
 
-    local presets = readList()
-    local total = #presets
+    local total = #PRESET_PATHS
     local changedPresets = 0
     local changedZones = 0
     local failed = 0
 
-    for index, relativePath in ipairs(presets) do
+    for index, relativePath in ipairs(PRESET_PATHS) do
         emit("info", string.format("Remapping %d/%d: %s", index, total, relativePath))
         local ok, changed, message = remapPreset(relativePath)
         if ok then
