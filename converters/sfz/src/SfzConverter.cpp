@@ -17,7 +17,6 @@
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
-#include <map>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -122,6 +121,7 @@ struct ConvertedSfz
 {
     std::filesystem::path sourceFile;
     std::string layerName;
+    std::string presetFileStem;
     std::string presetFileName;
     std::vector<ConvertedRegion> regions;
 };
@@ -406,14 +406,73 @@ std::string displayNameFromStem(std::string text)
     return text.empty() ? "SFZ Instrument" : text;
 }
 
-std::string sanitizeIdentifier(std::string text)
+bool startsWithAt(const std::string_view text, const size_t offset, const std::string_view token)
 {
-    for (auto& c : text)
+    return offset <= text.size() && token.size() <= text.size() - offset && text.substr(offset, token.size()) == token;
+}
+
+void appendSeparator(std::string& text)
+{
+    if (!text.empty() && text.back() != '_')
+        text.push_back('_');
+}
+
+void appendFilenameWord(std::string& text, const std::string_view word)
+{
+    appendSeparator(text);
+    text.append(word);
+    appendSeparator(text);
+}
+
+bool isWindowsReservedDeviceStem(const std::string_view stem)
+{
+    if (stem == "con" || stem == "prn" || stem == "aux" || stem == "nul")
+        return true;
+
+    if (stem.size() == 4 && (stem.substr(0, 3) == "com" || stem.substr(0, 3) == "lpt") && stem[3] >= '1' && stem[3] <= '9')
+        return true;
+
+    return false;
+}
+
+std::string safeFilenameStem(const std::string_view sourceText)
+{
+    auto text = std::string();
+    text.reserve(sourceText.size());
+
+    for (size_t i = 0; i < sourceText.size();)
     {
-        if (!std::isalnum(static_cast<unsigned char>(c)))
-            c = '_';
-        else
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const auto c = static_cast<unsigned char>(sourceText[i]);
+        if (std::isalnum(c))
+        {
+            text.push_back(static_cast<char>(std::tolower(c)));
+            ++i;
+            continue;
+        }
+
+        if (sourceText[i] == '#' || sourceText[i] == '^' || startsWithAt(sourceText, i, "\xE2\x99\xAF"))
+        {
+            appendFilenameWord(text, "sharp");
+            i += startsWithAt(sourceText, i, "\xE2\x99\xAF") ? 3U : 1U;
+            continue;
+        }
+
+        if (startsWithAt(sourceText, i, "\xE2\x99\xAD"))
+        {
+            appendFilenameWord(text, "flat");
+            i += 3;
+            continue;
+        }
+
+        if (startsWithAt(sourceText, i, "\xE2\x99\xAE"))
+        {
+            appendFilenameWord(text, "natural");
+            i += 3;
+            continue;
+        }
+
+        appendSeparator(text);
+        ++i;
     }
 
     while (text.find("__") != std::string::npos)
@@ -425,7 +484,13 @@ std::string sanitizeIdentifier(std::string text)
     while (!text.empty() && text.back() == '_')
         text.pop_back();
 
-    return text.empty() ? "sfz_instrument" : text;
+    if (text.empty())
+        text = "sfz_instrument";
+
+    if (isWindowsReservedDeviceStem(text))
+        text = "sfz_" + text;
+
+    return text;
 }
 
 std::string caseInsensitiveKey(std::string text)
@@ -442,6 +507,30 @@ std::string zeroPaddedIndex(const size_t index)
     stream.fill('0');
     stream << index;
     return stream.str();
+}
+
+void assignUniquePresetFileNames(std::vector<ConvertedSfz>& convertedFiles)
+{
+    auto usedPresetNames = std::set<std::string>();
+    for (auto& converted : convertedFiles)
+    {
+        auto candidateName = converted.presetFileStem + ".vstpreset";
+        if (usedPresetNames.insert(caseInsensitiveKey(candidateName)).second)
+        {
+            converted.presetFileName = std::move(candidateName);
+            continue;
+        }
+
+        for (size_t suffix = 2;; ++suffix)
+        {
+            candidateName = converted.presetFileStem + "_" + zeroPaddedIndex(suffix) + ".vstpreset";
+            if (usedPresetNames.insert(caseInsensitiveKey(candidateName)).second)
+            {
+                converted.presetFileName = std::move(candidateName);
+                break;
+            }
+        }
+    }
 }
 
 bool hasSfzExtension(const std::filesystem::path& path)
@@ -1201,7 +1290,8 @@ std::optional<ConvertedSfz> loadSfz(const std::filesystem::path& sfzFile, const 
     auto converted = ConvertedSfz{};
     converted.sourceFile = sfzFile;
     converted.layerName = nameOverride ? *nameOverride : displayNameFromStem(sfzFile.stem().string());
-    converted.presetFileName = sanitizeIdentifier(nameOverride ? *nameOverride : sfzFile.stem().string()) + ".vstpreset";
+    converted.presetFileStem = safeFilenameStem(nameOverride ? *nameOverride : sfzFile.stem().string());
+    converted.presetFileName = converted.presetFileStem + ".vstpreset";
 
     const auto numRegions = synth.getNumRegions();
     converted.regions.reserve(static_cast<size_t>(numRegions));
@@ -1459,19 +1549,19 @@ ConversionResult convertDirectory(const ConversionOptions& options)
         return result;
     }
 
-    std::map<std::string, std::filesystem::path> presetNames;
+    auto originalPresetFileNames = std::vector<std::string>();
+    originalPresetFileNames.reserve(convertedFiles.size());
     for (const auto& converted : convertedFiles)
+        originalPresetFileNames.push_back(converted.presetFileName);
+
+    assignUniquePresetFileNames(convertedFiles);
+    for (size_t i = 0; i < convertedFiles.size(); ++i)
     {
-        const auto key = caseInsensitiveKey(converted.presetFileName);
-        const auto [it, inserted] = presetNames.emplace(key, converted.sourceFile);
-        if (!inserted)
+        if (convertedFiles[i].presetFileName != originalPresetFileNames[i])
         {
-            result.diagnostics.push_back(makeError(converted.sourceFile, "duplicate-preset-name",
-                                                   "SFZ files generate the same preset filename '" + converted.presetFileName +
-                                                       "': " + it->second.string() + " and " + converted.sourceFile.string()));
-            reportPendingDiagnostics();
-            result.succeeded = false;
-            return result;
+            addDiagnostic(makeInfo(convertedFiles[i].sourceFile, "preset-name-disambiguated",
+                                   "Disambiguated duplicate output preset filename '" + originalPresetFileNames[i] + "' to '" +
+                                       convertedFiles[i].presetFileName + "'."));
         }
     }
 
@@ -1488,7 +1578,7 @@ ConversionResult convertDirectory(const ConversionOptions& options)
 
     for (size_t i = 0; i < convertedFiles.size(); ++i)
     {
-        const auto baseName = sanitizeIdentifier(convertedFiles[i].sourceFile.stem().string());
+        const auto baseName = safeFilenameStem(convertedFiles[i].sourceFile.stem().string());
         const auto moduleName = zeroPaddedIndex(i) + "_" + baseName + ".lua";
         scripts.push_back(GeneratedLuaScript{moduleName, moduleName, buildLuaSource(convertedFiles[i])});
     }

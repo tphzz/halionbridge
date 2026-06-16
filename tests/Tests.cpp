@@ -1278,12 +1278,16 @@ class BridgeTests : public juce::UnitTest
             sourceDir.deleteRecursively();
         }
 
-        beginTest("SFZ Converter - rejects duplicate preset output names");
+        beginTest("SFZ Converter - disambiguates safe preset output names");
         {
             auto sourceDir = cleanTempDirectory("halionbridge_sfz_duplicate_presets");
             auto outputDir = cleanTempDirectory("halionbridge_sfz_duplicate_presets_out");
             expect(sourceDir.createDirectory());
             expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("BOY_BC  Ahs _  a.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=58 hikey=58 lovel=0 hivel=127 pitch_keycenter=58\n"));
+            expect(sourceDir.getChildFile("BOY_BC  Ahs _ ^a.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=59 hikey=59 lovel=0 hivel=127 pitch_keycenter=59\n"));
             expect(sourceDir.getChildFile("bass-one.sfz")
                        .replaceWithText("<region> sample=sample.wav lokey=60 hikey=60 lovel=0 hivel=127 pitch_keycenter=60\n"));
             expect(sourceDir.getChildFile("bass_one.sfz")
@@ -1294,9 +1298,49 @@ class BridgeTests : public juce::UnitTest
             options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
 
             const auto result = halionbridge::converters::sfz::convertDirectory(options);
-            expect(!result.succeeded);
-            expect(containsDiagnosticCode(result.diagnostics, "duplicate-preset-name"));
-            expect(!outputDir.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "preset-name-disambiguated"));
+            expect(outputDir.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(outputDir.getChildFile("000_boy_bc_ahs_a.lua")
+                       .loadFileAsString()
+                       .contains("local outputFile = \"boy_bc_ahs_a.vstpreset\""));
+            expect(outputDir.getChildFile("001_boy_bc_ahs_sharp_a.lua")
+                       .loadFileAsString()
+                       .contains("local outputFile = \"boy_bc_ahs_sharp_a.vstpreset\""));
+            expect(outputDir.getChildFile("002_bass_one.lua").loadFileAsString().contains("local outputFile = \"bass_one.vstpreset\""));
+            expect(outputDir.getChildFile("003_bass_one.lua").loadFileAsString().contains("local outputFile = \"bass_one_002.vstpreset\""));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - translates musical preset name characters");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_musical_preset_names");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_musical_preset_names_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("plain.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=60 hikey=60 lovel=0 hivel=127 pitch_keycenter=60\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+            options.name = std::string("C# ") + "\xE2\x99\xAD" + " " + "\xE2\x99\xAE";
+
+            auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+            expect(outputDir.getChildFile("000_plain.lua")
+                       .loadFileAsString()
+                       .contains("local outputFile = \"c_sharp_flat_natural.vstpreset\""));
+
+            outputDir.deleteRecursively();
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+            options.name = "CON";
+
+            result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+            expect(outputDir.getChildFile("000_plain.lua").loadFileAsString().contains("local outputFile = \"sfz_con.vstpreset\""));
 
             sourceDir.deleteRecursively();
             outputDir.deleteRecursively();
