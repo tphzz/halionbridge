@@ -15,13 +15,13 @@ return {
 
 Module names may be listed with or without `.lua`. They are loaded with `require`, so they must be resolvable from the build directory passed to halionbridge. The host-side helper `Bridge::parseBuildFileModuleNames()` inspects the common top-level list shape `return { "module_a", "module_b" }`; it is not a full Lua parser, and it ignores quoted strings in line comments, Lua long comments, nested tables, local variables, and metadata fields.
 
-For statically parseable build files, halionbridge runs the list in host-controlled chunks of up to 15 modules by default. Each chunk launches a fresh HALion instance and the generated runtime module sets `HALIONBRIDGE_BUILD_SLICE_START`, `HALIONBRIDGE_BUILD_SLICE_COUNT`, and `HALIONBRIDGE_BUILD_TOTAL` before loading this builder. The builder uses those globals only to select the requested list slice and to report file-level progress against the full list. Build script modules and the `ctx` API are unchanged. If the host cannot statically parse the build file, it falls back to one full-list invocation.
+For statically parseable build files, halionbridge runs the list in host-controlled chunks of up to 1000 modules by default. Each chunk launches a fresh HALion instance and the generated runtime module sets `HALIONBRIDGE_BUILD_SLICE_START`, `HALIONBRIDGE_BUILD_SLICE_COUNT`, and `HALIONBRIDGE_BUILD_TOTAL` before loading this builder. The builder uses those globals only to select the requested list slice and to report file-level progress against the full list. Build script modules and the `ctx` API are unchanged. If the host cannot statically parse the build file, it falls back to one full-list invocation.
 
 `halionbridge init <build-directory>` can generate a simple `halionbridge_build.lua` from top-level `.lua` files. It sorts filenames, keeps the `.lua` suffix in each entry, and excludes halionbridge infrastructure files such as `halionbridge_runtime.lua`, `halionbridge_builder.lua`, `halionbridge_build.lua`, and `builder_bootstrap.lua`; converter-owned infrastructure helpers may also be excluded. It does not recurse into subdirectories and does not launch HALion. Review the generated list before building: ordinary helper modules such as `helpers.lua` or `shared_mapping.lua` are still top-level Lua files, but they should be removed from `halionbridge_build.lua` unless they return a valid build script entrypoint.
 
 ## Runtime Root
 
-When halionbridge runs, it applies the embedded bootstrap vstpreset and writes temporary `halionbridge_runtime.lua` and `halionbridge_builder.lua` modules into HALion's user script library. This is why this must be configured in HALion in the library search paths in Options / Scripting Section. The vstpreset's inline bootstrap loads `halionbridge_runtime` with `require("halionbridge_runtime")`. The generated runtime module sets the Lua global `HALIONBRIDGE_RUNTIME_ROOT`, prepends the build directory to `package.path`, clears any cached `halionbridge_builder` module, and then loads the embedded builder module as `halionbridge_builder`. It clears its own `package.loaded` entry after the builder returns so repeated host invocations can load a fresh runtime module.
+When halionbridge runs, it applies the embedded bootstrap vstpreset and writes temporary `halionbridge_runtime.lua` and `halionbridge_builder.lua` modules into HALion's user script library. This is why this must be configured in HALion in the library search paths in Options / Scripting Section. The vstpreset's inline bootstrap loads `halionbridge_runtime` with `require("halionbridge_runtime")`. The generated runtime module sets the Lua global `HALIONBRIDGE_RUNTIME_ROOT` and, when requested, `HALIONBRIDGE_OUTPUT_ROOT`, prepends the build directory to `package.path`, clears any cached `halionbridge_builder` module, and then loads the embedded builder module as `halionbridge_builder`. It clears its own `package.loaded` entry after the builder returns so repeated host invocations can load a fresh runtime module.
 
 The builder treats the required positional build directory as the runtime root for:
 
@@ -29,7 +29,8 @@ The builder treats the required positional build directory as the runtime root f
 - build script modules
 - `ctx.script_dir`
 - `ctx.sample_root`
-- generated vstpresets
+- `ctx.output_dir`
+- generated vstpresets, either in the build directory or in `--output-directory`
 - `halionbridge_status_ok.vstpreset` and `halionbridge_status_failed.vstpreset`
 - temporary `hbp_*.vstpreset` files used to forward progress back to the halionbridge console; messages are hex-encoded in the marker filename so punctuation and paths round-trip, messages longer than the marker filename budget are shortened with `...` before encoding, the budget is at most 88 bytes and shrinks for long build-directory paths, consumed progress markers are deleted by the host immediately after logging, and final cleanup retries progress-marker deletion after HALion resources are released
 
@@ -75,6 +76,7 @@ The builder passes a `ctx` table to each build script:
 ```lua
 ctx.script_dir
 ctx.sample_root
+ctx.output_dir
 ctx.module_name
 ctx.path_join(root, rel)
 ctx.save_preset(path, object, preset_type)
@@ -84,9 +86,10 @@ ctx.progress(done, total, message)
 
 - `ctx.script_dir`: runtime root directory passed on the command line; it contains `halionbridge_build.lua` and Lua build script files.
 - `ctx.sample_root`: default sample root; currently the same as `ctx.script_dir`.
+- `ctx.output_dir`: output root for generated presets. It equals `ctx.script_dir` unless the user passed `--output-directory`.
 - `ctx.module_name`: normalized module name without `.lua`.
 - `ctx.path_join(root, rel)`: joins paths using forward slashes.
-- `ctx.save_preset(path, object, preset_type)`: wraps HALion `savePreset`; defaults `preset_type` to `"H7"`.
+- `ctx.save_preset(path, object, preset_type)`: wraps HALion `savePreset`; defaults `preset_type` to `"H7"`. When `--output-directory` is set, paths inside `ctx.script_dir` and relative paths are redirected to `ctx.output_dir` before calling HALion.
 - `ctx.log(message)`: prints a build script log line and writes a host-readable progress marker. halionbridge treats build script log and progress lines as `info` output, so they remain visible at the default `HALIONBRIDGE_LOGLEVEL=info`. Very long messages are shortened in the marker filename; keep essential context near the start of the message.
 - `ctx.progress(done, total, message)`: writes the message text through the host-readable progress marker channel. The `done` and `total` fields are currently accepted for compatibility but not printed by the builder because synchronous HALion global/module execution makes numeric progress bursts misleading. Very long messages are shortened in the marker filename; keep essential context near the start of the message.
 
@@ -142,7 +145,7 @@ return function(ctx)
     this.parent:appendLayer(layer)
 
     ctx.progress(0, 1, "Saving layer")
-    local path = ctx.path_join(ctx.script_dir, "example_layer.vstpreset")
+    local path = ctx.path_join(ctx.output_dir, "example_layer.vstpreset")
     local success = ctx.save_preset(path, layer, "H7")
     ctx.progress(1, 1, "Done")
 
@@ -168,7 +171,7 @@ More examples can be found in `examples`.
 
 ## Converter-generated Lua
 
-Converters such as `halionbridge convert sfz` generate ordinary build directories that follow this same contract. The generated `halionbridge_build.lua` is just an ordered list of generated Lua build script modules, and each listed module returns a normal build script function. A converter-generated directory may also contain helper modules that are required by those build scripts but are intentionally not listed in `halionbridge_build.lua`. Generated scripts should remain readable source: comments should explain the HALion object assumptions, path handling, and parameter assignments so converter authors can inspect and adjust the output before running `halionbridge <build-directory>`.
+Converters such as `halionbridge convert sfz` generate ordinary build directories that follow this same contract. The generated `halionbridge_build.lua` is just an ordered list of generated Lua build script modules, and each listed module returns a normal build script function. A converter-generated directory may also contain helper modules that are required by those build scripts but are intentionally not listed in `halionbridge_build.lua`. Generated scripts should remain readable source: comments should explain the HALion object assumptions, path handling, and parameter assignments so converter authors can inspect and adjust the output before running `halionbridge build <build-directory>`.
 
 Generated build scripts must distinguish assignments that are essential to a correct preset from optional decoration. For the built-in SFZ converter, sample-zone type, sample filename, root key, key range, velocity range, and amp-envelope assignment are required assignments: if HALion rejects any of them, the generated build script returns `ok = false` before saving. Optional assignments such as display names, sustain-loop parameters, amp velocity-to-level, and filter cutoff may be attempted defensively and logged as skipped when HALion rejects them. Generated SFZ scripts write the sample filename, root key, loop parameters, amp envelope, and optional tone parameters before the final key/velocity fields so audio-file sampler metadata cannot overwrite the intended SFZ mapping.
 

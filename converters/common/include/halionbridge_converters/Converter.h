@@ -31,6 +31,33 @@ struct ConverterResult
     std::vector<Diagnostic> diagnostics;
 };
 
+enum class ConverterArgumentErrorKind
+{
+    none,
+    syntax,
+    validation,
+};
+
+enum class ConverterVisibility
+{
+    listed,
+    incognito,
+};
+
+enum class ConverterSourcePathKind
+{
+    directory,
+    file,
+    fileOrDirectory,
+};
+
+struct ConverterArgumentParseResult
+{
+    int exitCode = 0;
+    ConverterArgumentErrorKind errorKind = ConverterArgumentErrorKind::none;
+    std::vector<Diagnostic> diagnostics;
+};
+
 struct ConverterRunContext
 {
     void (*diagnostic)(const Diagnostic& diagnostic, void* userData) = nullptr;
@@ -57,6 +84,9 @@ struct ConverterDefinition
     ConverterResult (*run)(std::span<const std::string> args) = nullptr;
     ConverterResult (*runWithContext)(std::span<const std::string> args, const ConverterRunContext& context) = nullptr;
     std::string (*helpText)() = nullptr;
+    ConverterArgumentParseResult (*validateArguments)(std::span<const std::string> args) = nullptr;
+    ConverterVisibility visibility = ConverterVisibility::listed;
+    ConverterSourcePathKind sourcePathKind = ConverterSourcePathKind::directory;
 };
 
 class ConverterRegistry
@@ -65,6 +95,7 @@ class ConverterRegistry
     bool registerConverter(ConverterDefinition definition);
     const ConverterDefinition* find(std::string_view id) const noexcept;
     std::vector<ConverterDefinition> list() const;
+    std::vector<ConverterDefinition> listVisible() const;
 
   private:
     std::vector<ConverterDefinition> definitions;

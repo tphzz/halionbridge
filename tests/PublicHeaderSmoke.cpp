@@ -35,7 +35,7 @@ int halionbridge_public_headers_compile_without_juce()
            static_cast<int>(result == halionbridge::RunResult::success)
 #if HALIONBRIDGE_ENABLE_CONVERTERS
            + static_cast<int>(registry.list().empty()) + static_cast<int>(buildDirectoryRequest.scripts.empty()) +
-           static_cast<int>(sfzOptions.sourceDirectory.empty())
+           static_cast<int>(sfzOptions.sourcePath.empty()) + static_cast<int>(sfzOptions.sourceDirectory.empty())
 #endif
         ;
 }

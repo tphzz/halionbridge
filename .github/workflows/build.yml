@@ -97,6 +97,8 @@ jobs:
         run: cmake --build --preset debug
 
       - name: Test
+        env:
+          HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION: "1"
         run: ctest --test-dir build --output-on-failure
 
   release:
@@ -204,6 +206,8 @@ jobs:
         run: cmake --build --preset release
 
       - name: Test
+        env:
+          HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION: "1"
         run: ctest --test-dir build-release --output-on-failure
 
       - name: Verify Windows release runtime dependencies

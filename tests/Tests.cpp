@@ -2,11 +2,14 @@
 #include "halionbridge/BuildInfo.h"
 #include "BuildFile.h"
 #include "BuildWorker.h"
+#include "CliCommand.h"
 #include "Log.h"
 #include "ChildProcessOutput.h"
 #include "PathUtils.h"
 #include "PluginScan.h"
+#include "PresetRemap.h"
 #include "ProgressMarkers.h"
+#include "VstPresetMetadata.h"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
 #include "halionbridge_converters/BuildDirectoryEmitter.h"
 #include "halionbridge_converters/Converter.h"
@@ -19,6 +22,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <initializer_list>
 #include <iostream>
 #include <span>
 #include <string_view>
@@ -70,6 +74,78 @@ bool waitForFileToExist(const juce::File& file, const int timeoutMs)
     }
 
     return file.existsAsFile();
+}
+
+void appendTestU32(std::vector<unsigned char>& bytes, const std::uint32_t value)
+{
+    for (auto i = 0U; i < 4U; ++i)
+        bytes.push_back(static_cast<unsigned char>((value >> (i * 8U)) & 0xffU));
+}
+
+void appendTestU64(std::vector<unsigned char>& bytes, const std::uint64_t value)
+{
+    for (auto i = 0U; i < 8U; ++i)
+        bytes.push_back(static_cast<unsigned char>((value >> (i * 8U)) & 0xffU));
+}
+
+void appendTestText(std::vector<unsigned char>& bytes, std::string_view text)
+{
+    for (const auto c : text)
+        bytes.push_back(static_cast<unsigned char>(c));
+}
+
+bool writeTestVstPreset(const juce::File& file, std::string_view infoXml)
+{
+    struct Chunk
+    {
+        std::string id;
+        std::string data;
+        std::uint64_t offset = 0;
+    };
+
+    std::vector<Chunk> chunks;
+    chunks.push_back({"Prog", "program-data", 0});
+    if (!infoXml.empty())
+        chunks.push_back({"Info", std::string(infoXml), 0});
+
+    std::vector<unsigned char> bytes;
+    appendTestText(bytes, "VST3");
+    appendTestU32(bytes, 1);
+    appendTestText(bytes, "3B63D74130B34AE397AF92A9659137D5");
+    appendTestU64(bytes, 0);
+
+    for (auto& chunk : chunks)
+    {
+        chunk.offset = bytes.size();
+        appendTestText(bytes, chunk.data);
+    }
+
+    const auto listOffset = bytes.size();
+    appendTestText(bytes, "List");
+    appendTestU32(bytes, static_cast<std::uint32_t>(chunks.size()));
+    for (const auto& chunk : chunks)
+    {
+        appendTestText(bytes, chunk.id);
+        appendTestU64(bytes, chunk.offset);
+        appendTestU64(bytes, chunk.data.size());
+    }
+
+    for (auto i = 0U; i < 8U; ++i)
+        bytes[40 + i] = static_cast<unsigned char>((static_cast<std::uint64_t>(listOffset) >> (i * 8U)) & 0xffU);
+
+    auto stream = file.createOutputStream();
+    if (!stream)
+        return false;
+
+    stream->write(bytes.data(), static_cast<int>(bytes.size()));
+    stream->flush();
+    return stream->getStatus().wasOk();
+}
+
+halionbridge::detail::VstPresetMetadataOptionsParseResult parseTestVstPresetMetadataOptions(std::initializer_list<std::string> args)
+{
+    const auto values = std::vector<std::string>(args);
+    return halionbridge::detail::parseVstPresetMetadataOptionsDetailed(values);
 }
 
 #if HALIONBRIDGE_ENABLE_CONVERTERS
@@ -170,6 +246,11 @@ class BridgeTests : public juce::UnitTest
             auto options = halionbridge::Bridge::parseArguments(args);
             expect(!options.has_value());
 
+            const auto parseResult = halionbridge::detail::parseBuildOptionsDetailed(args);
+            expect(!parseResult.options.has_value());
+            expect(parseResult.errorKind == halionbridge::detail::CliParseErrorKind::syntax);
+            expect(!parseResult.diagnostics.empty());
+
             halionbridge::Bridge bridge;
             expect(bridge.runDetailed(halionbridge::AppOptions{}) == halionbridge::RunResult::invalidOptions);
         }
@@ -196,6 +277,7 @@ class BridgeTests : public juce::UnitTest
             {
                 expect(options->buildDirectory.has_value());
                 expect(*options->buildDirectory == halionbridge::detail::toStdPath(tempDir));
+                expect(!options->outputDirectory.has_value());
                 expectEquals(options->timeoutSeconds, 3600);
                 expect(!options->noKill);
                 expect(!options->forceScan);
@@ -232,6 +314,11 @@ class BridgeTests : public juce::UnitTest
             std::vector<std::string> args = {missingDirectory.getFullPathName().toStdString()};
             auto options = halionbridge::Bridge::parseArguments(args);
             expect(!options.has_value());
+
+            const auto parseResult = halionbridge::detail::parseBuildOptionsDetailed(args);
+            expect(!parseResult.options.has_value());
+            expect(parseResult.errorKind == halionbridge::detail::CliParseErrorKind::validation);
+            expect(!parseResult.diagnostics.empty());
         }
 
         beginTest("Argument Parsing - Timeout seconds");
@@ -316,7 +403,7 @@ class BridgeTests : public juce::UnitTest
                 expect(options.has_value());
                 if (options)
                 {
-                    expectEquals(options->buildChunkSize, 15);
+                    expectEquals(options->buildChunkSize, 1000);
                     expect(!options->failFast);
                 }
             }
@@ -343,14 +430,520 @@ class BridgeTests : public juce::UnitTest
             tempDir.deleteRecursively();
         }
 
+        beginTest("CLI Command Classification - Explicit build command");
+        {
+            const auto classify = [](std::initializer_list<const char*> values)
+            {
+                auto args = std::vector<std::string>{};
+                args.reserve(values.size());
+                for (const auto* value : values)
+                    args.emplace_back(value);
+
+                return halionbridge::detail::classifyCliCommand(args);
+            };
+
+            expect(classify({}) == halionbridge::detail::CliCommandKind::help);
+            expect(classify({"--help"}) == halionbridge::detail::CliCommandKind::help);
+            expect(classify({"--version"}) == halionbridge::detail::CliCommandKind::version);
+            expect(classify({"build", "C:/build"}) == halionbridge::detail::CliCommandKind::build);
+            expect(classify({"init", "C:/build"}) == halionbridge::detail::CliCommandKind::init);
+            expect(classify({"convert", "sfz"}) == halionbridge::detail::CliCommandKind::convert);
+            expect(classify({"remap-vstpresets"}) == halionbridge::detail::CliCommandKind::remapVstPresets);
+            expect(classify({"vstpreset-metadata"}) == halionbridge::detail::CliCommandKind::vstPresetMetadata);
+            expect(classify({"--halionbridge-build-worker", "C:/build"}) == halionbridge::detail::CliCommandKind::buildWorker);
+            expect(classify({"--halionbridge-scan-plugin"}) == halionbridge::detail::CliCommandKind::scanPluginWorker);
+            expect(classify({"--halionbridge-cleanup-directory", "C:/temp"}) == halionbridge::detail::CliCommandKind::unknown);
+            expect(classify({"C:/build"}) == halionbridge::detail::CliCommandKind::unknown);
+        }
+
+        beginTest("Argument Parsing - Build output directory");
+        {
+            auto tempDir = cleanTempDirectory("halionbridge_output_build_dir");
+            auto outputDir = cleanTempDirectory("halionbridge_output_target_dir");
+            tempDir.createDirectory();
+            outputDir.deleteRecursively();
+            tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return {}");
+
+            {
+                auto options = halionbridge::Bridge::parseArguments(
+                    {tempDir.getFullPathName().toStdString(), "--output-directory", outputDir.getFullPathName().toStdString()});
+                expect(options.has_value());
+                if (options)
+                {
+                    expect(options->outputDirectory.has_value());
+                    expect(*options->outputDirectory == halionbridge::detail::toStdPath(outputDir));
+                }
+            }
+
+            {
+                auto outputFile = tempDir.getChildFile("output-file");
+                expect(outputFile.replaceWithText("not a directory"));
+
+                auto options = halionbridge::Bridge::parseArguments(
+                    {tempDir.getFullPathName().toStdString(), "--output-directory", outputFile.getFullPathName().toStdString()});
+                expect(options.has_value());
+                if (options)
+                {
+                    halionbridge::Bridge bridge;
+                    expect(bridge.runDetailed(*options) == halionbridge::RunResult::invalidOptions);
+                }
+            }
+
+            expect(!halionbridge::Bridge::parseArguments({tempDir.getFullPathName().toStdString(), "--output-directory"}).has_value());
+
+            tempDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("VSTPreset Remap - argument parsing");
+        {
+            auto inputDir = cleanTempDirectory("halionbridge_remap_input");
+            auto outputDir = cleanTempDirectory("halionbridge_remap_output");
+            inputDir.createDirectory();
+            outputDir.deleteRecursively();
+
+            {
+                auto options = halionbridge::Bridge::parseVstPresetRemapArguments(
+                    {"--input-directory", inputDir.getFullPathName().toStdString(), "--output-directory",
+                     outputDir.getFullPathName().toStdString(), "--old-root", "C:/old/Samples", "--new-root", "D:/new/Samples"});
+                expect(options.has_value());
+                if (options)
+                {
+                    expect(options->inputDirectory == halionbridge::detail::toStdPath(inputDir));
+                    expect(options->outputDirectory == halionbridge::detail::toStdPath(outputDir));
+                    expectEquals(options->oldRoot, std::string("C:/old/Samples"));
+                    expectEquals(options->newRoot, std::string("D:/new/Samples"));
+                    expectEquals(options->presetPluginCode, std::string("H7"));
+                    expectEquals(options->timeoutSeconds, 3600);
+                }
+            }
+
+            {
+                auto options = halionbridge::Bridge::parseVstPresetRemapArguments(
+                    {"--input-directory", inputDir.getFullPathName().toStdString(), "--output-directory",
+                     outputDir.getFullPathName().toStdString(), "--old-root", "C:/old", "--new-root", "D:/new", "--preset-plugin-code",
+                     "hs", "--timeout-seconds", "5", "--gui", "--nokill", "--force-scan"});
+                expect(options.has_value());
+                if (options)
+                {
+                    expectEquals(options->presetPluginCode, std::string("HS"));
+                    expectEquals(options->timeoutSeconds, 5);
+                    expect(options->showGui);
+                    expect(options->noKill);
+                    expect(options->forceScan);
+                }
+            }
+
+            expect(!halionbridge::Bridge::parseVstPresetRemapArguments({"--input-directory", inputDir.getFullPathName().toStdString()})
+                        .has_value());
+            expect(!halionbridge::Bridge::parseVstPresetRemapArguments({"--input-directory", inputDir.getFullPathName().toStdString(),
+                                                                        "--output-directory", outputDir.getFullPathName().toStdString(),
+                                                                        "--old-root", "C:/old", "--new-root", "D:/new",
+                                                                        "--preset-plugin-code", "XX"})
+                        .has_value());
+            expect(!halionbridge::Bridge::parseVstPresetRemapArguments({"--input-directory", inputDir.getFullPathName().toStdString(),
+                                                                        "--output-directory", outputDir.getFullPathName().toStdString(),
+                                                                        "--old-root", "C:/old", "--new-root", "D:/new", "--no-timeout",
+                                                                        "--timeout-seconds", "5"})
+                        .has_value());
+
+            {
+                const auto parseResult = halionbridge::detail::parseVstPresetRemapOptionsDetailed({});
+                expect(!parseResult.options.has_value());
+                expect(parseResult.errorKind == halionbridge::detail::CliParseErrorKind::syntax);
+                expect(!parseResult.diagnostics.empty());
+            }
+
+            {
+                auto missingInput = cleanTempDirectory("halionbridge_remap_missing_input");
+                missingInput.deleteRecursively();
+
+                const auto args = std::vector<std::string>{"--input-directory",  missingInput.getFullPathName().toStdString(),
+                                                           "--output-directory", outputDir.getFullPathName().toStdString(),
+                                                           "--old-root",         "C:/old",
+                                                           "--new-root",         "D:/new"};
+                const auto parseResult = halionbridge::detail::parseVstPresetRemapOptionsDetailed(args);
+                expect(!parseResult.options.has_value());
+                expect(parseResult.errorKind == halionbridge::detail::CliParseErrorKind::validation);
+                expect(!parseResult.diagnostics.empty());
+            }
+
+            inputDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("VSTPreset Remap - collection list runtime and copy helpers");
+        {
+            auto inputDir = cleanTempDirectory("halionbridge_remap_collect_input");
+            auto stageDir = cleanTempDirectory("halionbridge_remap_collect_stage");
+            auto outputDir = cleanTempDirectory("halionbridge_remap_collect_output");
+            inputDir.createDirectory();
+            stageDir.deleteRecursively();
+            outputDir.deleteRecursively();
+
+            expect(inputDir.getChildFile("alpha.vstpreset").replaceWithText("alpha"));
+            expect(inputDir.getChildFile("nested").createDirectory());
+            expect(inputDir.getChildFile("nested").getChildFile("beta.VSTPRESET").replaceWithText("beta"));
+            expect(inputDir.getChildFile("ignore.txt").replaceWithText("ignore"));
+
+            auto collection = halionbridge::detail::collectPresetRemapFiles(halionbridge::detail::toStdPath(inputDir));
+            expect(collection.errors.empty());
+            expectEquals(static_cast<int>(collection.files.size()), 2);
+            if (collection.files.size() == 2)
+            {
+                expectEquals(collection.files[0].relativePath.generic_string(), std::string("alpha.vstpreset"));
+                expectEquals(collection.files[1].relativePath.generic_string(), std::string("nested/beta.VSTPRESET"));
+            }
+
+            const auto listText = halionbridge::detail::createPresetRemapListText(collection.files);
+            expect(listText.find("alpha.vstpreset\n") != std::string::npos);
+            expect(listText.find("nested/beta.VSTPRESET\n") != std::string::npos);
+
+            auto relativePresetPaths = std::vector<std::string>();
+            for (const auto& file : collection.files)
+                relativePresetPaths.push_back(file.relativePath.generic_string());
+
+            const auto runtimeText = halionbridge::detail::createPresetRemapRuntimeModuleText(
+                {halionbridge::detail::toStdPath(stageDir), relativePresetPaths, "C:\\old\\Samples", "D:\\new\\Samples", "HS"});
+            expect(runtimeText.find("HALIONBRIDGE_PRESET_REMAP_ROOT") != std::string::npos);
+            expect(runtimeText.find("HALIONBRIDGE_PRESET_REMAP_PRESETS") != std::string::npos);
+            expect(runtimeText.find("\"alpha.vstpreset\"") != std::string::npos);
+            expect(runtimeText.find("\"nested/beta.VSTPRESET\"") != std::string::npos);
+            expect(runtimeText.find("HALIONBRIDGE_PRESET_REMAP_LIST") == std::string::npos);
+            expect(runtimeText.find("C:/old/Samples/") != std::string::npos);
+            expect(runtimeText.find("D:/new/Samples/") != std::string::npos);
+            expect(runtimeText.find("halionbridge_preset_remap") != std::string::npos);
+
+            std::vector<std::string> copyErrors;
+            expect(
+                halionbridge::detail::copyPresetRemapFilesToStage(collection.files, halionbridge::detail::toStdPath(stageDir), copyErrors));
+            expect(copyErrors.empty());
+            expect(stageDir.getChildFile("alpha.vstpreset").existsAsFile());
+            expect(stageDir.getChildFile("nested").getChildFile("beta.VSTPRESET").existsAsFile());
+
+            expect(!halionbridge::detail::copyPresetRemapFilesToStage(collection.files, halionbridge::detail::toStdPath(stageDir),
+                                                                      copyErrors));
+
+            copyErrors.clear();
+            expect(halionbridge::detail::copyPresetRemapFilesFromStage(collection.files, halionbridge::detail::toStdPath(stageDir),
+                                                                       halionbridge::detail::toStdPath(outputDir), copyErrors));
+            expect(outputDir.getChildFile("alpha.vstpreset").existsAsFile());
+            expect(outputDir.getChildFile("nested").getChildFile("beta.VSTPRESET").existsAsFile());
+
+            auto emptyError = std::string();
+            expect(!halionbridge::detail::isDirectoryEmpty(halionbridge::detail::toStdPath(outputDir), emptyError));
+            expect(!emptyError.empty());
+
+            inputDir.deleteRecursively();
+            stageDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("VSTPreset Remap - cleanup deletes staged tree");
+        {
+            auto rootDir = cleanTempDirectory("halionbridge_remap_cleanup_root");
+            rootDir.createDirectory();
+            auto stageDir = rootDir.getChildFile("halionbridge-remap-unit");
+            expect(stageDir.createDirectory());
+            expect(stageDir.getChildFile("nested").createDirectory());
+            expect(stageDir.getChildFile("alpha.vstpreset").replaceWithText("alpha"));
+            expect(stageDir.getChildFile("nested").getChildFile("beta.VSTPRESET").replaceWithText("beta"));
+            expect(stageDir.getChildFile("hbp_000001_i_50726F6772657373.vstpreset").replaceWithText("marker"));
+            expect(stageDir.getChildFile("leftover.txt").replaceWithText("leftover"));
+
+            auto cleanupError = std::string();
+            expect(halionbridge::detail::cleanupPresetRemapStageDirectory(halionbridge::detail::toStdPath(stageDir),
+                                                                          halionbridge::detail::toStdPath(rootDir), cleanupError));
+            expect(cleanupError.empty());
+            expect(!stageDir.exists());
+
+            rootDir.deleteRecursively();
+        }
+
+        beginTest("VSTPreset Remap - cleanup tolerates missing staged directory");
+        {
+            auto rootDir = cleanTempDirectory("halionbridge_remap_cleanup_missing_known_root");
+            rootDir.createDirectory();
+            auto stageDir = rootDir.getChildFile("halionbridge-remap-missing-known");
+            stageDir.deleteRecursively();
+
+            auto cleanupError = std::string();
+            expect(halionbridge::detail::cleanupPresetRemapStageDirectory(halionbridge::detail::toStdPath(stageDir),
+                                                                          halionbridge::detail::toStdPath(rootDir), cleanupError));
+            expect(cleanupError.empty());
+            expect(!stageDir.exists());
+
+            rootDir.deleteRecursively();
+        }
+
+        beginTest("VSTPreset Remap - cleanup refuses non-remap staging paths");
+        {
+            auto rootDir = cleanTempDirectory("halionbridge_remap_cleanup_refuse_root");
+            rootDir.createDirectory();
+            auto stageDir = rootDir.getChildFile("not-remap");
+            expect(stageDir.createDirectory());
+
+            auto cleanupError = std::string();
+            expect(!halionbridge::detail::cleanupPresetRemapStageDirectory(halionbridge::detail::toStdPath(stageDir),
+                                                                           halionbridge::detail::toStdPath(rootDir), cleanupError));
+            expect(!cleanupError.empty());
+            expect(stageDir.isDirectory());
+
+            rootDir.deleteRecursively();
+        }
+
+        beginTest("VSTPreset Metadata - CSV parsing and writing");
+        {
+            const auto csv = "\xEF\xBB\xBF"
+                             "filename_path,MediaAuthor,MediaComment\n"
+                             "alpha.vstpreset,\"Author, One\",\"Line \"\"quoted\"\"\"\n";
+            std::vector<std::string> errors;
+            const auto records = halionbridge::detail::parseVstPresetMetadataCsv(csv, errors);
+            expect(errors.empty());
+            expectEquals(static_cast<int>(records.size()), 1);
+            if (!records.empty())
+            {
+                expectEquals(records.front().filenamePath, std::string("alpha.vstpreset"));
+                expectEquals(records.front().metadata.at("MediaAuthor"), std::string("Author, One"));
+                expectEquals(records.front().metadata.at("MediaComment"), std::string("Line \"quoted\""));
+            }
+
+            const auto written = halionbridge::detail::writeVstPresetMetadataCsv(records);
+            expect(written.find("filename_path") != std::string::npos);
+            expect(written.find("target_preset_name") != std::string::npos);
+            expect(written.find("\"Author, One\"") != std::string::npos);
+            expect(written.find("\"Line \"\"quoted\"\"\"") != std::string::npos);
+        }
+
+        beginTest("VSTPreset Metadata - export and apply offline");
+        {
+            auto inputDir = cleanTempDirectory("halionbridge_metadata_input");
+            auto outputDir = cleanTempDirectory("halionbridge_metadata_output");
+            auto csvFile = cleanTempDirectory("halionbridge_metadata_csv").getChildFile("metadata.csv");
+            auto exportedOutputCsv = cleanTempDirectory("halionbridge_metadata_output_csv").getChildFile("metadata.csv");
+            inputDir.createDirectory();
+            outputDir.deleteRecursively();
+            csvFile.getParentDirectory().createDirectory();
+            exportedOutputCsv.getParentDirectory().createDirectory();
+
+            const auto sourceXml =
+                std::string("\xEF\xBB\xBF"
+                            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n"
+                            "<MetaInfo><Attribute id=\"MediaAuthor\" value=\"Old Author\" type=\"string\"/>"
+                            "<Attribute id=\"MediaLibraryManufacturerName\" value=\"Old Manufacturer\" type=\"string\"/>"
+                            "<Attribute id=\"MediaRating\" value=\"3\" type=\"int\"/>"
+                            "<Attribute id=\"MusicalMoods\" value=\"Energetic\" type=\"string\"/>"
+                            "<Attribute id=\"VST3UnitTypePath\" value=\"program\" type=\"string\" flags=\"hidden|writeProtected\"/>"
+                            "<Attribute id=\"PlugInName\" value=\"HALion 7\" type=\"string\" flags=\"writeProtected\"/></MetaInfo>");
+            expect(writeTestVstPreset(inputDir.getChildFile("alpha.vstpreset"), sourceXml));
+            expect(inputDir.getChildFile("nested").createDirectory());
+            expect(writeTestVstPreset(inputDir.getChildFile("nested").getChildFile("beta.vstpreset"), sourceXml));
+
+            auto parseResult = parseTestVstPresetMetadataOptions({"export", "--input-directory", inputDir.getFullPathName().toStdString(),
+                                                                  "--metadata-csv", csvFile.getFullPathName().toStdString()});
+            expect(parseResult.options.has_value());
+            if (parseResult.options)
+            {
+                const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+                expectEquals(result.exitCode, 0);
+                expectEquals(static_cast<int>(result.diagnostics.size()), 1);
+                if (!result.diagnostics.empty())
+                {
+                    expect(result.diagnostics.front().level == halionbridge::detail::CliDiagnosticLevel::info);
+                    expect(result.diagnostics.front().message.find("Exported metadata for 1 .vstpreset file(s)") != std::string::npos);
+                }
+            }
+
+            auto exportedText = csvFile.loadFileAsString().toStdString();
+            const auto exportedHeader = exportedText.substr(0, exportedText.find('\n'));
+            expect(exportedHeader.find("filename_path") == 0);
+            expect(exportedHeader.find("target_preset_name") != std::string::npos);
+            expect(exportedHeader.find("source_bank") == std::string::npos);
+            expect(exportedHeader.find(",preset_name,") == std::string::npos);
+            expect(exportedText.find("alpha.vstpreset") != std::string::npos);
+            expect(exportedText.find("alpha.vstpreset,alpha,Old Author") != std::string::npos);
+            expect(exportedText.find("nested/beta.vstpreset") == std::string::npos);
+            expect(exportedText.find("Old Author") != std::string::npos);
+            expect(exportedText.find("Old Manufacturer") != std::string::npos);
+            expect(exportedText.find("Energetic") != std::string::npos);
+
+            const auto applyCsv =
+                "filename_path,target_preset_name,MediaAuthor,MediaLibraryManufacturerName,MediaComment,MediaRating,MusicalMoods,"
+                "VST3UnitTypePath\n"
+                "alpha.vstpreset,Renamed Alpha,New Author,New Manufacturer,Reviewed,4,Dark|Aggressive,program/layer\n"
+                "nested/beta.vstpreset,Renamed Beta.vstpreset,New Author Nested,New Manufacturer Nested,,5,Bright,program/layer\n";
+            expect(csvFile.replaceWithText(applyCsv));
+
+            parseResult = parseTestVstPresetMetadataOptions(
+                {"apply", "--input-directory", inputDir.getFullPathName().toStdString(), "--metadata-csv",
+                 csvFile.getFullPathName().toStdString(), "--output-directory", outputDir.getFullPathName().toStdString(), "--recursive"});
+            expect(parseResult.options.has_value());
+            if (parseResult.options)
+            {
+                const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+                expectEquals(result.exitCode, 0);
+                expectEquals(static_cast<int>(result.diagnostics.size()), 1);
+                if (!result.diagnostics.empty())
+                {
+                    expect(result.diagnostics.front().level == halionbridge::detail::CliDiagnosticLevel::info);
+                    expect(result.diagnostics.front().message.find("Applied metadata to 2 .vstpreset file(s)") != std::string::npos);
+                }
+            }
+
+            expect(outputDir.getChildFile("Renamed Alpha.vstpreset").existsAsFile());
+            expect(outputDir.getChildFile("nested").getChildFile("Renamed Beta.vstpreset").existsAsFile());
+            expect(!outputDir.getChildFile("alpha.vstpreset").existsAsFile());
+            expect(!outputDir.getChildFile("nested").getChildFile("beta.vstpreset").existsAsFile());
+
+            parseResult =
+                parseTestVstPresetMetadataOptions({"export", "--input-directory", outputDir.getFullPathName().toStdString(),
+                                                   "--metadata-csv", exportedOutputCsv.getFullPathName().toStdString(), "--recursive"});
+            expect(parseResult.options.has_value());
+            if (parseResult.options)
+            {
+                const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+                expectEquals(result.exitCode, 0);
+                expectEquals(static_cast<int>(result.diagnostics.size()), 1);
+                if (!result.diagnostics.empty())
+                {
+                    expect(result.diagnostics.front().level == halionbridge::detail::CliDiagnosticLevel::info);
+                    expect(result.diagnostics.front().message.find("Exported metadata for 2 .vstpreset file(s)") != std::string::npos);
+                }
+            }
+
+            const auto outputCsvText = exportedOutputCsv.loadFileAsString().toStdString();
+            expect(outputCsvText.find("Renamed Alpha.vstpreset") != std::string::npos);
+            expect(outputCsvText.find("Renamed Alpha,New Author") != std::string::npos);
+            expect(outputCsvText.find("New Author") != std::string::npos);
+            expect(outputCsvText.find("New Manufacturer") != std::string::npos);
+            expect(outputCsvText.find("Reviewed") != std::string::npos);
+            expect(outputCsvText.find("Dark|Aggressive") != std::string::npos);
+            expect(outputCsvText.find("PlugInName") == std::string::npos);
+
+            inputDir.deleteRecursively();
+            outputDir.deleteRecursively();
+            csvFile.getParentDirectory().deleteRecursively();
+            exportedOutputCsv.getParentDirectory().deleteRecursively();
+        }
+
+        beginTest("VSTPreset Metadata - strict apply rejects mismatched CSV");
+        {
+            auto inputDir = cleanTempDirectory("halionbridge_metadata_strict_input");
+            auto outputDir = cleanTempDirectory("halionbridge_metadata_strict_output");
+            auto csvFile = cleanTempDirectory("halionbridge_metadata_strict_csv").getChildFile("metadata.csv");
+            inputDir.createDirectory();
+            csvFile.getParentDirectory().createDirectory();
+            outputDir.deleteRecursively();
+
+            expect(writeTestVstPreset(inputDir.getChildFile("alpha.vstpreset"), ""));
+            expect(csvFile.replaceWithText("filename_path,MediaAuthor\nother.vstpreset,Author\n"));
+
+            const auto parseResult = parseTestVstPresetMetadataOptions(
+                {"apply", "--input-directory", inputDir.getFullPathName().toStdString(), "--metadata-csv",
+                 csvFile.getFullPathName().toStdString(), "--output-directory", outputDir.getFullPathName().toStdString()});
+            expect(parseResult.options.has_value());
+            if (parseResult.options)
+            {
+                const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+                expectEquals(result.exitCode, 1);
+                expect(!result.diagnostics.empty());
+            }
+
+            inputDir.deleteRecursively();
+            outputDir.deleteRecursively();
+            csvFile.getParentDirectory().deleteRecursively();
+        }
+
+        beginTest("VSTPreset Metadata - apply sanitizes target preset names");
+        {
+            auto inputDir = cleanTempDirectory("halionbridge_metadata_sanitize_target_input");
+            auto outputDir = cleanTempDirectory("halionbridge_metadata_sanitize_target_output");
+            auto csvFile = cleanTempDirectory("halionbridge_metadata_sanitize_target_csv").getChildFile("metadata.csv");
+            inputDir.createDirectory();
+            csvFile.getParentDirectory().createDirectory();
+            outputDir.deleteRecursively();
+
+            const auto curlyApostropheName = std::string("Chickn\xE2\x80\x99") + "Dist";
+            const auto csvText = std::string("filename_path,target_preset_name,MediaAuthor\n") +
+                                 "why_me.vstpreset,WhY Me ?,Author\n"
+                                 "spiceboy.vstpreset,SPICEBOY:-).vstpreset,Author\n"
+                                 "chickn_dist.vstpreset," +
+                                 curlyApostropheName + ",Author\n";
+
+            expect(writeTestVstPreset(inputDir.getChildFile("why_me.vstpreset"), ""));
+            expect(writeTestVstPreset(inputDir.getChildFile("spiceboy.vstpreset"), ""));
+            expect(writeTestVstPreset(inputDir.getChildFile("chickn_dist.vstpreset"), ""));
+            expect(csvFile.replaceWithText(juce::String::fromUTF8(csvText.data(), static_cast<int>(csvText.size()))));
+
+            const auto parseResult = parseTestVstPresetMetadataOptions(
+                {"apply", "--input-directory", inputDir.getFullPathName().toStdString(), "--metadata-csv",
+                 csvFile.getFullPathName().toStdString(), "--output-directory", outputDir.getFullPathName().toStdString()});
+            expect(parseResult.options.has_value());
+            if (parseResult.options)
+            {
+                const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+                expectEquals(result.exitCode, 0);
+                expectEquals(static_cast<int>(result.diagnostics.size()), 1);
+                if (!result.diagnostics.empty())
+                {
+                    expect(result.diagnostics.front().level == halionbridge::detail::CliDiagnosticLevel::info);
+                    expect(result.diagnostics.front().message.find("Applied metadata to 3 .vstpreset file(s)") != std::string::npos);
+                }
+            }
+
+            expect(outputDir.getChildFile("WhY Me.vstpreset").existsAsFile());
+            expect(outputDir.getChildFile("SPICEBOY-).vstpreset").existsAsFile());
+            expect(outputDir.getChildFile(juce::String::fromUTF8((curlyApostropheName + ".vstpreset").c_str())).existsAsFile());
+            expect(!outputDir.getChildFile("WhY Me ?.vstpreset").existsAsFile());
+            expect(!outputDir.getChildFile("SPICEBOY:-).vstpreset").existsAsFile());
+
+            inputDir.deleteRecursively();
+            outputDir.deleteRecursively();
+            csvFile.getParentDirectory().deleteRecursively();
+        }
+
+        beginTest("VSTPreset Metadata - apply rejects duplicate target preset names");
+        {
+            auto inputDir = cleanTempDirectory("halionbridge_metadata_duplicate_target_input");
+            auto outputDir = cleanTempDirectory("halionbridge_metadata_duplicate_target_output");
+            auto csvFile = cleanTempDirectory("halionbridge_metadata_duplicate_target_csv").getChildFile("metadata.csv");
+            inputDir.createDirectory();
+            csvFile.getParentDirectory().createDirectory();
+            outputDir.deleteRecursively();
+
+            expect(writeTestVstPreset(inputDir.getChildFile("alpha.vstpreset"), ""));
+            expect(writeTestVstPreset(inputDir.getChildFile("beta.vstpreset"), ""));
+            expect(csvFile.replaceWithText("filename_path,target_preset_name,MediaAuthor\n"
+                                           "alpha.vstpreset,Duplicate,Author\n"
+                                           "beta.vstpreset,duplicate?.vstpreset,Author\n"));
+
+            const auto parseResult = parseTestVstPresetMetadataOptions(
+                {"apply", "--input-directory", inputDir.getFullPathName().toStdString(), "--metadata-csv",
+                 csvFile.getFullPathName().toStdString(), "--output-directory", outputDir.getFullPathName().toStdString()});
+            expect(parseResult.options.has_value());
+            if (parseResult.options)
+            {
+                const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+                expectEquals(result.exitCode, 1);
+                expect(!result.diagnostics.empty());
+            }
+
+            inputDir.deleteRecursively();
+            outputDir.deleteRecursively();
+            csvFile.getParentDirectory().deleteRecursively();
+        }
+
         beginTest("Build Worker - argument parsing and command construction");
         {
             auto tempDir = cleanTempDirectory("halionbridge_worker_build_dir");
+            auto outputDir = cleanTempDirectory("halionbridge_worker_output_dir");
             tempDir.createDirectory();
+            outputDir.deleteRecursively();
             tempDir.getChildFile("halionbridge_build.lua").replaceWithText("return { \"one\", \"two\", \"three\" }");
 
             auto pluginFile = tempDir.getChildFile("HALion 7.vst3");
             expect(pluginFile.replaceWithText("plugin"));
+            auto resultFile = tempDir.getChildFile("worker-result.txt");
 
             auto workerArgs = std::vector<std::string>{halionbridge::detail::kBuildWorkerArgument,
                                                        tempDir.getFullPathName().toStdString(),
@@ -362,8 +955,12 @@ class BridgeTests : public juce::UnitTest
                                                        "3",
                                                        "--plugin",
                                                        pluginFile.getFullPathName().toStdString(),
+                                                       "--output-directory",
+                                                       outputDir.getFullPathName().toStdString(),
                                                        "--timeout-seconds",
                                                        "5",
+                                                       "--worker-result-file",
+                                                       resultFile.getFullPathName().toStdString(),
                                                        "--force-scan"};
             auto options = halionbridge::detail::parseBuildWorkerArguments(workerArgs);
 
@@ -377,6 +974,10 @@ class BridgeTests : public juce::UnitTest
                 expectEquals(options->timeoutSeconds, 5);
                 expect(options->forceScan);
                 expect(options->pluginPathOverride.has_value());
+                const auto& parsedResultFile = halionbridge::detail::AppOptionsAccess::buildWorkerResultFile(*options);
+                expect(parsedResultFile.has_value());
+                if (parsedResultFile)
+                    expect(*parsedResultFile == std::filesystem::path(resultFile.getFullPathName().toStdString()));
 
                 const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
                 options->executableFile = halionbridge::detail::toStdPath(executable);
@@ -389,6 +990,7 @@ class BridgeTests : public juce::UnitTest
                 expect(command.contains("--build-slice-count"));
                 expect(command.contains("--build-slice-total"));
                 expect(command.contains("--plugin"));
+                expect(command.contains("--output-directory"));
                 expect(command.contains("--timeout-seconds"));
                 expect(command.contains("--force-scan"));
                 expect(!command.contains("--no-timeout"));
@@ -451,6 +1053,7 @@ class BridgeTests : public juce::UnitTest
             expect(!halionbridge::detail::parseBuildWorkerArguments(invalidGui).has_value());
 
             tempDir.deleteRecursively();
+            outputDir.deleteRecursively();
         }
 
         beginTest("Build Worker - RunResult exit-code mapping");
@@ -725,8 +1328,28 @@ class BridgeTests : public juce::UnitTest
 
             const auto converters = registry.list();
             expect(!converters.empty());
-            expect(registry.find("sfz") != nullptr);
+            const auto* sfzConverter = registry.find("sfz");
+            expect(sfzConverter != nullptr);
             expect(registry.find("missing") == nullptr);
+            if (sfzConverter != nullptr)
+            {
+                expect(sfzConverter->validateArguments != nullptr);
+                expect(sfzConverter->visibility == halionbridge::converters::ConverterVisibility::listed);
+                expect(sfzConverter->sourcePathKind == halionbridge::converters::ConverterSourcePathKind::fileOrDirectory);
+                const auto emptyArgs = std::vector<std::string>{};
+                const auto missingRequired = sfzConverter->validateArguments(emptyArgs);
+                expectEquals(missingRequired.exitCode, 1);
+                expect(missingRequired.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax);
+                expect(!missingRequired.diagnostics.empty());
+
+                const auto missingSourceDirectory = cleanTempDirectory("halionbridge_sfz_missing_preflight");
+                missingSourceDirectory.deleteRecursively();
+                const auto missingSourceArgs = std::vector<std::string>{missingSourceDirectory.getFullPathName().toStdString()};
+                const auto missingSource = sfzConverter->validateArguments(missingSourceArgs);
+                expectEquals(missingSource.exitCode, 1);
+                expect(missingSource.errorKind == halionbridge::converters::ConverterArgumentErrorKind::validation);
+                expect(!missingSource.diagnostics.empty());
+            }
 
             auto duplicate = halionbridge::converters::ConverterDefinition{
                 "sfz", "Duplicate", "Duplicate", converters.front().run, converters.front().runWithContext, nullptr};
@@ -741,6 +1364,20 @@ class BridgeTests : public juce::UnitTest
                 { return halionbridge::converters::ConverterResult{0, {}}; },
                 nullptr};
             expect(registry.registerConverter(contextOnly));
+
+            auto hidden = halionbridge::converters::ConverterDefinition{"hidden",
+                                                                        "Hidden",
+                                                                        "Hidden test converter",
+                                                                        [](std::span<const std::string>) { return halionbridge::converters::ConverterResult{0, {}}; },
+                                                                        nullptr,
+                                                                        nullptr};
+            hidden.visibility = halionbridge::converters::ConverterVisibility::incognito;
+            expect(registry.registerConverter(hidden));
+            expect(registry.find("hidden") != nullptr);
+
+            const auto visibleConverters = registry.listVisible();
+            expect(std::none_of(visibleConverters.begin(), visibleConverters.end(),
+                                [](const halionbridge::converters::ConverterDefinition& definition) { return definition.id == "hidden"; }));
         }
 
         beginTest("SFZ Helper Lua - exposes conservative v1 API");
@@ -923,7 +1560,7 @@ class BridgeTests : public juce::UnitTest
             tempDir.deleteRecursively();
         }
 
-        beginTest("SFZ Converter - validates source directories");
+        beginTest("SFZ Converter - validates source paths");
         {
             const auto tempDir = cleanTempDirectory("halionbridge_sfz_validation");
             expect(tempDir.createDirectory());
@@ -935,13 +1572,14 @@ class BridgeTests : public juce::UnitTest
             auto result = halionbridge::converters::sfz::convertDirectory(missingOptions);
             expect(!result.succeeded);
 
-            const auto fileSource = tempDir.getChildFile("instrument.sfz");
-            expect(fileSource.replaceWithText("<region> sample=missing.wav\n"));
+            const auto fileSource = tempDir.getChildFile("instrument.txt");
+            expect(fileSource.replaceWithText("not sfz\n"));
             auto fileOptions = halionbridge::converters::sfz::ConversionOptions{};
-            fileOptions.sourceDirectory = halionbridge::detail::toStdPath(fileSource);
+            fileOptions.sourcePath = halionbridge::detail::toStdPath(fileSource);
             fileOptions.outputDirectory = outputDirectory;
-            result = halionbridge::converters::sfz::convertDirectory(fileOptions);
+            result = halionbridge::converters::sfz::convertSource(fileOptions);
             expect(!result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "source-not-sfz"));
 
             const auto emptyDirectory = cleanTempDirectory("halionbridge_sfz_empty");
             expect(emptyDirectory.createDirectory());
@@ -1021,6 +1659,23 @@ class BridgeTests : public juce::UnitTest
             expect(explicitOutputDir.getChildFile("halionbridge_build.lua").existsAsFile());
             expect(explicitOutputDir.getChildFile("000_top.lua").existsAsFile());
 
+            auto fileSourceDir = cleanTempDirectory("halionbridge_sfz_cli_file_source");
+            auto fileOutputDir = cleanTempDirectory("halionbridge_sfz_cli_file_output");
+            expect(fileSourceDir.createDirectory());
+            expect(fileSourceDir.getChildFile("sample.wav").replaceWithText(""));
+            const auto sfzFile = fileSourceDir.getChildFile("single.sfz");
+            expect(sfzFile.replaceWithText("<region> sample=sample.wav lokey=63 hikey=63 lovel=0 hivel=127 pitch_keycenter=63\n"));
+
+            result = runSfzConverter({sfzFile.getFullPathName().toStdString(), fileOutputDir.getFullPathName().toStdString()});
+            expectEquals(result.exitCode, 0);
+            expect(fileOutputDir.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(fileOutputDir.getChildFile("000_single.lua").existsAsFile());
+
+            result =
+                runSfzConverter({sfzFile.getFullPathName().toStdString(), fileOutputDir.getFullPathName().toStdString(), "--recursive"});
+            expect(result.exitCode != 0);
+            expect(containsDiagnosticCode(result.diagnostics, "recursive-with-file"));
+
             auto recursiveDir = cleanTempDirectory("halionbridge_sfz_cli_recursive_flat");
             expect(recursiveDir.createDirectory());
             expect(recursiveDir.getChildFile("sample.wav").replaceWithText(""));
@@ -1042,6 +1697,8 @@ class BridgeTests : public juce::UnitTest
             sourceDir.deleteRecursively();
             explicitSourceDir.deleteRecursively();
             explicitOutputDir.deleteRecursively();
+            fileSourceDir.deleteRecursively();
+            fileOutputDir.deleteRecursively();
             recursiveDir.deleteRecursively();
         }
 
@@ -1088,12 +1745,16 @@ class BridgeTests : public juce::UnitTest
             sourceDir.deleteRecursively();
         }
 
-        beginTest("SFZ Converter - rejects duplicate preset output names");
+        beginTest("SFZ Converter - disambiguates safe preset output names");
         {
             auto sourceDir = cleanTempDirectory("halionbridge_sfz_duplicate_presets");
             auto outputDir = cleanTempDirectory("halionbridge_sfz_duplicate_presets_out");
             expect(sourceDir.createDirectory());
             expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("BOY_BC  Ahs _  a.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=58 hikey=58 lovel=0 hivel=127 pitch_keycenter=58\n"));
+            expect(sourceDir.getChildFile("BOY_BC  Ahs _ ^a.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=59 hikey=59 lovel=0 hivel=127 pitch_keycenter=59\n"));
             expect(sourceDir.getChildFile("bass-one.sfz")
                        .replaceWithText("<region> sample=sample.wav lokey=60 hikey=60 lovel=0 hivel=127 pitch_keycenter=60\n"));
             expect(sourceDir.getChildFile("bass_one.sfz")
@@ -1104,9 +1765,49 @@ class BridgeTests : public juce::UnitTest
             options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
 
             const auto result = halionbridge::converters::sfz::convertDirectory(options);
-            expect(!result.succeeded);
-            expect(containsDiagnosticCode(result.diagnostics, "duplicate-preset-name"));
-            expect(!outputDir.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "preset-name-disambiguated"));
+            expect(outputDir.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(outputDir.getChildFile("000_boy_bc_ahs_a.lua")
+                       .loadFileAsString()
+                       .contains("local outputFile = \"boy_bc_ahs_a.vstpreset\""));
+            expect(outputDir.getChildFile("001_boy_bc_ahs_sharp_a.lua")
+                       .loadFileAsString()
+                       .contains("local outputFile = \"boy_bc_ahs_sharp_a.vstpreset\""));
+            expect(outputDir.getChildFile("002_bass_one.lua").loadFileAsString().contains("local outputFile = \"bass_one.vstpreset\""));
+            expect(outputDir.getChildFile("003_bass_one.lua").loadFileAsString().contains("local outputFile = \"bass_one_002.vstpreset\""));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - translates musical preset name characters");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_musical_preset_names");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_musical_preset_names_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("plain.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=60 hikey=60 lovel=0 hivel=127 pitch_keycenter=60\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+            options.name = std::string("C# ") + "\xE2\x99\xAD" + " " + "\xE2\x99\xAE";
+
+            auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+            expect(outputDir.getChildFile("000_plain.lua")
+                       .loadFileAsString()
+                       .contains("local outputFile = \"c_sharp_flat_natural.vstpreset\""));
+
+            outputDir.deleteRecursively();
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+            options.name = "CON";
+
+            result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+            expect(outputDir.getChildFile("000_plain.lua").loadFileAsString().contains("local outputFile = \"sfz_con.vstpreset\""));
 
             sourceDir.deleteRecursively();
             outputDir.deleteRecursively();
@@ -1930,7 +2631,12 @@ class BridgeTests : public juce::UnitTest
             expect(text.find("C:/test/halion build") != std::string::npos);
             expect(text.find("halionbridge_builder") != std::string::npos);
             expect(text.find("runtimePathPrefix") != std::string::npos);
+            expect(text.find("HALIONBRIDGE_OUTPUT_ROOT") != std::string::npos);
             expect(text.find("HALIONBRIDGE_BUILD_SLICE_START = nil") != std::string::npos);
+
+            auto outputText = halionbridge::Bridge::createRuntimeModuleText(buildDirectory, std::filesystem::path("D:\\halion output"));
+            expect(outputText.find("D:/halion output") != std::string::npos);
+            expect(outputText.find("HALIONBRIDGE_OUTPUT_ROOT") != std::string::npos);
 
             auto slicedText = halionbridge::Bridge::createRuntimeModuleText(buildDirectory, 16, 15, 42);
             expect(slicedText.find("HALIONBRIDGE_BUILD_SLICE_START = 16") != std::string::npos);
@@ -1940,6 +2646,9 @@ class BridgeTests : public juce::UnitTest
             const auto builderLua =
                 juce::File::getCurrentWorkingDirectory().getChildFile("halion-lua").getChildFile("builder.lua").loadFileAsString();
             expect(builderLua.contains("BUILD_SCRIPT_TIMEOUT_MS = 600000"));
+            expect(builderLua.contains("ctx.output_dir"));
+            expect(builderLua.contains("HALIONBRIDGE_OUTPUT_ROOT"));
+            expect(builderLua.contains("outputPresetPath(path)"));
             expect(builderLua.contains("setScriptExecTimeOut"));
             expect(builderLua.contains("Completed %d/%d files"));
             expect(builderLua.contains("Processing %d/%d: %s"));
@@ -2049,7 +2758,7 @@ int main(int argc, char* argv[])
 
     juce::UnitTestRunner runner;
     runner.setAssertOnFailure(false);
-    runner.setPassesAreLogged(true);
+    runner.setPassesAreLogged(false);
     runner.runTestsInCategory("halionbridge");
 
     int failures = 0;

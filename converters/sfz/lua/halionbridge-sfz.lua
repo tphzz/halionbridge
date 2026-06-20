@@ -499,7 +499,7 @@ function hb.save_layer_preset(ctx, layer, output_file)
         return false, "Build context cannot save presets"
     end
 
-    local output_path = hb.path_join(ctx, ctx.script_dir, output_file)
+    local output_path = hb.path_join(ctx, ctx.output_dir or ctx.script_dir, output_file)
     local saved = ctx.save_preset(output_path, layer, "H7")
     if not saved then
         return false, "Failed to save " .. output_path

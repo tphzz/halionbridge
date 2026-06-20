@@ -1,17 +1,20 @@
 #include "halionbridge/Bridge.h"
 #include "halionbridge/BuildInfo.h"
+#include "CliCommand.h"
 #include "halionbridge/CrashDiagnostics.h"
 #include "BuildWorker.h"
 #include "BuildFile.h"
 #include "Log.h"
 #include "PathUtils.h"
 #include "PluginScan.h"
+#include "VstPresetMetadata.h"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
 #include "halionbridge_converters/Converter.h"
 #endif
 #include <juce_events/juce_events.h>
 #include <csignal>
 #include <iostream>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -21,7 +24,6 @@
 
 namespace
 {
-
 void signalStopHandler(int)
 {
     halionbridge::requestStop();
@@ -56,52 +58,220 @@ void installStopHandlers()
 #endif
 }
 
-void printHelp()
+void writeVersionHeader(std::ostream& output)
 {
     const auto buildInfo = halionbridge::getBuildInfo();
+    output << "halionbridge " << buildInfo.versionString << "\n";
+}
 
-    std::cout << "halionbridge " << buildInfo.versionString << "\n"
-              << "\n"
-              << "Usage:\n"
-              << "  halionbridge <build-directory> [options]\n"
-              << "  halionbridge init <build-directory> [--overwrite]\n"
+void writeTopLevelHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge build <build-directory> [--output-directory <dir>] [options]\n"
+           << "  halionbridge init <build-directory> [--overwrite]\n"
+           << "  halionbridge remap-vstpresets --input-directory <dir> --output-directory <dir> --old-root <path> --new-root <path>\n"
+           << "  halionbridge vstpreset-metadata export --input-directory <dir> --metadata-csv <file> [options]\n"
+           << "  halionbridge vstpreset-metadata apply --input-directory <dir> --metadata-csv <file> --output-directory <dir> [options]\n"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
-              << "  halionbridge convert <converter-id> <source-directory> [output-directory] [converter-options]\n"
+           << "  halionbridge convert <converter-id> <source-path> [output-directory] [converter-options]\n"
 #endif
-              << "\n"
-              << "Required argument:\n"
-              << "  <build-directory>        Directory containing halionbridge_build.lua and build script Lua files.\n"
-              << "\n"
-              << "Setup command:\n"
-              << "  init <build-directory>   Generate halionbridge_build.lua from top-level Lua files and exit.\n"
-              << "  --overwrite              Replace an existing halionbridge_build.lua when used with init.\n"
-              << "\n"
+           << "\n"
+           << "Build command:\n"
+           << "  build <build-directory> Run HALion Lua build scripts from a build directory.\n"
+           << "  <build-directory>        Directory containing halionbridge_build.lua and build script Lua files.\n"
+           << "\n"
+           << "Setup command:\n"
+           << "  init <build-directory>   Generate halionbridge_build.lua from top-level Lua files and exit.\n"
+           << "  --overwrite              Replace an existing halionbridge_build.lua when used with init.\n"
+           << "\n"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
-              << "Converter command:\n"
-              << "  convert --list           List converter IDs compiled into this halionbridge binary.\n"
-              << "  convert <id> --help      Show converter-specific options.\n"
-              << "\n"
+           << "Converter command:\n"
+           << "  convert --list           List converter IDs compiled into this halionbridge binary.\n"
+           << "  convert <id> --help      Show converter-specific options.\n"
+           << "\n"
 #endif
-              << "Plugin selection:\n"
-              << "  --plugin <path>          Override the HALion 7 VST3 path.\n"
-              << "\n"
-              << "Runtime options:\n"
-              << "  --timeout-seconds <n>    Build completion timeout. Defaults to 3600 seconds.\n"
-              << "  --no-timeout             Wait indefinitely. Equivalent to --timeout-seconds 0.\n"
-              << "  --build-chunk-size <n>   Number of Lua build scripts per HALion run. Defaults to 15.\n"
-              << "  --fail-fast              Stop after the first failed Lua build chunk.\n"
-              << "  --gui                    Use JUCE's GUI-capable VST3 host format and show HALion's editor.\n"
-              << "  --nokill                 Keep HALion loaded after build completion or failure for inspection.\n"
-              << "\n"
-              << "Diagnostics:\n"
-              << "  --force-scan             Force VST3 plugin scanning instead of using the embedded class ID shortcut.\n"
-              << "\n"
-              << "General:\n"
-              << "  --version                Show build version information and exit.\n"
-              << "  --help, -h               Show this help and exit.\n"
-              << "\n"
-              << "Default behavior:\n"
-              << "  Without --gui, halionbridge uses JUCE's headless VST3 host format and does not open an audio device.\n";
+           << "Preset remap command:\n"
+           << "  remap-vstpresets       Copy .vstpreset files, ask HALion to rewrite matching sample paths, then copy results out.\n"
+           << "  --input-directory <d>  Directory scanned recursively for .vstpreset files.\n"
+           << "  --output-directory <d> Empty or missing destination directory for remapped presets.\n"
+           << "  --old-root <path>      Existing sample path prefix to replace.\n"
+           << "  --new-root <path>      New sample path prefix.\n"
+           << "  --preset-plugin-code <H7|HS>\n"
+           << "                          HALion savePreset plugin code for remapped presets. Defaults to H7.\n"
+           << "\n"
+           << "VSTPreset metadata command:\n"
+           << "  vstpreset-metadata export\n"
+           << "                          Scan .vstpreset files and write their metadata to a CSV file.\n"
+           << "  vstpreset-metadata apply\n"
+           << "                          Apply metadata CSV rows to copied .vstpreset files in an output directory.\n"
+           << "  --metadata-csv <file>   CSV file with filename_path and metadata columns.\n"
+           << "  --recursive             Scan subdirectories for .vstpreset files.\n"
+           << "\n"
+           << "Plugin selection:\n"
+           << "  --plugin <path>          Override the HALion 7 VST3 path.\n"
+           << "\n"
+           << "Runtime options:\n"
+           << "  --output-directory <dir> Write build-script preset outputs under this directory.\n"
+           << "  --timeout-seconds <n>    Build completion timeout. Defaults to 3600 seconds.\n"
+           << "  --no-timeout             Wait indefinitely. Equivalent to --timeout-seconds 0.\n"
+           << "  --build-chunk-size <n>   Number of Lua build scripts per HALion run. Defaults to 1000.\n"
+           << "  --fail-fast              Stop after the first failed Lua build chunk.\n"
+           << "  --gui                    Use JUCE's GUI-capable VST3 host format and show HALion's editor.\n"
+           << "  --nokill                 Keep HALion loaded after build completion or failure for inspection.\n"
+           << "\n"
+           << "Diagnostics:\n"
+           << "  --force-scan             Force VST3 plugin scanning instead of using the embedded class ID shortcut.\n"
+           << "\n"
+           << "General:\n"
+           << "  --version                Show build version information and exit.\n"
+           << "  --help, -h               Show this help and exit.\n"
+           << "\n"
+           << "Default behavior:\n"
+           << "  Without --gui, halionbridge uses JUCE's headless VST3 host format and does not open an audio device.\n";
+}
+
+void printHelp()
+{
+    writeTopLevelHelp(std::cout);
+}
+
+void writeBuildHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge build <build-directory> [--output-directory <dir>] [options]\n"
+           << "\n"
+           << "Options:\n"
+           << "  --output-directory <dir> Write build-script preset outputs under this directory.\n"
+           << "  --plugin <path>          Override the HALion 7 VST3 path.\n"
+           << "  --timeout-seconds <n>    Build completion timeout. Defaults to 3600 seconds.\n"
+           << "  --no-timeout             Wait indefinitely.\n"
+           << "  --build-chunk-size <n>   Number of Lua build scripts per HALion run. Defaults to 1000.\n"
+           << "  --fail-fast              Stop after the first failed Lua build chunk.\n"
+           << "  --gui                    Use JUCE's GUI-capable VST3 host format and show HALion's editor.\n"
+           << "  --nokill                 Keep HALion loaded after completion or failure for inspection.\n"
+           << "  --force-scan             Force VST3 plugin scanning instead of using the embedded class ID shortcut.\n";
+}
+
+void printBuildHelp()
+{
+    writeBuildHelp(std::cout);
+}
+
+void writeInitHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge init <build-directory> [--overwrite]\n"
+           << "\n"
+           << "Options:\n"
+           << "  --overwrite Replace an existing halionbridge_build.lua.\n";
+}
+
+void printInitHelp()
+{
+    writeInitHelp(std::cout);
+}
+
+void writeRemapVstPresetsHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge remap-vstpresets --input-directory <dir> --output-directory <dir> --old-root <path> --new-root <path> "
+              "[options]\n"
+           << "\n"
+           << "Required options:\n"
+           << "  --input-directory <dir>     Directory scanned recursively for .vstpreset files.\n"
+           << "  --output-directory <dir>    Empty or missing destination directory for remapped presets.\n"
+           << "  --old-root <path>           Existing SampleOsc.Filename prefix.\n"
+           << "  --new-root <path>           Replacement SampleOsc.Filename prefix.\n"
+           << "\n"
+           << "Remap options:\n"
+           << "  --preset-plugin-code <H7|HS>\n"
+           << "                              savePreset plugin code. Defaults to H7.\n"
+           << "\n"
+           << "Runtime options:\n"
+           << "  --plugin <path>             Override the HALion 7 VST3 path.\n"
+           << "  --timeout-seconds <n>       Completion timeout. Defaults to 3600 seconds.\n"
+           << "  --no-timeout                Wait indefinitely.\n"
+           << "  --gui                       Use JUCE's GUI-capable VST3 host format and show HALion's editor.\n"
+           << "  --nokill                    Keep HALion loaded after completion or failure for inspection.\n"
+           << "  --force-scan                Force VST3 plugin scanning instead of using the embedded class ID shortcut.\n";
+}
+
+void printRemapVstPresetsHelp()
+{
+    writeRemapVstPresetsHelp(std::cout);
+}
+
+void writeVstPresetMetadataHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge vstpreset-metadata export --input-directory <dir> --metadata-csv <file> [options]\n"
+           << "  halionbridge vstpreset-metadata apply --input-directory <dir> --metadata-csv <file> --output-directory <dir> [options]\n"
+           << "\n"
+           << "Subcommands:\n"
+           << "  export  Scan .vstpreset files and write their metadata to a CSV file.\n"
+           << "  apply   Apply metadata CSV rows to copied .vstpreset files in an output directory.\n"
+           << "\n"
+           << "Options:\n"
+           << "  --input-directory <dir>  Directory scanned for .vstpreset files.\n"
+           << "  --metadata-csv <file>    CSV file with filename_path and metadata columns.\n"
+           << "  --output-directory <dir> Empty or missing destination directory for apply.\n"
+           << "  --recursive              Scan subdirectories.\n"
+           << "  --overwrite              Replace an existing CSV during export.\n";
+}
+
+void writeVstPresetMetadataExportHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge vstpreset-metadata export --input-directory <dir> --metadata-csv <file> [options]\n"
+           << "\n"
+           << "Options:\n"
+           << "  --input-directory <dir>  Directory scanned for .vstpreset files.\n"
+           << "  --metadata-csv <file>    CSV file to write.\n"
+           << "  --recursive              Scan subdirectories.\n"
+           << "  --overwrite              Replace an existing CSV.\n";
+}
+
+void writeVstPresetMetadataApplyHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge vstpreset-metadata apply --input-directory <dir> --metadata-csv <file> --output-directory <dir> [options]\n"
+           << "\n"
+           << "Options:\n"
+           << "  --input-directory <dir>  Directory scanned for .vstpreset files.\n"
+           << "  --metadata-csv <file>    CSV file with filename_path and metadata columns.\n"
+           << "  --output-directory <dir> Empty or missing destination directory for updated preset copies.\n"
+           << "  --recursive              Scan subdirectories.\n";
+}
+
+void writeVstPresetMetadataHelpForArgs(std::ostream& output, std::span<const std::string> args, const bool includeHeader = true)
+{
+    if (!args.empty() && args.front() == "export")
+        writeVstPresetMetadataExportHelp(output, includeHeader);
+    else if (!args.empty() && args.front() == "apply")
+        writeVstPresetMetadataApplyHelp(output, includeHeader);
+    else
+        writeVstPresetMetadataHelp(output, includeHeader);
 }
 
 void printVersion()
@@ -118,23 +288,142 @@ void printVersion()
 
 bool isInternalWorkerCommand(const juce::StringArray& args)
 {
-    return args.size() > 0 && (args[0] == halionbridge::detail::kBuildWorkerArgument || args[0] == "--halionbridge-scan-plugin");
+    std::vector<std::string> commandArgs;
+    commandArgs.reserve(static_cast<size_t>(args.size()));
+    for (const auto& arg : args)
+        commandArgs.push_back(arg.toStdString());
+
+    const auto command = halionbridge::detail::classifyCliCommand(commandArgs);
+    return command == halionbridge::detail::CliCommandKind::buildWorker ||
+           command == halionbridge::detail::CliCommandKind::scanPluginWorker;
+}
+
+bool hasHelpArgument(const juce::StringArray& args, const int firstIndex)
+{
+    for (int i = firstIndex; i < args.size(); ++i)
+    {
+        if (args[i] == "--help" || args[i] == "-h")
+            return true;
+    }
+
+    return false;
+}
+
+void writeCliDiagnostics(std::ostream& output, const std::vector<halionbridge::detail::CliDiagnostic>& diagnostics)
+{
+    auto wroteAny = false;
+
+    for (const auto& diagnostic : diagnostics)
+    {
+        if (wroteAny)
+            output << "\n";
+
+        switch (diagnostic.level)
+        {
+        case halionbridge::detail::CliDiagnosticLevel::info:
+            output << "Info:\n";
+            break;
+        case halionbridge::detail::CliDiagnosticLevel::warning:
+            output << "Warning:\n";
+            break;
+        case halionbridge::detail::CliDiagnosticLevel::error:
+            output << "Error:\n";
+            break;
+        }
+
+        output << "  " << diagnostic.message << "\n";
+        wroteAny = true;
+    }
+
+    if (wroteAny)
+        output << "\n";
+}
+
+std::vector<halionbridge::detail::CliDiagnostic> makeErrorDiagnostics(const juce::String& message)
+{
+    auto diagnostics = std::vector<halionbridge::detail::CliDiagnostic>{};
+    for (const auto& line : juce::StringArray::fromLines(message))
+    {
+        if (line.isNotEmpty())
+            diagnostics.push_back({halionbridge::detail::CliDiagnosticLevel::error, line.toStdString()});
+    }
+    return diagnostics;
 }
 
 #if HALIONBRIDGE_ENABLE_CONVERTERS
-void printConvertHelp()
+std::string converterDiagnosticText(const halionbridge::converters::Diagnostic& diagnostic)
 {
-    std::cout << "halionbridge convert\n"
-              << "\n"
-              << "Usage:\n"
-              << "  halionbridge convert <converter-id> <source-directory> [output-directory] [converter-options]\n"
-              << "  halionbridge convert --list\n"
-              << "  halionbridge convert <converter-id> --help\n";
+    return diagnostic.source.empty() ? diagnostic.message : diagnostic.source.string() + ": " + diagnostic.message;
+}
+
+void writeConverterDiagnostics(std::ostream& output, const std::vector<halionbridge::converters::Diagnostic>& diagnostics)
+{
+    auto wroteAny = false;
+
+    for (const auto& diagnostic : diagnostics)
+    {
+        if (wroteAny)
+            output << "\n";
+
+        switch (diagnostic.level)
+        {
+        case halionbridge::converters::DiagnosticLevel::info:
+            output << "Info:\n";
+            break;
+        case halionbridge::converters::DiagnosticLevel::warning:
+            output << "Warning:\n";
+            break;
+        case halionbridge::converters::DiagnosticLevel::error:
+            output << "Error:\n";
+            break;
+        }
+
+        output << "  " << converterDiagnosticText(diagnostic) << "\n";
+        wroteAny = true;
+    }
+
+    if (wroteAny)
+        output << "\n";
+}
+
+void writeConvertHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge convert <converter-id> <source-path> [output-directory] [converter-options]\n"
+           << "  halionbridge convert --list\n"
+           << "  halionbridge convert <converter-id> --help\n";
+}
+
+void writeConverterHelp(std::ostream& output, const halionbridge::converters::ConverterDefinition& converter,
+                        const bool includeHeader = true)
+{
+    if (converter.helpText == nullptr)
+    {
+        writeConvertHelp(output, includeHeader);
+        return;
+    }
+
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << converter.helpText();
+}
+
+bool hasArgumentDiagnostic(const halionbridge::converters::ConverterResult& result)
+{
+    for (const auto& diagnostic : result.diagnostics)
+        if (diagnostic.code == "argument")
+            return true;
+
+    return false;
 }
 
 void logDiagnostic(const halionbridge::converters::Diagnostic& diagnostic)
 {
-    const auto text = diagnostic.source.empty() ? diagnostic.message : diagnostic.source.string() + ": " + diagnostic.message;
+    const auto text = converterDiagnosticText(diagnostic);
 
     switch (diagnostic.level)
     {
@@ -157,13 +446,17 @@ int runConvertCommand(std::span<const std::string> args)
 
     if (args.empty() || args[0] == "--help" || args[0] == "-h")
     {
-        printConvertHelp();
+        writeVersionHeader(std::cout);
+        std::cout << "\n";
+        writeConvertHelp(std::cout, false);
         return 0;
     }
 
     if (args[0] == "--list")
     {
-        const auto converters = registry.list();
+        writeVersionHeader(std::cout);
+        std::cout << "\n";
+        const auto converters = registry.listVisible();
         if (converters.empty())
         {
             std::cout << "No converters are compiled into this halionbridge binary.\n";
@@ -179,20 +472,45 @@ int runConvertCommand(std::span<const std::string> args)
     const auto* converter = registry.find(args[0]);
     if (converter == nullptr)
     {
-        halionbridge::log::error("Unknown converter '{}'. Run halionbridge convert --list to see available converters.", args[0]);
+        writeVersionHeader(std::cerr);
+        std::cerr << "\n";
+        writeCliDiagnostics(std::cerr,
+                            {{halionbridge::detail::CliDiagnosticLevel::error,
+                              "Unknown converter '" + args[0] + "'. Run halionbridge convert --list to see available converters."}});
+        writeConvertHelp(std::cerr, false);
         return 1;
     }
 
-    if (args.size() == 2 && (args[1] == "--help" || args[1] == "-h"))
+    for (size_t i = 1; i < args.size(); ++i)
     {
-        if (converter->helpText != nullptr)
-            std::cout << converter->helpText();
-        else
-            printConvertHelp();
-        return 0;
+        if (args[i] == "--help" || args[i] == "-h")
+        {
+            writeVersionHeader(std::cout);
+            std::cout << "\n";
+            writeConverterHelp(std::cout, *converter, false);
+            return 0;
+        }
     }
 
     const auto converterArgs = std::span<const std::string>(args.data() + 1, args.size() - 1);
+    if (converter->validateArguments != nullptr)
+    {
+        const auto preflight = converter->validateArguments(converterArgs);
+        if (preflight.exitCode != 0)
+        {
+            writeVersionHeader(std::cerr);
+            std::cerr << "\n";
+            writeConverterDiagnostics(std::cerr, preflight.diagnostics);
+            if (preflight.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax)
+                writeConverterHelp(std::cerr, *converter, false);
+            return preflight.exitCode;
+        }
+    }
+
+    writeVersionHeader(std::cout);
+    std::cout << "\n";
+    halionbridge::log::configureFromEnvironment();
+
     auto usedStreamingContext = false;
     auto result = halionbridge::converters::ConverterResult{};
 
@@ -217,6 +535,12 @@ int runConvertCommand(std::span<const std::string> args)
     if (!usedStreamingContext)
         for (const auto& diagnostic : result.diagnostics)
             logDiagnostic(diagnostic);
+
+    if (result.exitCode != 0 && hasArgumentDiagnostic(result))
+    {
+        halionbridge::log::flush();
+        writeConverterHelp(std::cerr, *converter, false);
+    }
 
     halionbridge::log::flush();
 
@@ -264,46 +588,118 @@ int main(int argc, char* argv[])
         args.emplace_back(argv[i]);
     }
 
-    if ((juceArgs.isEmpty() || juceArgs[0] == "--help" || juceArgs[0] == "-h") && !isInternalWorkerCommand(juceArgs))
+    const auto command = halionbridge::detail::classifyCliCommand(args);
+
+    if (command == halionbridge::detail::CliCommandKind::help && !isInternalWorkerCommand(juceArgs))
     {
         printHelp();
         return 0;
     }
 
-    if (juceArgs[0] == "--version" && !isInternalWorkerCommand(juceArgs))
+    if (command == halionbridge::detail::CliCommandKind::version && !isInternalWorkerCommand(juceArgs))
     {
         printVersion();
         return 0;
     }
 
-    halionbridge::log::configureFromEnvironment();
+    if (juceArgs.size() > 0 && juceArgs[0] == "build" && hasHelpArgument(juceArgs, 1))
+    {
+        printBuildHelp();
+        return 0;
+    }
+
+    if (juceArgs.size() > 0 && juceArgs[0] == "init" && hasHelpArgument(juceArgs, 1))
+    {
+        printInitHelp();
+        return 0;
+    }
+
+    if (juceArgs.size() > 0 && juceArgs[0] == "remap-vstpresets" && hasHelpArgument(juceArgs, 1))
+    {
+        printRemapVstPresetsHelp();
+        return 0;
+    }
+
+    if (juceArgs.size() > 0 && juceArgs[0] == "vstpreset-metadata" && hasHelpArgument(juceArgs, 1))
+    {
+        const auto metadataArgs = std::span<const std::string>(args.data() + 1, args.size() - 1);
+        writeVstPresetMetadataHelpForArgs(std::cout, metadataArgs);
+        return 0;
+    }
+
+    if (command == halionbridge::detail::CliCommandKind::unknown)
+    {
+        writeVersionHeader(std::cerr);
+        std::cerr << "\n";
+
+        if (!args.empty() && args.front().starts_with("-"))
+            writeCliDiagnostics(std::cerr, {{halionbridge::detail::CliDiagnosticLevel::error, "Unknown argument: " + args.front()}});
+        else if (!args.empty())
+            writeCliDiagnostics(std::cerr, {{halionbridge::detail::CliDiagnosticLevel::error, "Unknown command: " + args.front()}});
+        else
+            writeCliDiagnostics(std::cerr, {{halionbridge::detail::CliDiagnosticLevel::error, "Missing command."}});
+
+        writeTopLevelHelp(std::cerr, false);
+        return 1;
+    }
+
     installStopHandlers();
 
-    if (juceArgs.size() > 0 && juceArgs[0] == "init")
+    if (command == halionbridge::detail::CliCommandKind::init)
     {
         const auto initResult = halionbridge::detail::runInitCommand(juceArgs);
-        if (initResult.exitCode == 0)
+        if (initResult.exitCode != 0)
         {
-            halionbridge::log::info("{} with {} Lua build script file(s).", initResult.message.toStdString(),
-                                    initResult.moduleNames.size());
-            if (initResult.warning.isNotEmpty())
-                halionbridge::log::warn("{}", initResult.warning.toStdString());
+            writeVersionHeader(std::cerr);
+            std::cerr << "\n";
+            writeCliDiagnostics(std::cerr, makeErrorDiagnostics(initResult.message));
+            if (initResult.appendHelp)
+                writeInitHelp(std::cerr, false);
+            return initResult.exitCode;
         }
-        else
-        {
-            for (const auto& line : juce::StringArray::fromLines(initResult.message))
-            {
-                if (line.isNotEmpty())
-                    halionbridge::log::error("{}", line.toStdString());
-            }
-        }
+
+        writeVersionHeader(std::cout);
+        std::cout << "\n";
+        halionbridge::log::configureFromEnvironment();
+        halionbridge::log::info("{} with {} Lua build script file(s).", initResult.message.toStdString(), initResult.moduleNames.size());
+        if (initResult.warning.isNotEmpty())
+            halionbridge::log::warn("{}", initResult.warning.toStdString());
 
         halionbridge::log::flush();
         return initResult.exitCode;
     }
 
+    if (command == halionbridge::detail::CliCommandKind::vstPresetMetadata)
+    {
+        const auto metadataArgs = std::span<const std::string>(args.data() + 1, args.size() - 1);
+        auto parseResult = halionbridge::detail::parseVstPresetMetadataOptionsDetailed(metadataArgs);
+        if (!parseResult.options)
+        {
+            writeVersionHeader(std::cerr);
+            std::cerr << "\n";
+            writeCliDiagnostics(std::cerr, parseResult.diagnostics);
+            if (parseResult.errorKind == halionbridge::detail::CliParseErrorKind::syntax)
+                writeVstPresetMetadataHelpForArgs(std::cerr, metadataArgs, false);
+            return 1;
+        }
+
+        const auto runResult = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+        if (runResult.exitCode != 0)
+        {
+            writeVersionHeader(std::cerr);
+            std::cerr << "\n";
+            writeCliDiagnostics(std::cerr, runResult.diagnostics);
+            return runResult.exitCode;
+        }
+
+        writeVersionHeader(std::cout);
+        std::cout << "\n";
+        writeCliDiagnostics(std::cout, runResult.diagnostics);
+        return 0;
+    }
+
 #if HALIONBRIDGE_ENABLE_CONVERTERS
-    if (juceArgs.size() > 0 && juceArgs[0] == "convert")
+    if (command == halionbridge::detail::CliCommandKind::convert)
     {
         const auto convertArgs = std::span<const std::string>(args.data() + 1, args.size() - 1);
         const auto exitCode = runConvertCommand(convertArgs);
@@ -312,13 +708,72 @@ int main(int argc, char* argv[])
     }
 #endif
 
+#if !HALIONBRIDGE_ENABLE_CONVERTERS
+    if (command == halionbridge::detail::CliCommandKind::convert)
+    {
+        writeVersionHeader(std::cerr);
+        std::cerr << "\n";
+        writeCliDiagnostics(std::cerr, {{halionbridge::detail::CliDiagnosticLevel::error, "Command is not available in this build."}});
+        writeTopLevelHelp(std::cerr, false);
+        return 1;
+    }
+#endif
+
+    auto parsedRemapOptions = std::optional<halionbridge::VstPresetRemapOptions>{};
+    auto parsedBuildOptions = std::optional<halionbridge::AppOptions>{};
+
+    if (command == halionbridge::detail::CliCommandKind::remapVstPresets)
+    {
+        const auto remapArgs = std::vector<std::string>(args.begin() + 1, args.end());
+        auto parseResult = halionbridge::detail::parseVstPresetRemapOptionsDetailed(remapArgs);
+        if (!parseResult.options)
+        {
+            writeVersionHeader(std::cerr);
+            std::cerr << "\n";
+            writeCliDiagnostics(std::cerr, parseResult.diagnostics);
+            if (parseResult.errorKind == halionbridge::detail::CliParseErrorKind::syntax)
+                writeRemapVstPresetsHelp(std::cerr, false);
+            return 1;
+        }
+
+        parsedRemapOptions = std::move(*parseResult.options);
+        writeVersionHeader(std::cout);
+        std::cout << "\n";
+        halionbridge::log::configureFromEnvironment();
+    }
+    else if (command == halionbridge::detail::CliCommandKind::build)
+    {
+        auto buildArgs = args;
+        buildArgs.erase(buildArgs.begin());
+
+        auto parseResult = halionbridge::detail::parseBuildOptionsDetailed(buildArgs);
+        if (!parseResult.options)
+        {
+            writeVersionHeader(std::cerr);
+            std::cerr << "\n";
+            writeCliDiagnostics(std::cerr, parseResult.diagnostics);
+            if (parseResult.errorKind == halionbridge::detail::CliParseErrorKind::syntax)
+                writeBuildHelp(std::cerr, false);
+            return 1;
+        }
+
+        parsedBuildOptions = std::move(*parseResult.options);
+        writeVersionHeader(std::cout);
+        std::cout << "\n";
+        halionbridge::log::configureFromEnvironment();
+    }
+    else
+    {
+        halionbridge::log::configureFromEnvironment();
+    }
+
     halionbridge::installCrashDiagnostics();
     juce::ScopedJuceInitialiser_GUI juceInitialiser;
 
     ConsoleLogger logger;
     juce::Logger::setCurrentLogger(&logger);
 
-    if (juceArgs.size() > 0 && juceArgs[0] == "--halionbridge-scan-plugin")
+    if (command == halionbridge::detail::CliCommandKind::scanPluginWorker)
     {
         const auto exitCode = halionbridge::detail::runPluginScanWorker(juceArgs);
         juce::Logger::setCurrentLogger(nullptr);
@@ -326,7 +781,7 @@ int main(int argc, char* argv[])
         return exitCode;
     }
 
-    if (juceArgs.size() > 0 && juceArgs[0] == halionbridge::detail::kBuildWorkerArgument)
+    if (command == halionbridge::detail::CliCommandKind::buildWorker)
     {
         auto options = halionbridge::detail::parseBuildWorkerArguments(args);
         if (!options)
@@ -354,19 +809,49 @@ int main(int argc, char* argv[])
         return exitCode;
     }
 
-    auto options = halionbridge::Bridge::parseArguments(args);
-    if (!options)
+    if (command == halionbridge::detail::CliCommandKind::remapVstPresets)
     {
+        jassert(parsedRemapOptions.has_value());
+
+        const auto executableFile = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        parsedRemapOptions->executableFile = halionbridge::detail::toStdPath(executableFile);
+
+        halionbridge::Bridge app;
+        const auto runResult = app.remapVstPresetsDetailed(*parsedRemapOptions);
+        if (runResult != halionbridge::RunResult::success)
+        {
+            if (runResult == halionbridge::RunResult::stopped)
+                halionbridge::log::warn("halionbridge preset remap stopped by user request.");
+            else
+                halionbridge::log::error("Failed to run halionbridge preset remap.");
+
+            juce::Logger::setCurrentLogger(nullptr);
+            halionbridge::log::flush();
+            return 1;
+        }
+
         juce::Logger::setCurrentLogger(nullptr);
         halionbridge::log::flush();
+        return 0;
+    }
+
+    if (command != halionbridge::detail::CliCommandKind::build)
+    {
+        halionbridge::log::error("Command is not available in this build.");
+        halionbridge::log::error("Run \"halionbridge --help\" to see available commands.");
+        juce::Logger::setCurrentLogger(nullptr);
+        halionbridge::log::flush();
+        writeTopLevelHelp(std::cerr);
         return 1;
     }
 
+    jassert(parsedBuildOptions.has_value());
+
     const auto executableFile = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
-    options->executableFile = halionbridge::detail::toStdPath(executableFile);
+    parsedBuildOptions->executableFile = halionbridge::detail::toStdPath(executableFile);
 
     halionbridge::Bridge app;
-    const auto runResult = app.runDetailed(*options);
+    const auto runResult = app.runDetailed(*parsedBuildOptions);
     if (runResult != halionbridge::RunResult::success)
     {
         if (runResult == halionbridge::RunResult::stopped)

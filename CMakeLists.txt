@@ -68,6 +68,7 @@ add_custom_target(halionbridge_generate_build_info ALL
 # Add JUCE submodule
 add_subdirectory(external/JUCE)
 add_subdirectory(external/spdlog EXCLUDE_FROM_ALL)
+add_subdirectory(external/CLI11 EXCLUDE_FROM_ALL)
 
 juce_add_binary_data(halionbridge_assets
     NAMESPACE halionbridge_assets
@@ -75,6 +76,7 @@ juce_add_binary_data(halionbridge_assets
     SOURCES
         halion-lua/builder_bootstrap.vstpreset
         halion-lua/builder.lua
+        halion-lua/preset_remap.lua
 )
 
 set(HALIONBRIDGE_COMMON_DEFINITIONS
@@ -97,18 +99,28 @@ set(HALIONBRIDGE_LIBRARY_SOURCES
     src/Bridge.cpp
     src/BuildWorker.cpp
     src/ChildProcessOutput.cpp
+    src/CliCommand.cpp
     src/CrashDiagnostics.cpp
     src/Log.cpp
     src/BuildFile.cpp
     src/PathUtils.cpp
     src/PluginScan.cpp
     src/ProgressMarkers.cpp
+    src/PresetRemap.cpp
+    src/VstPresetMetadata.cpp
     "${HALIONBRIDGE_BUILD_INFO_CPP}"
 )
 
 set(HALIONBRIDGE_STRICT_WARNING_OPTIONS)
 if(MSVC)
-    list(APPEND HALIONBRIDGE_STRICT_WARNING_OPTIONS /W4 /WX)
+    list(APPEND HALIONBRIDGE_STRICT_WARNING_OPTIONS
+        /W4
+        /WX
+        /permissive-
+        /Zc:__cplusplus
+        /Zc:preprocessor
+        /w44505 # Enable C4505: unreferenced local function has been removed.
+    )
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
     list(APPEND HALIONBRIDGE_STRICT_WARNING_OPTIONS -Wall -Wextra -Wpedantic -Werror)
 endif()
@@ -157,6 +169,7 @@ function(configure_halionbridge_library target_name)
     )
 
     target_link_libraries(${target_name} PRIVATE
+        CLI11::CLI11
         juce::juce_audio_processors
         juce::juce_core
         spdlog::spdlog_header_only
@@ -283,6 +296,105 @@ if(HALIONBRIDGE_BUILD_TESTS)
         add_test(NAME halionbridge_tests COMMAND halionbridge_tests)
         set_tests_properties(halionbridge_tests PROPERTIES
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            ENVIRONMENT "HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION=1"
         )
+
+        if(HALIONBRIDGE_BUILD_CLI)
+            function(add_halionbridge_cli_expect test_name expected_exit expected_regex)
+                set(cli_args ${ARGN})
+                string(REPLACE ";" "|" cli_args_joined "${cli_args}")
+                add_test(NAME "${test_name}"
+                    COMMAND "${CMAKE_COMMAND}"
+                        "-DHALIONBRIDGE_CLI=$<TARGET_FILE:halionbridge>"
+                        "-DHALIONBRIDGE_EXPECT_EXIT=${expected_exit}"
+                        "-DHALIONBRIDGE_EXPECT_REGEX=${expected_regex}"
+                        "-DHALIONBRIDGE_WORKING_DIRECTORY=${CMAKE_SOURCE_DIR}"
+                        "-DHALIONBRIDGE_ARGS=${cli_args_joined}"
+                        -P "${CMAKE_SOURCE_DIR}/cmake/expect_cli.cmake"
+                )
+                set_tests_properties("${test_name}" PROPERTIES
+                    ENVIRONMENT "HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION=1"
+                )
+            endfunction()
+
+            function(add_halionbridge_cli_reject test_name expected_exit reject_regex)
+                set(cli_args ${ARGN})
+                string(REPLACE ";" "|" cli_args_joined "${cli_args}")
+                add_test(NAME "${test_name}"
+                    COMMAND "${CMAKE_COMMAND}"
+                        "-DHALIONBRIDGE_CLI=$<TARGET_FILE:halionbridge>"
+                        "-DHALIONBRIDGE_EXPECT_EXIT=${expected_exit}"
+                        "-DHALIONBRIDGE_REJECT_REGEX=${reject_regex}"
+                        "-DHALIONBRIDGE_WORKING_DIRECTORY=${CMAKE_SOURCE_DIR}"
+                        "-DHALIONBRIDGE_ARGS=${cli_args_joined}"
+                        -P "${CMAKE_SOURCE_DIR}/cmake/expect_cli.cmake"
+                )
+                set_tests_properties("${test_name}" PROPERTIES
+                    ENVIRONMENT "HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION=1"
+                )
+            endfunction()
+
+            add_halionbridge_cli_expect(halionbridge_cli_help 0 "halionbridge [^\r\n]+" --help)
+            add_halionbridge_cli_expect(halionbridge_cli_build_help 0 "halionbridge build <build-directory>" build --help)
+            add_halionbridge_cli_expect(halionbridge_cli_build_help_version 0 "halionbridge [^\r\n]+" build --help)
+            add_halionbridge_cli_expect(halionbridge_cli_build_help_chunk_default 0 "Defaults to 1000" build --help)
+            add_halionbridge_cli_expect(halionbridge_cli_build_missing_directory_header 1 "^halionbridge [^\r\n]+" build)
+            add_halionbridge_cli_expect(halionbridge_cli_build_missing_directory_error 1 "You must provide a build directory" build)
+            add_halionbridge_cli_expect(halionbridge_cli_build_missing_directory_help 1 "halionbridge build <build-directory>" build)
+            add_halionbridge_cli_reject(halionbridge_cli_build_missing_directory_no_log_prefix 1 "\\[[0-9][0-9][0-9][0-9]-" build)
+            add_halionbridge_cli_reject(halionbridge_cli_build_missing_path_no_help 1 "Usage:" build "${CMAKE_BINARY_DIR}/missing-build-dir")
+            add_halionbridge_cli_reject(halionbridge_cli_build_missing_path_no_log_prefix 1 "\\[[0-9][0-9][0-9][0-9]-" build "${CMAKE_BINARY_DIR}/missing-build-dir")
+            add_halionbridge_cli_expect(halionbridge_cli_init_help 0 "halionbridge init <build-directory>" init --help)
+            add_halionbridge_cli_expect(halionbridge_cli_init_missing_directory_header 1 "^halionbridge [^\r\n]+" init)
+            add_halionbridge_cli_expect(halionbridge_cli_init_missing_directory_help 1 "halionbridge init <build-directory>" init)
+            add_halionbridge_cli_expect(halionbridge_cli_remap_help 0 "halionbridge remap-vstpresets --input-directory" remap-vstpresets --help)
+            add_halionbridge_cli_expect(halionbridge_cli_remap_missing_required_header 1 "^halionbridge [^\r\n]+" remap-vstpresets)
+            add_halionbridge_cli_expect(halionbridge_cli_remap_missing_required_help 1 "halionbridge remap-vstpresets --input-directory" remap-vstpresets)
+            add_halionbridge_cli_reject(halionbridge_cli_remap_missing_required_no_log_prefix 1 "\\[[0-9][0-9][0-9][0-9]-" remap-vstpresets)
+            add_halionbridge_cli_expect(halionbridge_cli_vstpreset_metadata_help 0
+                "halionbridge vstpreset-metadata export"
+                vstpreset-metadata --help
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_vstpreset_metadata_export_help 0
+                "halionbridge vstpreset-metadata export --input-directory"
+                vstpreset-metadata export --help
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_vstpreset_metadata_missing_required_header 1
+                "^halionbridge [^\r\n]+"
+                vstpreset-metadata export
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_vstpreset_metadata_missing_required_help 1
+                "halionbridge vstpreset-metadata export --input-directory"
+                vstpreset-metadata export
+            )
+            add_halionbridge_cli_reject(halionbridge_cli_vstpreset_metadata_missing_required_no_log_prefix 1
+                "\\[[0-9][0-9][0-9][0-9]-"
+                vstpreset-metadata export
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_unknown_command_help 1 "Usage:" does-not-exist)
+            add_halionbridge_cli_expect(halionbridge_cli_convert_list_header 0 "^halionbridge [^\r\n]+" convert --list)
+            add_halionbridge_cli_reject(halionbridge_cli_help_no_converter_visibility_hint 0
+                "public converter|incognito|hidden converter|unlisted converter"
+                --help
+            )
+            add_halionbridge_cli_reject(halionbridge_cli_convert_list_no_converter_visibility_hint 0
+                "public converter|incognito|hidden converter|unlisted converter"
+                convert --list
+            )
+
+            if(HALIONBRIDGE_ENABLE_CONVERTERS)
+                add_halionbridge_cli_expect(halionbridge_cli_convert_help 0 "halionbridge convert <converter-id>" convert --help)
+                add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_help 0 "halionbridge convert sfz <source-path>" convert sfz --help)
+                add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_help_version 0 "halionbridge [^\r\n]+" convert sfz --help)
+                add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_missing_source_header 1 "^halionbridge [^\r\n]+" convert sfz)
+                add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_missing_source_error 1 "requires a source path" convert sfz)
+                add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_missing_source_help 1 "halionbridge convert sfz <source-path>" convert sfz)
+                add_halionbridge_cli_reject(halionbridge_cli_convert_sfz_missing_source_no_log_prefix 1 "\\[[0-9][0-9][0-9][0-9]-" convert sfz)
+                add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_missing_path_header 1 "^halionbridge [^\r\n]+" convert sfz "${CMAKE_BINARY_DIR}/missing-sfz-source")
+                add_halionbridge_cli_reject(halionbridge_cli_convert_sfz_missing_path_no_help 1 "Usage:" convert sfz "${CMAKE_BINARY_DIR}/missing-sfz-source")
+                add_halionbridge_cli_reject(halionbridge_cli_convert_sfz_missing_path_no_log_prefix 1 "\\[[0-9][0-9][0-9][0-9]-" convert sfz "${CMAKE_BINARY_DIR}/missing-sfz-source")
+                add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_rejects_non_sfz_file 1 "SFZ source file must have a \\.sfz extension" convert sfz "${CMAKE_SOURCE_DIR}/README.md")
+            endif()
+        endif()
     endif()
 endif()

@@ -25,6 +25,7 @@
 local RUN_BUILD = true
 
 local RUNTIME_ROOT_GLOBAL = "HALIONBRIDGE_RUNTIME_ROOT"
+local OUTPUT_ROOT_GLOBAL = "HALIONBRIDGE_OUTPUT_ROOT"
 local RUNTIME_ROOT_ENV = "HALIONBRIDGE_PRESET_DIR"
 
 local function normalizeDirectory(path)
@@ -98,6 +99,10 @@ if scriptDir == "" then
 end
 
 local SAMPLE_ROOT = scriptDir
+local OUTPUT_ROOT = normalizeDirectory(getGlobalString(OUTPUT_ROOT_GLOBAL))
+if OUTPUT_ROOT == "" then
+    OUTPUT_ROOT = scriptDir
+end
 local STATUS_OK_PATH = scriptDir .. "halionbridge_status_ok.vstpreset"
 local STATUS_FAILED_PATH = scriptDir .. "halionbridge_status_failed.vstpreset"
 local PROGRESS_SEQUENCE = 0
@@ -142,6 +147,33 @@ local function pathJoin(root, rel)
     end
 
     return root .. rel
+end
+
+local function isAbsolutePath(path)
+    path = tostring(path or ""):gsub("\\", "/")
+    if path:sub(1, 1) == "/" then
+        return true
+    end
+
+    return path:match("^%a:/") ~= nil
+end
+
+local function outputPresetPath(path)
+    path = tostring(path or ""):gsub("\\", "/")
+
+    if OUTPUT_ROOT == "" or OUTPUT_ROOT == scriptDir then
+        return path
+    end
+
+    if path:sub(1, #scriptDir) == scriptDir then
+        return pathJoin(OUTPUT_ROOT, path:sub(#scriptDir + 1))
+    end
+
+    if not isAbsolutePath(path) then
+        return pathJoin(OUTPUT_ROOT, path)
+    end
+
+    return path
 end
 
 local function progressLevel(value)
@@ -347,13 +379,15 @@ end
 local function makeContext(moduleName)
     -- Public build script API, documented for build script authors in HALION-LUA.md.
     --
-    -- ctx.script_dir and ctx.sample_root are strings ending in the builder
-    -- directory separator as reported by HALion. ctx.sample_root currently
+    -- ctx.script_dir, ctx.sample_root, and ctx.output_dir are strings ending in
+    -- a directory separator as reported by HALion. ctx.sample_root currently
     -- equals ctx.script_dir; it is exposed separately so build script code can refer
     -- to sample roots without depending on where the runner itself lives.
+    -- ctx.output_dir is either the requested --output-directory or ctx.script_dir.
     local context = {
         script_dir = scriptDir,
         sample_root = SAMPLE_ROOT,
+        output_dir = OUTPUT_ROOT,
         module_name = normalizeModuleName(moduleName),
     }
 
@@ -364,8 +398,10 @@ local function makeContext(moduleName)
     function context.save_preset(path, object, presetType)
         -- Thin wrapper over HALion savePreset(). Build scripts choose what object to
         -- save and which preset type to request. "H7" is the current default for
-        -- HALion 7 layer/program preset output.
-        return savePreset(path, object, presetType or "H7")
+        -- HALion 7 layer/program preset output. When --output-directory is set,
+        -- ordinary build-directory-relative preset saves are redirected there while
+        -- status/progress markers written by the runner remain in ctx.script_dir.
+        return savePreset(outputPresetPath(path), object, presetType or "H7")
     end
 
     function context.log(message)

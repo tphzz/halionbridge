@@ -10,6 +10,7 @@ namespace halionbridge::converters::sfz
 
 struct ConversionOptions
 {
+    std::filesystem::path sourcePath;
     std::filesystem::path sourceDirectory;
     std::filesystem::path outputDirectory;
     std::optional<std::string> name;
@@ -29,6 +30,7 @@ struct ConversionResult
     int regionsSkipped = 0;
 };
 
+ConversionResult convertSource(const ConversionOptions& options);
 ConversionResult convertDirectory(const ConversionOptions& options);
 void registerConverter(ConverterRegistry& registry);
 
