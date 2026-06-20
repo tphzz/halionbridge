@@ -264,11 +264,6 @@ void writeVstPresetMetadataApplyHelp(std::ostream& output, const bool includeHea
            << "  --recursive              Scan subdirectories.\n";
 }
 
-void printVstPresetMetadataHelp()
-{
-    writeVstPresetMetadataHelp(std::cout);
-}
-
 void writeVstPresetMetadataHelpForArgs(std::ostream& output, std::span<const std::string> args, const bool includeHeader = true)
 {
     if (!args.empty() && args.front() == "export")
@@ -402,11 +397,6 @@ void writeConvertHelp(std::ostream& output, const bool includeHeader = true)
            << "  halionbridge convert <converter-id> --help\n";
 }
 
-void printConvertHelp()
-{
-    writeConvertHelp(std::cout);
-}
-
 void writeConverterHelp(std::ostream& output, const halionbridge::converters::ConverterDefinition& converter,
                         const bool includeHeader = true)
 {
@@ -420,11 +410,6 @@ void writeConverterHelp(std::ostream& output, const halionbridge::converters::Co
         writeVersionHeader(output);
 
     output << (includeHeader ? "\n" : "") << converter.helpText();
-}
-
-void printConverterHelp(const halionbridge::converters::ConverterDefinition& converter)
-{
-    writeConverterHelp(std::cout, converter);
 }
 
 bool hasArgumentDiagnostic(const halionbridge::converters::ConverterResult& result)

@@ -113,7 +113,14 @@ set(HALIONBRIDGE_LIBRARY_SOURCES
 
 set(HALIONBRIDGE_STRICT_WARNING_OPTIONS)
 if(MSVC)
-    list(APPEND HALIONBRIDGE_STRICT_WARNING_OPTIONS /W4 /WX)
+    list(APPEND HALIONBRIDGE_STRICT_WARNING_OPTIONS
+        /W4
+        /WX
+        /permissive-
+        /Zc:__cplusplus
+        /Zc:preprocessor
+        /w44505 # Enable C4505: unreferenced local function has been removed.
+    )
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
     list(APPEND HALIONBRIDGE_STRICT_WARNING_OPTIONS -Wall -Wextra -Wpedantic -Werror)
 endif()
