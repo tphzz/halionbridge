@@ -2758,7 +2758,7 @@ int main(int argc, char* argv[])
 
     juce::UnitTestRunner runner;
     runner.setAssertOnFailure(false);
-    runner.setPassesAreLogged(true);
+    runner.setPassesAreLogged(false);
     runner.runTestsInCategory("halionbridge");
 
     int failures = 0;

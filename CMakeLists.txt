@@ -296,6 +296,7 @@ if(HALIONBRIDGE_BUILD_TESTS)
         add_test(NAME halionbridge_tests COMMAND halionbridge_tests)
         set_tests_properties(halionbridge_tests PROPERTIES
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            ENVIRONMENT "HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION=1"
         )
 
         if(HALIONBRIDGE_BUILD_CLI)
@@ -311,6 +312,9 @@ if(HALIONBRIDGE_BUILD_TESTS)
                         "-DHALIONBRIDGE_ARGS=${cli_args_joined}"
                         -P "${CMAKE_SOURCE_DIR}/cmake/expect_cli.cmake"
                 )
+                set_tests_properties("${test_name}" PROPERTIES
+                    ENVIRONMENT "HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION=1"
+                )
             endfunction()
 
             function(add_halionbridge_cli_reject test_name expected_exit reject_regex)
@@ -324,6 +328,9 @@ if(HALIONBRIDGE_BUILD_TESTS)
                         "-DHALIONBRIDGE_WORKING_DIRECTORY=${CMAKE_SOURCE_DIR}"
                         "-DHALIONBRIDGE_ARGS=${cli_args_joined}"
                         -P "${CMAKE_SOURCE_DIR}/cmake/expect_cli.cmake"
+                )
+                set_tests_properties("${test_name}" PROPERTIES
+                    ENVIRONMENT "HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION=1"
                 )
             endfunction()
 

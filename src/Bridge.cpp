@@ -56,6 +56,7 @@ constexpr int kDefaultBuildChunkSize = 1000;
 constexpr const char* kBuildStatusOkPresetFileName = "halionbridge_status_ok.vstpreset";
 constexpr const char* kBuildStatusFailedPresetFileName = "halionbridge_status_failed.vstpreset";
 constexpr const char* kPresetDirEnvironmentVariable = "HALIONBRIDGE_PRESET_DIR";
+constexpr const char* kForbidPluginInstantiationEnvironmentVariable = "HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION";
 constexpr const char* kRuntimeModuleFileName = "halionbridge_runtime.lua";
 constexpr const char* kBuilderModuleFileName = "halionbridge_builder.lua";
 constexpr const char* kPresetRemapModuleFileName = "halionbridge_preset_remap.lua";
@@ -332,6 +333,16 @@ bool clearEnvironmentVariable(const char* name)
 #else
     return unsetenv(name) == 0;
 #endif
+}
+
+bool isEnvironmentFlagEnabled(const char* name)
+{
+    const auto value = getEnvironmentVariableIfSet(name);
+    if (!value || value->isEmpty())
+        return false;
+
+    const auto normalized = value->trim().toLowerCase();
+    return normalized != "0" && normalized != "false" && normalized != "off" && normalized != "no";
 }
 
 juce::File getHalionUserScriptDirectory()
@@ -1638,6 +1649,13 @@ RunResult Bridge::Impl::runPresetRemapInvocation(const VstPresetRemapOptions& op
 bool Bridge::Impl::loadPlugin(const juce::File& pluginFile, const AppOptions& options)
 {
     setCrashDiagnosticPhase("loadPlugin: preparing plugin description");
+
+    if (isEnvironmentFlagEnabled(kForbidPluginInstantiationEnvironmentVariable))
+    {
+        log::error("HALion plugin instantiation is disabled by {}.", kForbidPluginInstantiationEnvironmentVariable);
+        return false;
+    }
+
     auto description = std::optional<juce::PluginDescription>();
     const auto preferredClassId = readVstPresetClassId(makeEmbeddedBootstrapPresetData());
 
