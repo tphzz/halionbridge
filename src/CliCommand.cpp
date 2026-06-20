@@ -94,7 +94,9 @@ void logDiagnostics(const std::vector<CliDiagnostic>& diagnostics)
 {
     for (const auto& diagnostic : diagnostics)
     {
-        if (diagnostic.level == CliDiagnosticLevel::warning)
+        if (diagnostic.level == CliDiagnosticLevel::info)
+            log::info("{}", diagnostic.message);
+        else if (diagnostic.level == CliDiagnosticLevel::warning)
             log::warn("{}", diagnostic.message);
         else
             log::error("{}", diagnostic.message);

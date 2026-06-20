@@ -323,8 +323,20 @@ void writeCliDiagnostics(std::ostream& output, const std::vector<halionbridge::d
         if (wroteAny)
             output << "\n";
 
-        output << (diagnostic.level == halionbridge::detail::CliDiagnosticLevel::warning ? "Warning:\n" : "Error:\n") << "  "
-               << diagnostic.message << "\n";
+        switch (diagnostic.level)
+        {
+        case halionbridge::detail::CliDiagnosticLevel::info:
+            output << "Info:\n";
+            break;
+        case halionbridge::detail::CliDiagnosticLevel::warning:
+            output << "Warning:\n";
+            break;
+        case halionbridge::detail::CliDiagnosticLevel::error:
+            output << "Error:\n";
+            break;
+        }
+
+        output << "  " << diagnostic.message << "\n";
         wroteAny = true;
     }
 
@@ -696,6 +708,8 @@ int main(int argc, char* argv[])
         }
 
         writeVersionHeader(std::cout);
+        std::cout << "\n";
+        writeCliDiagnostics(std::cout, runResult.diagnostics);
         return 0;
     }
 

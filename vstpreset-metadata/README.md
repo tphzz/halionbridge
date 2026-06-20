@@ -8,11 +8,17 @@ after preset generation with halionbridge's VSTPreset metadata CSV command.
 ```lua
 local attr = {
     MediaAuthor = "Imported Library",
+    MediaLibraryManufacturerName = "Library Manufacturer",
     MediaLibraryName = "Source Bank 0",
     MediaComment = "source_bank=0; source_program=0; source_class=kit",
+    MediaRating = 3,
+    MusicalArticulations = "Staccato",
     MusicalCategory = "Drum&Perc",
     MusicalInstrument = "Drum&Perc|Drumset",
+    MusicalMoods = "Energetic",
     MusicalProperties = "Kit",
+    MusicalStyle = "Electronic",
+    MusicalSubStyle = "Electronic|Breakbeat",
     VST3UnitTypePath = "program/layer",
 }
 ```
@@ -44,18 +50,33 @@ halionbridge vstpreset-metadata apply \
   --recursive
 ```
 
-`filename_path` is the match key. It must be a safe relative path below the
-input directory and uses forward slashes, for example
-`bank_000/000_Planet_Earth.vstpreset`. Apply mode is strict: every scanned
-`.vstpreset` must have one matching CSV row, and every CSV row must match a
-scanned preset. The input directory is never modified.
+The CSV file is UTF-8. Export writes UTF-8 text, and apply reads CSV path,
+preset-name, and metadata cells as UTF-8. When editing in spreadsheet software,
+save as UTF-8 CSV so names with curly quotes, accents, and other non-ASCII text
+round trip into filenames and metadata correctly.
+
+`filename_path` is the source match key. It must be a safe relative path below
+the input directory and uses forward slashes, for example
+`bank_000/000_Planet_Earth.vstpreset`. `target_preset_name` is the output preset
+filename stem. It is written in the same relative directory as `filename_path`,
+so `target_preset_name=Planet Earth` produces
+`bank_000/Planet Earth.vstpreset`. If `target_preset_name` is omitted or empty,
+apply preserves the source filename. Apply removes characters that are not
+portable across Windows and macOS from `target_preset_name` before writing the
+file, for example `WhY Me ?` becomes `WhY Me.vstpreset` and `SPICEBOY:-)`
+becomes `SPICEBOY-).vstpreset`. Apply mode is strict: every scanned `.vstpreset`
+must have one matching CSV row, every CSV row must match a scanned preset, target
+names must still contain a usable filename after sanitization, and renamed output
+paths must be unique after sanitization. The input directory is never modified.
 
 The command rewrites only the VST3 preset `Info` metadata chunk. HALion program
 state and other preset chunks are preserved byte-for-byte in the output files.
 When a metadata column is present in the CSV, an empty cell removes that
 attribute and a non-empty cell sets it. Metadata columns omitted from the CSV
 leave existing attributes unchanged. Existing CSV files are refused during
-export unless `--overwrite` is supplied.
+export unless `--overwrite` is supplied. Successful export/apply runs print an
+`Info:` summary with the number of processed `.vstpreset` files and the output
+CSV or preset directory path.
 
 ## General Rules
 
@@ -101,6 +122,24 @@ Good values:
 MediaLibraryName = "World Percussion Collection"
 ```
 
+### `MediaLibraryManufacturerName`
+
+Free-text library manufacturer shown as the MediaBay **Library Manufacturer**
+attribute.
+
+HALion distinguishes this from `MediaAuthor`. Use `MediaAuthor` for the sound
+designer, converter source, or preset author. Use `MediaLibraryManufacturerName`
+for the company or person that should appear as the library manufacturer. When
+building VST Sound libraries with HALion's Library Creator, this corresponds to
+the Library Creator **Manufacturer** property.
+
+Good values:
+
+```lua
+MediaLibraryManufacturerName = "Acme Instruments"
+MediaLibraryManufacturerName = "Jane Doe Soundware"
+```
+
 ### `MediaComment`
 
 Free-text comment shown as the MediaBay **Comment** attribute.
@@ -118,6 +157,17 @@ MediaComment = "Imported from source bank 0, program 0."
 
 Keep it short and stable. If the data must be machine-readable, prefer a simple
 key-value convention and keep the original data in a source CSV manifest.
+
+### `MediaRating`
+
+Integer MediaBay rating. HALion's guideline recommends `3` as a neutral
+starting point so users can raise or lower the rating later.
+
+Good values:
+
+```lua
+MediaRating = 3
+```
 
 ### `MusicalCategory`
 
@@ -278,6 +328,53 @@ MusicalProperties = "Moving|Warm"
 MusicalProperties = "Arpeggio"
 ```
 
+### `MusicalMoods`
+
+Pipe-separated MediaBay mood labels. Moods describe the emotional character of
+the sound.
+
+Good values:
+
+```lua
+MusicalMoods = "Energetic"
+MusicalMoods = "Dark|Aggressive"
+```
+
+### `MusicalArticulations`
+
+Pipe-separated MediaBay articulation labels. Use these for how a sound or
+instrument is played.
+
+Good values:
+
+```lua
+MusicalArticulations = "Staccato"
+MusicalArticulations = "Legato|Sustain"
+```
+
+### `MusicalStyle`
+
+MediaBay musical style root.
+
+Good values:
+
+```lua
+MusicalStyle = "Electronic"
+MusicalStyle = "Pop"
+```
+
+### `MusicalSubStyle`
+
+Pipe-shaped style/substyle value. HALion can derive the root style when the
+substyle is set first in the UI; in CSV form, write the full hierarchy.
+
+Good values:
+
+```lua
+MusicalSubStyle = "Electronic|Breakbeat"
+MusicalSubStyle = "Rock|Alternative"
+```
+
 For a strict standard-derived mapping, represent a kit through:
 
 ```lua
@@ -330,8 +427,10 @@ a conservative MediaBay mapping is:
 ```lua
 local attr = {
     MediaAuthor = "Imported Library",
+    MediaLibraryManufacturerName = "Library Manufacturer",
     MediaLibraryName = "Source Bank 0",
     MediaComment = "source_bank=0; source_program=0; source_class=kit",
+    MediaRating = 3,
     MusicalCategory = "Drum&Perc",
     MusicalInstrument = "Drum&Perc|Drumset",
     MusicalProperties = "Percussive",

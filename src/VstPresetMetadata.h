@@ -44,6 +44,7 @@ struct VstPresetMetadataResult
 struct VstPresetMetadataRecord
 {
     std::string filenamePath;
+    std::string targetPresetName;
     std::unordered_map<std::string, std::string> metadata;
 };
 

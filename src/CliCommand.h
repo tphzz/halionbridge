@@ -33,6 +33,7 @@ enum class CliParseErrorKind
 
 enum class CliDiagnosticLevel
 {
+    info,
     warning,
     error,
 };

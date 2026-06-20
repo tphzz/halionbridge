@@ -29,9 +29,14 @@ namespace
 {
 
 constexpr std::string_view kFilenamePathColumn = "filename_path";
-constexpr std::array<std::string_view, 7> kMetadataColumns = {
-    "MediaAuthor", "MediaLibraryName", "MediaComment", "MusicalCategory", "MusicalInstrument", "MusicalProperties", "VST3UnitTypePath"};
-constexpr std::array<std::string_view, 4> kHelperColumns = {"source_bank", "preset_number", "source_class", "preset_name"};
+constexpr std::string_view kTargetPresetNameColumn = "target_preset_name";
+constexpr std::array<std::string_view, 13> kMetadataColumns = {"MediaAuthor",      "MediaLibraryManufacturerName",
+                                                               "MediaLibraryName", "MediaComment",
+                                                               "MediaRating",      "MusicalArticulations",
+                                                               "MusicalCategory",  "MusicalInstrument",
+                                                               "MusicalMoods",     "MusicalProperties",
+                                                               "MusicalStyle",     "MusicalSubStyle",
+                                                               "VST3UnitTypePath"};
 constexpr std::string_view kVstPresetExtension = ".vstpreset";
 constexpr std::size_t kVstPresetHeaderSize = 48;
 constexpr std::size_t kVstPresetListEntrySize = 20;
@@ -81,6 +86,11 @@ void addError(std::vector<CliDiagnostic>& diagnostics, std::string message)
     addDiagnostic(diagnostics, CliDiagnosticLevel::error, std::move(message));
 }
 
+void addInfo(std::vector<CliDiagnostic>& diagnostics, std::string message)
+{
+    addDiagnostic(diagnostics, CliDiagnosticLevel::info, std::move(message));
+}
+
 std::vector<std::string> toMutableArgs(std::span<const std::string> args)
 {
     return {args.rbegin(), args.rend()};
@@ -125,9 +135,26 @@ std::string removeUtf8Bom(std::string text)
     return text;
 }
 
+std::filesystem::path pathFromUtf8(std::string_view text)
+{
+#if JUCE_WINDOWS
+    const auto juceText = juce::String::fromUTF8(text.data(), static_cast<int>(text.size()));
+    return std::filesystem::path(std::wstring(juceText.toWideCharPointer()));
+#else
+    return std::filesystem::path(std::string(text));
+#endif
+}
+
+std::string pathStringUtf8(const std::filesystem::path& path)
+{
+    const auto utf8Text = path.u8string();
+    return std::string(reinterpret_cast<const char*>(utf8Text.data()), utf8Text.size());
+}
+
 std::string genericPathString(const std::filesystem::path& path)
 {
-    auto text = path.generic_string();
+    const auto utf8Text = path.generic_u8string();
+    auto text = std::string(reinterpret_cast<const char*>(utf8Text.data()), utf8Text.size());
     while (!text.empty() && text.front() == '/')
         text.erase(text.begin());
     return text;
@@ -527,6 +554,16 @@ bool updateMetadataXml(const std::optional<std::string>& originalXml, const std:
         if (std::ranges::find(kMetadataColumns, std::string_view(id)) == kMetadataColumns.end())
             continue;
 
+        if (id == "MediaRating" && !trim(value).empty())
+        {
+            const auto ratingText = trim(value);
+            if (!std::ranges::all_of(ratingText, [](const unsigned char c) { return std::isdigit(c); }))
+            {
+                error = "MediaRating must be an integer.";
+                return false;
+            }
+        }
+
         if (auto* existing = findAttributeElement(*xml, id))
         {
             if (value.empty())
@@ -534,8 +571,7 @@ bool updateMetadataXml(const std::optional<std::string>& originalXml, const std:
             else
             {
                 existing->setAttribute("value", juce::String::fromUTF8(value.data(), static_cast<int>(value.size())));
-                if (!existing->hasAttribute("type"))
-                    existing->setAttribute("type", "string");
+                existing->setAttribute("type", id == "MediaRating" ? "int" : "string");
             }
             continue;
         }
@@ -545,7 +581,7 @@ bool updateMetadataXml(const std::optional<std::string>& originalXml, const std:
             auto* attribute = new juce::XmlElement("Attribute");
             attribute->setAttribute("id", juce::String::fromUTF8(id.data(), static_cast<int>(id.size())));
             attribute->setAttribute("value", juce::String::fromUTF8(value.data(), static_cast<int>(value.size())));
-            attribute->setAttribute("type", "string");
+            attribute->setAttribute("type", id == "MediaRating" ? "int" : "string");
             if (id == "VST3UnitTypePath")
                 attribute->setAttribute("flags", "hidden|writeProtected");
             xml->addChildElement(attribute);
@@ -909,7 +945,7 @@ std::optional<std::filesystem::path> safeRelativePathFromCsv(std::string text, s
     while (!text.empty() && text.front() == '/')
         text.erase(text.begin());
 
-    auto relative = std::filesystem::path(text).lexically_normal();
+    auto relative = pathFromUtf8(text).lexically_normal();
     if (!isSafeRelativePath(relative) || !hasVstPresetExtension(relative))
     {
         error = "CSV filename_path must be a safe relative .vstpreset path: " + text;
@@ -917,6 +953,56 @@ std::optional<std::filesystem::path> safeRelativePathFromCsv(std::string text, s
     }
 
     return relative;
+}
+
+bool hasVstPresetSuffix(std::string text)
+{
+    return toLowerAscii(std::move(text)).ends_with(kVstPresetExtension);
+}
+
+bool isPortableFilenameForbiddenCharacter(const char c)
+{
+    const auto byte = static_cast<unsigned char>(c);
+    return byte < 32 || c == '<' || c == '>' || c == ':' || c == '"' || c == '/' || c == '\\' || c == '|' || c == '?' || c == '*';
+}
+
+std::string sanitizeTargetPresetFilenameStem(std::string text)
+{
+    text = trim(std::move(text));
+    if (hasVstPresetSuffix(text))
+        text.resize(text.size() - std::string(kVstPresetExtension).size());
+
+    std::erase_if(text, isPortableFilenameForbiddenCharacter);
+    text = trim(std::move(text));
+    while (!text.empty() && (text.back() == '.' || text.back() == ' '))
+        text.pop_back();
+
+    return text;
+}
+
+std::optional<std::filesystem::path> makeOutputRelativePath(const std::filesystem::path& sourceRelativePath, std::string targetPresetName,
+                                                            std::string& error)
+{
+    if (trim(targetPresetName).empty())
+        targetPresetName = genericPathString(sourceRelativePath.stem());
+
+    targetPresetName = sanitizeTargetPresetFilenameStem(std::move(targetPresetName));
+
+    if (targetPresetName.empty() || targetPresetName == "." || targetPresetName == "..")
+    {
+        error = "target_preset_name does not contain a usable filename after sanitization.";
+        return std::nullopt;
+    }
+
+    auto outputRelative = sourceRelativePath.parent_path() / pathFromUtf8(targetPresetName + std::string(kVstPresetExtension));
+    outputRelative = outputRelative.lexically_normal();
+    if (!isSafeRelativePath(outputRelative) || !hasVstPresetExtension(outputRelative))
+    {
+        error = "target_preset_name does not produce a safe .vstpreset output path: " + targetPresetName;
+        return std::nullopt;
+    }
+
+    return outputRelative;
 }
 
 int runExportCommand(const VstPresetMetadataOptions& options, std::vector<CliDiagnostic>& diagnostics)
@@ -945,8 +1031,7 @@ int runExportCommand(const VstPresetMetadataOptions& options, std::vector<CliDia
             continue;
         }
 
-        metadata.emplace("preset_name", file.relativePath.stem().string());
-        records.push_back({file.relativePathText, std::move(metadata)});
+        records.push_back({file.relativePathText, genericPathString(file.relativePath.stem()), std::move(metadata)});
     }
 
     if (!diagnostics.empty())
@@ -959,6 +1044,8 @@ int runExportCommand(const VstPresetMetadataOptions& options, std::vector<CliDia
         return 1;
     }
 
+    addInfo(diagnostics, "Exported metadata for " + std::to_string(records.size()) + " .vstpreset file(s) to " +
+                             pathStringUtf8(options.metadataCsv) + ".");
     return 0;
 }
 
@@ -1006,6 +1093,8 @@ int runApplyCommand(const VstPresetMetadataOptions& options, std::vector<CliDiag
         return 1;
 
     std::map<std::string, VstPresetMetadataRecord> recordsByPath;
+    std::map<std::string, std::filesystem::path> outputRelativePathsByInput;
+    std::set<std::string> seenOutputRelativePaths;
     for (auto& record : records)
     {
         std::string pathError;
@@ -1019,6 +1108,23 @@ int runApplyCommand(const VstPresetMetadataOptions& options, std::vector<CliDiag
         const auto normalized = genericPathString(*relativePath);
         record.filenamePath = normalized;
         const auto key = toLowerAscii(normalized);
+        std::string outputPathError;
+        const auto outputRelativePath = makeOutputRelativePath(*relativePath, record.targetPresetName, outputPathError);
+        if (!outputRelativePath)
+        {
+            addError(diagnostics, outputPathError + " Row: " + normalized);
+            continue;
+        }
+
+        const auto outputKey = toLowerAscii(genericPathString(*outputRelativePath));
+        if (!seenOutputRelativePaths.insert(outputKey).second)
+        {
+            addError(diagnostics, "Multiple CSV rows target the same output preset path after case normalization: " +
+                                      genericPathString(*outputRelativePath));
+            continue;
+        }
+
+        outputRelativePathsByInput.emplace(key, *outputRelativePath);
         if (!recordsByPath.emplace(key, std::move(record)).second)
             addError(diagnostics, "Metadata CSV contains duplicate filename_path after case normalization: " + normalized);
     }
@@ -1043,12 +1149,17 @@ int runApplyCommand(const VstPresetMetadataOptions& options, std::vector<CliDiag
     {
         const auto key = toLowerAscii(file.relativePathText);
         const auto& record = recordsByPath.at(key);
-        const auto destination = *options.outputDirectory / file.relativePath;
+        const auto destination = *options.outputDirectory / outputRelativePathsByInput.at(key);
         if (!rewritePresetMetadata(file.sourcePath, destination, record.metadata, error))
             addError(diagnostics, error);
     }
 
-    return diagnostics.empty() ? 0 : 1;
+    if (!diagnostics.empty())
+        return 1;
+
+    addInfo(diagnostics, "Applied metadata to " + std::to_string(scan.files.size()) + " .vstpreset file(s) under " +
+                             pathStringUtf8(*options.outputDirectory) + ".");
+    return 0;
 }
 
 } // namespace
@@ -1102,6 +1213,9 @@ std::vector<VstPresetMetadataRecord> parseVstPresetMetadataCsv(std::string_view 
             continue;
         }
 
+        if (const auto targetIt = indices.find(std::string(kTargetPresetNameColumn)); targetIt != indices.end())
+            record.targetPresetName = row[targetIt->second];
+
         for (const auto& column : presentMetadataColumns)
             record.metadata.emplace(column, row[indices.at(column)]);
 
@@ -1114,9 +1228,8 @@ std::vector<VstPresetMetadataRecord> parseVstPresetMetadataCsv(std::string_view 
 std::string writeVstPresetMetadataCsv(std::span<const VstPresetMetadataRecord> records)
 {
     std::vector<std::string> headers;
-    for (const auto column : kHelperColumns)
-        headers.emplace_back(column);
     headers.emplace_back(kFilenamePathColumn);
+    headers.emplace_back(kTargetPresetNameColumn);
     for (const auto column : kMetadataColumns)
         headers.emplace_back(column);
 
@@ -1139,6 +1252,8 @@ std::string writeVstPresetMetadataCsv(std::span<const VstPresetMetadataRecord> r
             std::string value;
             if (headers[i] == kFilenamePathColumn)
                 value = record.filenamePath;
+            else if (headers[i] == kTargetPresetNameColumn)
+                value = record.targetPresetName;
             else if (auto it = record.metadata.find(headers[i]); it != record.metadata.end())
                 value = it->second;
 

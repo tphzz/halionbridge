@@ -1,19 +1,3 @@
-﻿source_bank,preset_number,source_class,preset_name,filename_path,MediaAuthor,MediaLibraryName,MediaComment,MusicalCategory,MusicalInstrument,MusicalProperties,VST3UnitTypePath
-0,0,kit,Planet Earth,bank_000/000_Planet_Earth.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=0; source_class=kit,Drum&Perc,Drum&Perc|Drumset,Kit,program/layer
-0,1,pr4,Kalimba Ens,bank_000/001_Kalimba_Ens.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=1; source_class=pr4,,,,program/layer
-0,2,pr4,Clay Tones,bank_000/002_Clay_Tones.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=2; source_class=pr4,,,,program/layer
-0,3,pr1,African Drms,bank_000/003_African_Drms.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=3; source_class=pr1,,,,program/layer
-0,4,pr1,Liquidity,bank_000/004_Liquidity.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=4; source_class=pr1,,,,program/layer
-0,5,pr4,Balifon Ntrl,bank_000/005_Balifon_Ntrl.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=5; source_class=pr4,,,,program/layer
-0,6,wnd,SuperBans,bank_000/006_SuperBans.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=6; source_class=wnd,,,,program/layer
-0,7,cmb,Gaohachet,bank_000/007_Gaohachet.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=7; source_class=cmb,,,,program/layer
-0,8,cmb,ExpressOh,bank_000/008_ExpressOh.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=8; source_class=cmb,,,,program/layer
-0,9,wnd,Brazidiz,bank_000/009_Brazidiz.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=9; source_class=wnd,,,,program/layer
-0,10,arp,DreamMallets,bank_000/010_DreamMallets.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=10; source_class=arp,,,Arpeggio,program/layer
-0,11,arp,No Age,bank_000/011_No_Age.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=11; source_class=arp,,,Arpeggio,program/layer
-0,12,arp,UduGhatmTube,bank_000/012_UduGhatmTube.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=12; source_class=arp,,,Arpeggio,program/layer
-0,13,cmb,Mute,bank_000/013_Mute.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=13; source_class=cmb,,,,program/layer
-0,14,pr4,Steel Drum,bank_000/014_Steel_Drum.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=14; source_class=pr4,,,,program/layer
-0,15,cmb,Bottlerina,bank_000/015_Bottlerina.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=15; source_class=cmb,,,,program/layer
-0,16,pr1,Udu/KimKim1,bank_000/016_Udu_KimKim1.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=16; source_class=pr1,,,,program/layer
-0,17,wnd,Okamia,bank_000/017_Okamia.vstpreset,Imported Library,Source Bank 0,source_bank=0; source_program=17; source_class=wnd,,,,program/layer
+filename_path,target_preset_name,MediaAuthor,MediaLibraryManufacturerName,MediaLibraryName,MediaComment,MediaRating,MusicalArticulations,MusicalCategory,MusicalInstrument,MusicalMoods,MusicalProperties,MusicalStyle,MusicalSubStyle,VST3UnitTypePath
+bank_000/000_Planet_Earth.vstpreset,Planet Earth,Imported Library,Library Manufacturer,Source Bank 0,source_bank=0; source_program=0; source_class=kit,3,,Drum&Perc,Drum&Perc|Drumset,,Kit,,,program/layer
+bank_000/001_Dream_Mallets.vstpreset,Dream Mallets,Imported Library,Library Manufacturer,Source Bank 0,source_bank=0; source_program=1; source_class=arp,3,,Chromatic Perc,Chromatic Perc|Mallett,Energetic,Arpeggio,Electronic,Electronic|Breakbeat,program/layer

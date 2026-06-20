@@ -710,6 +710,7 @@ class BridgeTests : public juce::UnitTest
 
             const auto written = halionbridge::detail::writeVstPresetMetadataCsv(records);
             expect(written.find("filename_path") != std::string::npos);
+            expect(written.find("target_preset_name") != std::string::npos);
             expect(written.find("\"Author, One\"") != std::string::npos);
             expect(written.find("\"Line \"\"quoted\"\"\"") != std::string::npos);
         }
@@ -729,6 +730,9 @@ class BridgeTests : public juce::UnitTest
                 std::string("\xEF\xBB\xBF"
                             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n"
                             "<MetaInfo><Attribute id=\"MediaAuthor\" value=\"Old Author\" type=\"string\"/>"
+                            "<Attribute id=\"MediaLibraryManufacturerName\" value=\"Old Manufacturer\" type=\"string\"/>"
+                            "<Attribute id=\"MediaRating\" value=\"3\" type=\"int\"/>"
+                            "<Attribute id=\"MusicalMoods\" value=\"Energetic\" type=\"string\"/>"
                             "<Attribute id=\"VST3UnitTypePath\" value=\"program\" type=\"string\" flags=\"hidden|writeProtected\"/>"
                             "<Attribute id=\"PlugInName\" value=\"HALion 7\" type=\"string\" flags=\"writeProtected\"/></MetaInfo>");
             expect(writeTestVstPreset(inputDir.getChildFile("alpha.vstpreset"), sourceXml));
@@ -742,17 +746,32 @@ class BridgeTests : public juce::UnitTest
             {
                 const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
                 expectEquals(result.exitCode, 0);
-                expect(result.diagnostics.empty());
+                expectEquals(static_cast<int>(result.diagnostics.size()), 1);
+                if (!result.diagnostics.empty())
+                {
+                    expect(result.diagnostics.front().level == halionbridge::detail::CliDiagnosticLevel::info);
+                    expect(result.diagnostics.front().message.find("Exported metadata for 1 .vstpreset file(s)") != std::string::npos);
+                }
             }
 
             auto exportedText = csvFile.loadFileAsString().toStdString();
+            const auto exportedHeader = exportedText.substr(0, exportedText.find('\n'));
+            expect(exportedHeader.find("filename_path") == 0);
+            expect(exportedHeader.find("target_preset_name") != std::string::npos);
+            expect(exportedHeader.find("source_bank") == std::string::npos);
+            expect(exportedHeader.find(",preset_name,") == std::string::npos);
             expect(exportedText.find("alpha.vstpreset") != std::string::npos);
+            expect(exportedText.find("alpha.vstpreset,alpha,Old Author") != std::string::npos);
             expect(exportedText.find("nested/beta.vstpreset") == std::string::npos);
             expect(exportedText.find("Old Author") != std::string::npos);
+            expect(exportedText.find("Old Manufacturer") != std::string::npos);
+            expect(exportedText.find("Energetic") != std::string::npos);
 
-            const auto applyCsv = "filename_path,MediaAuthor,MediaComment,VST3UnitTypePath\n"
-                                  "alpha.vstpreset,New Author,Reviewed,program/layer\n"
-                                  "nested/beta.vstpreset,New Author Nested,,program/layer\n";
+            const auto applyCsv =
+                "filename_path,target_preset_name,MediaAuthor,MediaLibraryManufacturerName,MediaComment,MediaRating,MusicalMoods,"
+                "VST3UnitTypePath\n"
+                "alpha.vstpreset,Renamed Alpha,New Author,New Manufacturer,Reviewed,4,Dark|Aggressive,program/layer\n"
+                "nested/beta.vstpreset,Renamed Beta.vstpreset,New Author Nested,New Manufacturer Nested,,5,Bright,program/layer\n";
             expect(csvFile.replaceWithText(applyCsv));
 
             parseResult = parseTestVstPresetMetadataOptions(
@@ -763,11 +782,18 @@ class BridgeTests : public juce::UnitTest
             {
                 const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
                 expectEquals(result.exitCode, 0);
-                expect(result.diagnostics.empty());
+                expectEquals(static_cast<int>(result.diagnostics.size()), 1);
+                if (!result.diagnostics.empty())
+                {
+                    expect(result.diagnostics.front().level == halionbridge::detail::CliDiagnosticLevel::info);
+                    expect(result.diagnostics.front().message.find("Applied metadata to 2 .vstpreset file(s)") != std::string::npos);
+                }
             }
 
-            expect(outputDir.getChildFile("alpha.vstpreset").existsAsFile());
-            expect(outputDir.getChildFile("nested").getChildFile("beta.vstpreset").existsAsFile());
+            expect(outputDir.getChildFile("Renamed Alpha.vstpreset").existsAsFile());
+            expect(outputDir.getChildFile("nested").getChildFile("Renamed Beta.vstpreset").existsAsFile());
+            expect(!outputDir.getChildFile("alpha.vstpreset").existsAsFile());
+            expect(!outputDir.getChildFile("nested").getChildFile("beta.vstpreset").existsAsFile());
 
             parseResult =
                 parseTestVstPresetMetadataOptions({"export", "--input-directory", outputDir.getFullPathName().toStdString(),
@@ -777,12 +803,21 @@ class BridgeTests : public juce::UnitTest
             {
                 const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
                 expectEquals(result.exitCode, 0);
-                expect(result.diagnostics.empty());
+                expectEquals(static_cast<int>(result.diagnostics.size()), 1);
+                if (!result.diagnostics.empty())
+                {
+                    expect(result.diagnostics.front().level == halionbridge::detail::CliDiagnosticLevel::info);
+                    expect(result.diagnostics.front().message.find("Exported metadata for 2 .vstpreset file(s)") != std::string::npos);
+                }
             }
 
             const auto outputCsvText = exportedOutputCsv.loadFileAsString().toStdString();
+            expect(outputCsvText.find("Renamed Alpha.vstpreset") != std::string::npos);
+            expect(outputCsvText.find("Renamed Alpha,New Author") != std::string::npos);
             expect(outputCsvText.find("New Author") != std::string::npos);
+            expect(outputCsvText.find("New Manufacturer") != std::string::npos);
             expect(outputCsvText.find("Reviewed") != std::string::npos);
+            expect(outputCsvText.find("Dark|Aggressive") != std::string::npos);
             expect(outputCsvText.find("PlugInName") == std::string::npos);
 
             inputDir.deleteRecursively();
@@ -802,6 +837,85 @@ class BridgeTests : public juce::UnitTest
 
             expect(writeTestVstPreset(inputDir.getChildFile("alpha.vstpreset"), ""));
             expect(csvFile.replaceWithText("filename_path,MediaAuthor\nother.vstpreset,Author\n"));
+
+            const auto parseResult = parseTestVstPresetMetadataOptions(
+                {"apply", "--input-directory", inputDir.getFullPathName().toStdString(), "--metadata-csv",
+                 csvFile.getFullPathName().toStdString(), "--output-directory", outputDir.getFullPathName().toStdString()});
+            expect(parseResult.options.has_value());
+            if (parseResult.options)
+            {
+                const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+                expectEquals(result.exitCode, 1);
+                expect(!result.diagnostics.empty());
+            }
+
+            inputDir.deleteRecursively();
+            outputDir.deleteRecursively();
+            csvFile.getParentDirectory().deleteRecursively();
+        }
+
+        beginTest("VSTPreset Metadata - apply sanitizes target preset names");
+        {
+            auto inputDir = cleanTempDirectory("halionbridge_metadata_sanitize_target_input");
+            auto outputDir = cleanTempDirectory("halionbridge_metadata_sanitize_target_output");
+            auto csvFile = cleanTempDirectory("halionbridge_metadata_sanitize_target_csv").getChildFile("metadata.csv");
+            inputDir.createDirectory();
+            csvFile.getParentDirectory().createDirectory();
+            outputDir.deleteRecursively();
+
+            const auto curlyApostropheName = std::string("Chickn\xE2\x80\x99") + "Dist";
+            const auto csvText = std::string("filename_path,target_preset_name,MediaAuthor\n") +
+                                 "why_me.vstpreset,WhY Me ?,Author\n"
+                                 "spiceboy.vstpreset,SPICEBOY:-).vstpreset,Author\n"
+                                 "chickn_dist.vstpreset," +
+                                 curlyApostropheName + ",Author\n";
+
+            expect(writeTestVstPreset(inputDir.getChildFile("why_me.vstpreset"), ""));
+            expect(writeTestVstPreset(inputDir.getChildFile("spiceboy.vstpreset"), ""));
+            expect(writeTestVstPreset(inputDir.getChildFile("chickn_dist.vstpreset"), ""));
+            expect(csvFile.replaceWithText(juce::String::fromUTF8(csvText.data(), static_cast<int>(csvText.size()))));
+
+            const auto parseResult = parseTestVstPresetMetadataOptions(
+                {"apply", "--input-directory", inputDir.getFullPathName().toStdString(), "--metadata-csv",
+                 csvFile.getFullPathName().toStdString(), "--output-directory", outputDir.getFullPathName().toStdString()});
+            expect(parseResult.options.has_value());
+            if (parseResult.options)
+            {
+                const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+                expectEquals(result.exitCode, 0);
+                expectEquals(static_cast<int>(result.diagnostics.size()), 1);
+                if (!result.diagnostics.empty())
+                {
+                    expect(result.diagnostics.front().level == halionbridge::detail::CliDiagnosticLevel::info);
+                    expect(result.diagnostics.front().message.find("Applied metadata to 3 .vstpreset file(s)") != std::string::npos);
+                }
+            }
+
+            expect(outputDir.getChildFile("WhY Me.vstpreset").existsAsFile());
+            expect(outputDir.getChildFile("SPICEBOY-).vstpreset").existsAsFile());
+            expect(outputDir.getChildFile(juce::String::fromUTF8((curlyApostropheName + ".vstpreset").c_str())).existsAsFile());
+            expect(!outputDir.getChildFile("WhY Me ?.vstpreset").existsAsFile());
+            expect(!outputDir.getChildFile("SPICEBOY:-).vstpreset").existsAsFile());
+
+            inputDir.deleteRecursively();
+            outputDir.deleteRecursively();
+            csvFile.getParentDirectory().deleteRecursively();
+        }
+
+        beginTest("VSTPreset Metadata - apply rejects duplicate target preset names");
+        {
+            auto inputDir = cleanTempDirectory("halionbridge_metadata_duplicate_target_input");
+            auto outputDir = cleanTempDirectory("halionbridge_metadata_duplicate_target_output");
+            auto csvFile = cleanTempDirectory("halionbridge_metadata_duplicate_target_csv").getChildFile("metadata.csv");
+            inputDir.createDirectory();
+            csvFile.getParentDirectory().createDirectory();
+            outputDir.deleteRecursively();
+
+            expect(writeTestVstPreset(inputDir.getChildFile("alpha.vstpreset"), ""));
+            expect(writeTestVstPreset(inputDir.getChildFile("beta.vstpreset"), ""));
+            expect(csvFile.replaceWithText("filename_path,target_preset_name,MediaAuthor\n"
+                                           "alpha.vstpreset,Duplicate,Author\n"
+                                           "beta.vstpreset,duplicate?.vstpreset,Author\n"));
 
             const auto parseResult = parseTestVstPresetMetadataOptions(
                 {"apply", "--input-directory", inputDir.getFullPathName().toStdString(), "--metadata-csv",
