@@ -1,3 +1,0 @@
-filename_path,target_preset_name,MediaAuthor,MediaLibraryManufacturerName,MediaLibraryName,MediaComment,MediaRating,MusicalArticulations,MusicalCategory,MusicalInstrument,MusicalMoods,MusicalProperties,MusicalStyle,MusicalSubStyle,VST3UnitTypePath
-bank_000/000_Planet_Earth.vstpreset,Planet Earth,Imported Library,Library Manufacturer,Source Bank 0,source_bank=0; source_program=0; source_class=kit,3,,Drum&Perc,Drum&Perc|Drumset,,Kit,,,program/layer
-bank_000/001_Dream_Mallets.vstpreset,Dream Mallets,Imported Library,Library Manufacturer,Source Bank 0,source_bank=0; source_program=1; source_class=arp,3,,Chromatic Perc,Chromatic Perc|Mallett,Energetic,Arpeggio,Electronic,Electronic|Breakbeat,program/layer
