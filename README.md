@@ -40,6 +40,7 @@ For source formats such as SFZ, halionbridge can also generate the Lua build dir
 * **Automated Converter Workflows:** Generate `.vstpreset` files automatically from structured data (e.g., CSV databases) or existing source formats (like SFZ) by bridging them through Lua build scripts.
 * **Reproducible Preset Libraries:** Treat HALion presets as reliable build artifacts that can be entirely regenerated from source Lua scripts and sample files.
 * **Preset Relocation:** Copy existing HALion `.vstpreset` trees and ask HALion to rewrite embedded sample path prefixes after moving a sample library.
+* **Metadata Batch Editing:** Export VSTPreset metadata to CSV, edit it in a spreadsheet or script, and apply it to copied preset files.
 * **CI and Headless Automation:** Execute scripted HALion builds seamlessly on build servers or CI pipelines without opening an audio device.
 * **Script Debugging:** Visually inspect scripted builds by using `--gui` or `--nokill` flags to keep the HALion GUI open after a run.
 
@@ -48,6 +49,7 @@ For source formats such as SFZ, halionbridge can also generate the Lua build dir
 * **Headless & Offline Processing Loop:** Runs as an embeddable standalone console app. It utilizes an offline manual processing loop to keep the HALion plugin alive while Lua scripts execute, completely bypassing the need for an active audio device.
 * **Native Format Conversion Setup:** Commands like `halionbridge convert sfz` parse source files or directories and generate a flat or explicitly routed `halionbridge` build directory. Users can review or edit these generated Lua scripts before triggering the final build.
 * **Preset Path Remapping:** `halionbridge remap-vstpresets` stages copied presets, lets HALion rewrite matching `SampleOsc.Filename` prefixes, and copies the remapped presets to a clean output directory.
+* **Preset Metadata CSV Editing:** `halionbridge vstpreset-metadata` reads and rewrites VST3 preset `Info` metadata offline, preserving the HALion program data in the preset file.
 * **Marker-Based Status Detection:** Tracks build progress and completion by waiting for HALion to write `.vstpreset` status markers into the build directory. Temporary progress markers are automatically cleaned up, while failure markers are preserved for diagnostics.
 * **Embedded Bootstrap:** Automatically applies the bundled HALion bootstrap `.vstpreset` internally, meaning users only ever need to pass their target build directory to the CLI.
 * **Generic Script Delegation:** The embedded builder acts as a blank slate; it simply loads the modules listed in `halionbridge_build.lua`, leaving the actual decision of *what* to build entirely to the Lua scripts.
@@ -73,6 +75,7 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 # Show command-specific help
 ./halionbridge build --help
 ./halionbridge convert sfz --help
+./halionbridge vstpreset-metadata --help
 
 # Show the Git-derived build version
 ./halionbridge --version
@@ -98,6 +101,19 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
   --output-directory /path/to/remapped-presets \
   --old-root /path/to/old-samples \
   --new-root /path/to/new-samples
+
+# Export editable VSTPreset metadata to CSV
+./halionbridge vstpreset-metadata export \
+  --input-directory /path/to/presets \
+  --metadata-csv /path/to/metadata.csv \
+  --recursive
+
+# Apply edited CSV metadata to copied preset files
+./halionbridge vstpreset-metadata apply \
+  --input-directory /path/to/presets \
+  --metadata-csv /path/to/metadata.csv \
+  --output-directory /path/to/metadata-updated-presets \
+  --recursive
 
 # Run the generic HALion Lua builder against a build directory
 ./halionbridge build /path/to/build-directory
@@ -136,6 +152,8 @@ Generated SFZ output includes an inspectable helper module, `halionbridge-sfz.lu
 Build scripts receive `ctx.output_dir`, which equals `ctx.script_dir` unless `--output-directory` is supplied. The builder's `ctx.save_preset()` wrapper redirects ordinary build-directory preset saves into `ctx.output_dir`, so generated SFZ builds and older scripts that save to `ctx.path_join(ctx.script_dir, "name.vstpreset")` can write their presets to a separate output tree without moving Lua source or samples.
 
 `remap-vstpresets` is for moved sample libraries. It scans the input directory recursively for `.vstpreset` files, works on temporary copies in HALion's user preset area, and leaves the input directory untouched. The output directory must be missing or empty; halionbridge refuses to merge into an existing tree. The command rewrites exact normalized path prefixes only, so choose `--old-root` and `--new-root` as directory roots, not partial filename fragments. If temporary cleanup fails after the remapped presets were copied, halionbridge prints a warning and the temporary staging directory can be deleted later.
+
+`vstpreset-metadata` is for spreadsheet-style metadata cleanup. `export` scans `.vstpreset` files, reads the VST3 `Info` XML metadata chunk, and writes a CSV with `filename_path` plus editable metadata columns: `MediaAuthor`, `MediaLibraryName`, `MediaComment`, `MusicalCategory`, `MusicalInstrument`, `MusicalProperties`, and `VST3UnitTypePath`. `apply` matches rows by `filename_path`, rewrites only the VST3 metadata chunk, preserves the other preset chunks byte-for-byte, and writes copied presets to an empty output directory. Scanning is top-level only unless `--recursive` is supplied. Existing CSV files are refused unless `export --overwrite` is used. Apply mode is strict: every scanned preset must have one CSV row, and every CSV row must match a scanned preset. See `vstpreset-metadata/README.md` for field meanings and recommended values.
 
 halionbridge prints timestamped console logs. The default log level is `info`, which keeps build script progress and important state changes visible while hiding host internals. Set `HALIONBRIDGE_LOGLEVEL=debug` when you need plugin loading, VST3 preset, and cleanup diagnostics. Supported values are `trace`, `debug`, `info`, `warn`, `error`, and `off`.
 

@@ -200,6 +200,14 @@ Private or release-only converters are build-time drop-ins. A private converter 
 
 The mode is deliberately conservative. The input directory is never modified. The output directory must be missing or empty before staging begins and is checked again before copy-back. Relative paths are preserved, unsafe paths are rejected, case-insensitive relative path collisions fail validation, staged/output copies never overwrite existing files, and both `--old-root` and `--new-root` are normalized to forward-slash directory prefixes before exact prefix matching. `--preset-plugin-code <H7|HS>` controls the `savePreset()` plugin code used for remapped presets; marker presets always use `H7`. Preset-remap runtime staging does not change the process current working directory or `HALIONBRIDGE_PRESET_DIR`; the generated runtime module carries the staging root as explicit Lua globals. After successful copy-back, temporary preset staging cleanup performs one guarded recursive delete of direct `halionbridge-remap-*` children of the HALion user preset root. If cleanup fails, the remap command remains successful, prints a warning, and leaves the temporary staging directory for later manual or stale-run cleanup. Later remap runs retry stale `halionbridge-remap-*` staging directories quietly before creating a new one.
 
+## VSTPreset Metadata Mode
+
+`halionbridge vstpreset-metadata` is an offline command for CSV-driven VSTPreset metadata edits. It does not instantiate HALion. The implementation parses the VST3 preset container header and chunk list, reads the `Info` chunk as XML with JUCE, updates only known metadata `Attribute` elements, and rebuilds the preset into a new file while copying all non-`Info` chunk bytes unchanged. This avoids `PresetFile::writeMetaInfo()`'s in-place limitation that the metadata chunk must already be the final chunk.
+
+`export` scans the input directory for `.vstpreset` files and writes a CSV containing `filename_path`, helper columns, and the supported metadata columns: `MediaAuthor`, `MediaLibraryName`, `MediaComment`, `MusicalCategory`, `MusicalInstrument`, `MusicalProperties`, and `VST3UnitTypePath`. Existing CSV files are refused unless `--overwrite` is supplied. `apply` reads that CSV, matches rows by normalized forward-slash `filename_path`, and writes updated preset copies to an empty or missing output directory. Scanning is top-level only unless `--recursive` is supplied. Apply mode is strict: duplicate paths, unsafe relative paths, case-insensitive collisions, unmatched CSV rows, scanned presets missing rows, invalid containers, and invalid metadata XML fail before or during output generation.
+
+The metadata writer treats present CSV metadata columns as authoritative. Non-empty cells set or update the matching XML attribute. Empty cells remove the matching attribute. Metadata columns omitted from the CSV are left untouched. Unknown XML attributes such as plugin identity fields are preserved, and unknown CSV columns are ignored on apply so spreadsheet helper columns do not affect preset output. Output preset files and CSV files are written through temporary files in the target directory and renamed into place only after a complete successful write.
+
 ## Orientation in the Code Base
 - `CMakeLists.txt`: Main CMake configuration file linking the JUCE 8 submodule and defining the C++23 requirements.
 - `external/JUCE`: The JUCE 8 framework git submodule.
@@ -222,8 +230,9 @@ The mode is deliberately conservative. The input directory is never modified. Th
 - `src/PluginScan.cpp`: HALion plugin-description construction, in-process plugin scanning, and isolated scan-worker implementation.
 - `src/ProgressMarkers.cpp`: Host-side progress marker decoding, logging, cleanup, and filename codec behavior shared by the processing loop and tests.
 - `src/PresetRemap.cpp`: Private recursive preset discovery, relative path validation, remap list/runtime text generation, output-directory checks, no-overwrite staging/copy-back helpers, and guarded staging cleanup helpers for `remap-vstpresets`.
+- `src/VstPresetMetadata.cpp`: Private CSV parser/writer, VSTPreset metadata scan/apply option parsing, VST3 container metadata parsing, and offline `Info` chunk rewrite support for `vstpreset-metadata`.
 - `cli/Main.cpp`: Thin command-line frontend, usage text, console logging, process entry point, and dispatch into private scan-worker and build-worker modes.
-- `tests/Tests.cpp`: Unit tests executable to verify argument parsing, HALion default plugin paths, build-status paths, runtime module generation, build file parsing, progress marker decoding, subprocess output buffering, and VST3 preset-container inspection.
+- `tests/Tests.cpp`: Unit tests executable to verify argument parsing, HALion default plugin paths, build-status paths, runtime module generation, build file parsing, progress marker decoding, subprocess output buffering, VST3 preset-container inspection, and VSTPreset metadata CSV/offline rewrite behavior.
 - `HALION-LUA.md`: Contract for the generic HALion Lua build script runner, build script modules, progress reporting, and status reporting.
 
 ## Code Quality Gates

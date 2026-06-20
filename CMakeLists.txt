@@ -107,6 +107,7 @@ set(HALIONBRIDGE_LIBRARY_SOURCES
     src/PluginScan.cpp
     src/ProgressMarkers.cpp
     src/PresetRemap.cpp
+    src/VstPresetMetadata.cpp
     "${HALIONBRIDGE_BUILD_INFO_CPP}"
 )
 
@@ -336,6 +337,26 @@ if(HALIONBRIDGE_BUILD_TESTS)
             add_halionbridge_cli_expect(halionbridge_cli_remap_missing_required_header 1 "^halionbridge [^\r\n]+" remap-vstpresets)
             add_halionbridge_cli_expect(halionbridge_cli_remap_missing_required_help 1 "halionbridge remap-vstpresets --input-directory" remap-vstpresets)
             add_halionbridge_cli_reject(halionbridge_cli_remap_missing_required_no_log_prefix 1 "\\[[0-9][0-9][0-9][0-9]-" remap-vstpresets)
+            add_halionbridge_cli_expect(halionbridge_cli_vstpreset_metadata_help 0
+                "halionbridge vstpreset-metadata export"
+                vstpreset-metadata --help
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_vstpreset_metadata_export_help 0
+                "halionbridge vstpreset-metadata export --input-directory"
+                vstpreset-metadata export --help
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_vstpreset_metadata_missing_required_header 1
+                "^halionbridge [^\r\n]+"
+                vstpreset-metadata export
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_vstpreset_metadata_missing_required_help 1
+                "halionbridge vstpreset-metadata export --input-directory"
+                vstpreset-metadata export
+            )
+            add_halionbridge_cli_reject(halionbridge_cli_vstpreset_metadata_missing_required_no_log_prefix 1
+                "\\[[0-9][0-9][0-9][0-9]-"
+                vstpreset-metadata export
+            )
             add_halionbridge_cli_expect(halionbridge_cli_unknown_command_help 1 "Usage:" does-not-exist)
             add_halionbridge_cli_expect(halionbridge_cli_convert_list_header 0 "^halionbridge [^\r\n]+" convert --list)
             add_halionbridge_cli_reject(halionbridge_cli_help_no_converter_visibility_hint 0

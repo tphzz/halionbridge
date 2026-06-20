@@ -18,6 +18,7 @@ enum class CliCommandKind
     init,
     convert,
     remapVstPresets,
+    vstPresetMetadata,
     buildWorker,
     scanPluginWorker,
     unknown,

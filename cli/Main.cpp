@@ -7,6 +7,7 @@
 #include "Log.h"
 #include "PathUtils.h"
 #include "PluginScan.h"
+#include "VstPresetMetadata.h"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
 #include "halionbridge_converters/Converter.h"
 #endif
@@ -72,6 +73,8 @@ void writeTopLevelHelp(std::ostream& output, const bool includeHeader = true)
            << "  halionbridge build <build-directory> [--output-directory <dir>] [options]\n"
            << "  halionbridge init <build-directory> [--overwrite]\n"
            << "  halionbridge remap-vstpresets --input-directory <dir> --output-directory <dir> --old-root <path> --new-root <path>\n"
+           << "  halionbridge vstpreset-metadata export --input-directory <dir> --metadata-csv <file> [options]\n"
+           << "  halionbridge vstpreset-metadata apply --input-directory <dir> --metadata-csv <file> --output-directory <dir> [options]\n"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
            << "  halionbridge convert <converter-id> <source-path> [output-directory] [converter-options]\n"
 #endif
@@ -98,6 +101,14 @@ void writeTopLevelHelp(std::ostream& output, const bool includeHeader = true)
            << "  --new-root <path>      New sample path prefix.\n"
            << "  --preset-plugin-code <H7|HS>\n"
            << "                          HALion savePreset plugin code for remapped presets. Defaults to H7.\n"
+           << "\n"
+           << "VSTPreset metadata command:\n"
+           << "  vstpreset-metadata export\n"
+           << "                          Scan .vstpreset files and write their metadata to a CSV file.\n"
+           << "  vstpreset-metadata apply\n"
+           << "                          Apply metadata CSV rows to copied .vstpreset files in an output directory.\n"
+           << "  --metadata-csv <file>   CSV file with filename_path and metadata columns.\n"
+           << "  --recursive             Scan subdirectories for .vstpreset files.\n"
            << "\n"
            << "Plugin selection:\n"
            << "  --plugin <path>          Override the HALion 7 VST3 path.\n"
@@ -200,6 +211,72 @@ void writeRemapVstPresetsHelp(std::ostream& output, const bool includeHeader = t
 void printRemapVstPresetsHelp()
 {
     writeRemapVstPresetsHelp(std::cout);
+}
+
+void writeVstPresetMetadataHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge vstpreset-metadata export --input-directory <dir> --metadata-csv <file> [options]\n"
+           << "  halionbridge vstpreset-metadata apply --input-directory <dir> --metadata-csv <file> --output-directory <dir> [options]\n"
+           << "\n"
+           << "Subcommands:\n"
+           << "  export  Scan .vstpreset files and write their metadata to a CSV file.\n"
+           << "  apply   Apply metadata CSV rows to copied .vstpreset files in an output directory.\n"
+           << "\n"
+           << "Options:\n"
+           << "  --input-directory <dir>  Directory scanned for .vstpreset files.\n"
+           << "  --metadata-csv <file>    CSV file with filename_path and metadata columns.\n"
+           << "  --output-directory <dir> Empty or missing destination directory for apply.\n"
+           << "  --recursive              Scan subdirectories.\n"
+           << "  --overwrite              Replace an existing CSV during export.\n";
+}
+
+void writeVstPresetMetadataExportHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge vstpreset-metadata export --input-directory <dir> --metadata-csv <file> [options]\n"
+           << "\n"
+           << "Options:\n"
+           << "  --input-directory <dir>  Directory scanned for .vstpreset files.\n"
+           << "  --metadata-csv <file>    CSV file to write.\n"
+           << "  --recursive              Scan subdirectories.\n"
+           << "  --overwrite              Replace an existing CSV.\n";
+}
+
+void writeVstPresetMetadataApplyHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge vstpreset-metadata apply --input-directory <dir> --metadata-csv <file> --output-directory <dir> [options]\n"
+           << "\n"
+           << "Options:\n"
+           << "  --input-directory <dir>  Directory scanned for .vstpreset files.\n"
+           << "  --metadata-csv <file>    CSV file with filename_path and metadata columns.\n"
+           << "  --output-directory <dir> Empty or missing destination directory for updated preset copies.\n"
+           << "  --recursive              Scan subdirectories.\n";
+}
+
+void printVstPresetMetadataHelp()
+{
+    writeVstPresetMetadataHelp(std::cout);
+}
+
+void writeVstPresetMetadataHelpForArgs(std::ostream& output, std::span<const std::string> args, const bool includeHeader = true)
+{
+    if (!args.empty() && args.front() == "export")
+        writeVstPresetMetadataExportHelp(output, includeHeader);
+    else if (!args.empty() && args.front() == "apply")
+        writeVstPresetMetadataApplyHelp(output, includeHeader);
+    else
+        writeVstPresetMetadataHelp(output, includeHeader);
 }
 
 void printVersion()
@@ -546,6 +623,13 @@ int main(int argc, char* argv[])
         return 0;
     }
 
+    if (juceArgs.size() > 0 && juceArgs[0] == "vstpreset-metadata" && hasHelpArgument(juceArgs, 1))
+    {
+        const auto metadataArgs = std::span<const std::string>(args.data() + 1, args.size() - 1);
+        writeVstPresetMetadataHelpForArgs(std::cout, metadataArgs);
+        return 0;
+    }
+
     if (command == halionbridge::detail::CliCommandKind::unknown)
     {
         writeVersionHeader(std::cerr);
@@ -586,6 +670,33 @@ int main(int argc, char* argv[])
 
         halionbridge::log::flush();
         return initResult.exitCode;
+    }
+
+    if (command == halionbridge::detail::CliCommandKind::vstPresetMetadata)
+    {
+        const auto metadataArgs = std::span<const std::string>(args.data() + 1, args.size() - 1);
+        auto parseResult = halionbridge::detail::parseVstPresetMetadataOptionsDetailed(metadataArgs);
+        if (!parseResult.options)
+        {
+            writeVersionHeader(std::cerr);
+            std::cerr << "\n";
+            writeCliDiagnostics(std::cerr, parseResult.diagnostics);
+            if (parseResult.errorKind == halionbridge::detail::CliParseErrorKind::syntax)
+                writeVstPresetMetadataHelpForArgs(std::cerr, metadataArgs, false);
+            return 1;
+        }
+
+        const auto runResult = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+        if (runResult.exitCode != 0)
+        {
+            writeVersionHeader(std::cerr);
+            std::cerr << "\n";
+            writeCliDiagnostics(std::cerr, runResult.diagnostics);
+            return runResult.exitCode;
+        }
+
+        writeVersionHeader(std::cout);
+        return 0;
     }
 
 #if HALIONBRIDGE_ENABLE_CONVERTERS

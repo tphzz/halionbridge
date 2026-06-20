@@ -231,6 +231,8 @@ CliCommandKind classifyCliCommand(std::span<const std::string> args) noexcept
         return CliCommandKind::convert;
     if (command == "remap-vstpresets")
         return CliCommandKind::remapVstPresets;
+    if (command == "vstpreset-metadata")
+        return CliCommandKind::vstPresetMetadata;
 
     return CliCommandKind::unknown;
 }

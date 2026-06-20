@@ -1,8 +1,9 @@
 # HALion VST Preset Metadata
 
-This note documents the metadata table passed as the fourth argument to HALion's
-Lua `savePreset(filename, layer, plugin, attr)` function. halionbridge allows to 
-pass a csv file listing the metadata for each file processed.
+This note documents the metadata table used for HALion preset MediaBay fields.
+The same keys can be passed as the fourth argument to HALion's Lua
+`savePreset(filename, layer, plugin, attr)` function, and they can be edited
+after preset generation with halionbridge's VSTPreset metadata CSV command.
 
 ```lua
 local attr = {
@@ -21,6 +22,40 @@ preset. The VST3 SDK defines the standard preset keys and predefined vocabularie
 for `MusicalInstrument`, `MusicalStyle`, and `MusicalCharacter`. HALion's
 MediaBay layer adds authoring rules, Library Creator behavior, and the exact
 Lua `savePreset` field names.
+
+## CSV Workflow
+
+Export metadata from an existing preset directory:
+
+```bash
+halionbridge vstpreset-metadata export \
+  --input-directory /path/to/presets \
+  --metadata-csv /path/to/metadata.csv \
+  --recursive
+```
+
+Edit the CSV in a spreadsheet or script, then apply it to copied presets:
+
+```bash
+halionbridge vstpreset-metadata apply \
+  --input-directory /path/to/presets \
+  --metadata-csv /path/to/metadata.csv \
+  --output-directory /path/to/metadata-updated-presets \
+  --recursive
+```
+
+`filename_path` is the match key. It must be a safe relative path below the
+input directory and uses forward slashes, for example
+`bank_000/000_Planet_Earth.vstpreset`. Apply mode is strict: every scanned
+`.vstpreset` must have one matching CSV row, and every CSV row must match a
+scanned preset. The input directory is never modified.
+
+The command rewrites only the VST3 preset `Info` metadata chunk. HALion program
+state and other preset chunks are preserved byte-for-byte in the output files.
+When a metadata column is present in the CSV, an empty cell removes that
+attribute and a non-empty cell sets it. Metadata columns omitted from the CSV
+leave existing attributes unchanged. Existing CSV files are refused during
+export unless `--overwrite` is supplied.
 
 ## General Rules
 

@@ -9,6 +9,7 @@
 #include "PluginScan.h"
 #include "PresetRemap.h"
 #include "ProgressMarkers.h"
+#include "VstPresetMetadata.h"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
 #include "halionbridge_converters/BuildDirectoryEmitter.h"
 #include "halionbridge_converters/Converter.h"
@@ -73,6 +74,78 @@ bool waitForFileToExist(const juce::File& file, const int timeoutMs)
     }
 
     return file.existsAsFile();
+}
+
+void appendTestU32(std::vector<unsigned char>& bytes, const std::uint32_t value)
+{
+    for (auto i = 0U; i < 4U; ++i)
+        bytes.push_back(static_cast<unsigned char>((value >> (i * 8U)) & 0xffU));
+}
+
+void appendTestU64(std::vector<unsigned char>& bytes, const std::uint64_t value)
+{
+    for (auto i = 0U; i < 8U; ++i)
+        bytes.push_back(static_cast<unsigned char>((value >> (i * 8U)) & 0xffU));
+}
+
+void appendTestText(std::vector<unsigned char>& bytes, std::string_view text)
+{
+    for (const auto c : text)
+        bytes.push_back(static_cast<unsigned char>(c));
+}
+
+bool writeTestVstPreset(const juce::File& file, std::string_view infoXml)
+{
+    struct Chunk
+    {
+        std::string id;
+        std::string data;
+        std::uint64_t offset = 0;
+    };
+
+    std::vector<Chunk> chunks;
+    chunks.push_back({"Prog", "program-data", 0});
+    if (!infoXml.empty())
+        chunks.push_back({"Info", std::string(infoXml), 0});
+
+    std::vector<unsigned char> bytes;
+    appendTestText(bytes, "VST3");
+    appendTestU32(bytes, 1);
+    appendTestText(bytes, "3B63D74130B34AE397AF92A9659137D5");
+    appendTestU64(bytes, 0);
+
+    for (auto& chunk : chunks)
+    {
+        chunk.offset = bytes.size();
+        appendTestText(bytes, chunk.data);
+    }
+
+    const auto listOffset = bytes.size();
+    appendTestText(bytes, "List");
+    appendTestU32(bytes, static_cast<std::uint32_t>(chunks.size()));
+    for (const auto& chunk : chunks)
+    {
+        appendTestText(bytes, chunk.id);
+        appendTestU64(bytes, chunk.offset);
+        appendTestU64(bytes, chunk.data.size());
+    }
+
+    for (auto i = 0U; i < 8U; ++i)
+        bytes[40 + i] = static_cast<unsigned char>((static_cast<std::uint64_t>(listOffset) >> (i * 8U)) & 0xffU);
+
+    auto stream = file.createOutputStream();
+    if (!stream)
+        return false;
+
+    stream->write(bytes.data(), static_cast<int>(bytes.size()));
+    stream->flush();
+    return stream->getStatus().wasOk();
+}
+
+halionbridge::detail::VstPresetMetadataOptionsParseResult parseTestVstPresetMetadataOptions(std::initializer_list<std::string> args)
+{
+    const auto values = std::vector<std::string>(args);
+    return halionbridge::detail::parseVstPresetMetadataOptionsDetailed(values);
 }
 
 #if HALIONBRIDGE_ENABLE_CONVERTERS
@@ -376,6 +449,7 @@ class BridgeTests : public juce::UnitTest
             expect(classify({"init", "C:/build"}) == halionbridge::detail::CliCommandKind::init);
             expect(classify({"convert", "sfz"}) == halionbridge::detail::CliCommandKind::convert);
             expect(classify({"remap-vstpresets"}) == halionbridge::detail::CliCommandKind::remapVstPresets);
+            expect(classify({"vstpreset-metadata"}) == halionbridge::detail::CliCommandKind::vstPresetMetadata);
             expect(classify({"--halionbridge-build-worker", "C:/build"}) == halionbridge::detail::CliCommandKind::buildWorker);
             expect(classify({"--halionbridge-scan-plugin"}) == halionbridge::detail::CliCommandKind::scanPluginWorker);
             expect(classify({"--halionbridge-cleanup-directory", "C:/temp"}) == halionbridge::detail::CliCommandKind::unknown);
@@ -616,6 +690,133 @@ class BridgeTests : public juce::UnitTest
             expect(stageDir.isDirectory());
 
             rootDir.deleteRecursively();
+        }
+
+        beginTest("VSTPreset Metadata - CSV parsing and writing");
+        {
+            const auto csv = "\xEF\xBB\xBF"
+                             "filename_path,MediaAuthor,MediaComment\n"
+                             "alpha.vstpreset,\"Author, One\",\"Line \"\"quoted\"\"\"\n";
+            std::vector<std::string> errors;
+            const auto records = halionbridge::detail::parseVstPresetMetadataCsv(csv, errors);
+            expect(errors.empty());
+            expectEquals(static_cast<int>(records.size()), 1);
+            if (!records.empty())
+            {
+                expectEquals(records.front().filenamePath, std::string("alpha.vstpreset"));
+                expectEquals(records.front().metadata.at("MediaAuthor"), std::string("Author, One"));
+                expectEquals(records.front().metadata.at("MediaComment"), std::string("Line \"quoted\""));
+            }
+
+            const auto written = halionbridge::detail::writeVstPresetMetadataCsv(records);
+            expect(written.find("filename_path") != std::string::npos);
+            expect(written.find("\"Author, One\"") != std::string::npos);
+            expect(written.find("\"Line \"\"quoted\"\"\"") != std::string::npos);
+        }
+
+        beginTest("VSTPreset Metadata - export and apply offline");
+        {
+            auto inputDir = cleanTempDirectory("halionbridge_metadata_input");
+            auto outputDir = cleanTempDirectory("halionbridge_metadata_output");
+            auto csvFile = cleanTempDirectory("halionbridge_metadata_csv").getChildFile("metadata.csv");
+            auto exportedOutputCsv = cleanTempDirectory("halionbridge_metadata_output_csv").getChildFile("metadata.csv");
+            inputDir.createDirectory();
+            outputDir.deleteRecursively();
+            csvFile.getParentDirectory().createDirectory();
+            exportedOutputCsv.getParentDirectory().createDirectory();
+
+            const auto sourceXml =
+                std::string("\xEF\xBB\xBF"
+                            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n"
+                            "<MetaInfo><Attribute id=\"MediaAuthor\" value=\"Old Author\" type=\"string\"/>"
+                            "<Attribute id=\"VST3UnitTypePath\" value=\"program\" type=\"string\" flags=\"hidden|writeProtected\"/>"
+                            "<Attribute id=\"PlugInName\" value=\"HALion 7\" type=\"string\" flags=\"writeProtected\"/></MetaInfo>");
+            expect(writeTestVstPreset(inputDir.getChildFile("alpha.vstpreset"), sourceXml));
+            expect(inputDir.getChildFile("nested").createDirectory());
+            expect(writeTestVstPreset(inputDir.getChildFile("nested").getChildFile("beta.vstpreset"), sourceXml));
+
+            auto parseResult = parseTestVstPresetMetadataOptions({"export", "--input-directory", inputDir.getFullPathName().toStdString(),
+                                                                  "--metadata-csv", csvFile.getFullPathName().toStdString()});
+            expect(parseResult.options.has_value());
+            if (parseResult.options)
+            {
+                const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+                expectEquals(result.exitCode, 0);
+                expect(result.diagnostics.empty());
+            }
+
+            auto exportedText = csvFile.loadFileAsString().toStdString();
+            expect(exportedText.find("alpha.vstpreset") != std::string::npos);
+            expect(exportedText.find("nested/beta.vstpreset") == std::string::npos);
+            expect(exportedText.find("Old Author") != std::string::npos);
+
+            const auto applyCsv = "filename_path,MediaAuthor,MediaComment,VST3UnitTypePath\n"
+                                  "alpha.vstpreset,New Author,Reviewed,program/layer\n"
+                                  "nested/beta.vstpreset,New Author Nested,,program/layer\n";
+            expect(csvFile.replaceWithText(applyCsv));
+
+            parseResult = parseTestVstPresetMetadataOptions(
+                {"apply", "--input-directory", inputDir.getFullPathName().toStdString(), "--metadata-csv",
+                 csvFile.getFullPathName().toStdString(), "--output-directory", outputDir.getFullPathName().toStdString(), "--recursive"});
+            expect(parseResult.options.has_value());
+            if (parseResult.options)
+            {
+                const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+                expectEquals(result.exitCode, 0);
+                expect(result.diagnostics.empty());
+            }
+
+            expect(outputDir.getChildFile("alpha.vstpreset").existsAsFile());
+            expect(outputDir.getChildFile("nested").getChildFile("beta.vstpreset").existsAsFile());
+
+            parseResult =
+                parseTestVstPresetMetadataOptions({"export", "--input-directory", outputDir.getFullPathName().toStdString(),
+                                                   "--metadata-csv", exportedOutputCsv.getFullPathName().toStdString(), "--recursive"});
+            expect(parseResult.options.has_value());
+            if (parseResult.options)
+            {
+                const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+                expectEquals(result.exitCode, 0);
+                expect(result.diagnostics.empty());
+            }
+
+            const auto outputCsvText = exportedOutputCsv.loadFileAsString().toStdString();
+            expect(outputCsvText.find("New Author") != std::string::npos);
+            expect(outputCsvText.find("Reviewed") != std::string::npos);
+            expect(outputCsvText.find("PlugInName") == std::string::npos);
+
+            inputDir.deleteRecursively();
+            outputDir.deleteRecursively();
+            csvFile.getParentDirectory().deleteRecursively();
+            exportedOutputCsv.getParentDirectory().deleteRecursively();
+        }
+
+        beginTest("VSTPreset Metadata - strict apply rejects mismatched CSV");
+        {
+            auto inputDir = cleanTempDirectory("halionbridge_metadata_strict_input");
+            auto outputDir = cleanTempDirectory("halionbridge_metadata_strict_output");
+            auto csvFile = cleanTempDirectory("halionbridge_metadata_strict_csv").getChildFile("metadata.csv");
+            inputDir.createDirectory();
+            csvFile.getParentDirectory().createDirectory();
+            outputDir.deleteRecursively();
+
+            expect(writeTestVstPreset(inputDir.getChildFile("alpha.vstpreset"), ""));
+            expect(csvFile.replaceWithText("filename_path,MediaAuthor\nother.vstpreset,Author\n"));
+
+            const auto parseResult = parseTestVstPresetMetadataOptions(
+                {"apply", "--input-directory", inputDir.getFullPathName().toStdString(), "--metadata-csv",
+                 csvFile.getFullPathName().toStdString(), "--output-directory", outputDir.getFullPathName().toStdString()});
+            expect(parseResult.options.has_value());
+            if (parseResult.options)
+            {
+                const auto result = halionbridge::detail::runVstPresetMetadataCommand(*parseResult.options);
+                expectEquals(result.exitCode, 1);
+                expect(!result.diagnostics.empty());
+            }
+
+            inputDir.deleteRecursively();
+            outputDir.deleteRecursively();
+            csvFile.getParentDirectory().deleteRecursively();
         }
 
         beginTest("Build Worker - argument parsing and command construction");
