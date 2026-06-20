@@ -338,6 +338,14 @@ if(HALIONBRIDGE_BUILD_TESTS)
             add_halionbridge_cli_reject(halionbridge_cli_remap_missing_required_no_log_prefix 1 "\\[[0-9][0-9][0-9][0-9]-" remap-vstpresets)
             add_halionbridge_cli_expect(halionbridge_cli_unknown_command_help 1 "Usage:" does-not-exist)
             add_halionbridge_cli_expect(halionbridge_cli_convert_list_header 0 "^halionbridge [^\r\n]+" convert --list)
+            add_halionbridge_cli_reject(halionbridge_cli_help_no_converter_visibility_hint 0
+                "public converter|incognito|hidden converter|unlisted converter"
+                --help
+            )
+            add_halionbridge_cli_reject(halionbridge_cli_convert_list_no_converter_visibility_hint 0
+                "public converter|incognito|hidden converter|unlisted converter"
+                convert --list
+            )
 
             if(HALIONBRIDGE_ENABLE_CONVERTERS)
                 add_halionbridge_cli_expect(halionbridge_cli_convert_help 0 "halionbridge convert <converter-id>" convert --help)
