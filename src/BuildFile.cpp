@@ -147,7 +147,8 @@ InitCommandResult runInitCommand(const juce::StringArray& args)
         }
         else if (arg.startsWith("-"))
         {
-            commandResult.message = "Unknown init argument: " + arg + "\nRun halionbridge --help to see available options.";
+            commandResult.message = "Unknown init argument: " + arg;
+            commandResult.appendHelp = true;
             return commandResult;
         }
         else
@@ -155,6 +156,7 @@ InitCommandResult runInitCommand(const juce::StringArray& args)
             if (buildDirectory)
             {
                 commandResult.message = "Provide exactly one build directory for halionbridge init.";
+                commandResult.appendHelp = true;
                 return commandResult;
             }
 
@@ -165,6 +167,7 @@ InitCommandResult runInitCommand(const juce::StringArray& args)
     if (!buildDirectory)
     {
         commandResult.message = "halionbridge init requires a build directory.";
+        commandResult.appendHelp = true;
         return commandResult;
     }
 

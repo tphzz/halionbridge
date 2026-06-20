@@ -21,6 +21,7 @@ struct InitCommandResult
     juce::String message;
     juce::String warning;
     std::vector<juce::String> moduleNames;
+    bool appendHelp = false;
 };
 
 std::vector<juce::File> findTopLevelLuaBuildScripts(const juce::File& directory);

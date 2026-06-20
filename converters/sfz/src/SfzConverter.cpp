@@ -1355,6 +1355,74 @@ std::string helpText()
            "  --help, -h              Show this help and exit.\n";
 }
 
+ConverterArgumentParseResult validateArguments(std::span<const std::string> args)
+{
+    auto result = ConverterArgumentParseResult{};
+    std::vector<std::string> positional;
+
+    const auto fail = [&result](const ConverterArgumentErrorKind kind, Diagnostic diagnostic)
+    {
+        result.exitCode = 1;
+        result.errorKind = kind;
+        result.diagnostics.push_back(std::move(diagnostic));
+    };
+
+    for (size_t i = 0; i < args.size(); ++i)
+    {
+        const auto& arg = args[i];
+
+        if (arg == "--help" || arg == "-h")
+            return result;
+
+        if (arg == "--recursive" || arg == "--overwrite")
+            continue;
+
+        if (arg == "--name")
+        {
+            if (i + 1 >= args.size())
+            {
+                fail(ConverterArgumentErrorKind::syntax, makeError({}, "argument", "--name requires a value."));
+                return result;
+            }
+
+            ++i;
+            continue;
+        }
+
+        if (!arg.empty() && arg[0] == '-')
+        {
+            fail(ConverterArgumentErrorKind::syntax, makeError({}, "argument", "Unknown sfz converter argument: " + arg));
+            return result;
+        }
+
+        positional.push_back(arg);
+    }
+
+    if (positional.empty() || positional.size() > 2)
+    {
+        fail(ConverterArgumentErrorKind::syntax,
+             makeError({}, "argument", "halionbridge convert sfz requires a source directory and optional output directory."));
+        return result;
+    }
+
+    std::error_code error;
+    if (!std::filesystem::exists(positional[0], error))
+    {
+        fail(ConverterArgumentErrorKind::validation,
+             makeError(positional[0], "source-missing", "SFZ source directory does not exist: " + positional[0]));
+        return result;
+    }
+
+    if (!std::filesystem::is_directory(positional[0], error))
+    {
+        fail(ConverterArgumentErrorKind::validation,
+             makeError(positional[0], "source-not-directory", "SFZ source path is not a directory: " + positional[0]));
+        return result;
+    }
+
+    return result;
+}
+
 ConverterResult runConverterWithContext(std::span<const std::string> args, const ConverterRunContext& context)
 {
     auto result = ConverterResult{};
@@ -1598,7 +1666,7 @@ ConversionResult convertDirectory(const ConversionOptions& options)
 void registerConverter(ConverterRegistry& registry)
 {
     registry.registerConverter(ConverterDefinition{"sfz", "SFZ", "Generate HALion Lua build scripts from SFZ directories.", runConverter,
-                                                   runConverterWithContext, helpText});
+                                                   runConverterWithContext, helpText, validateArguments});
 }
 
 } // namespace halionbridge::converters::sfz

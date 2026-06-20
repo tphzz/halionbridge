@@ -173,6 +173,11 @@ class BridgeTests : public juce::UnitTest
             auto options = halionbridge::Bridge::parseArguments(args);
             expect(!options.has_value());
 
+            const auto parseResult = halionbridge::detail::parseBuildOptionsDetailed(args);
+            expect(!parseResult.options.has_value());
+            expect(parseResult.errorKind == halionbridge::detail::CliParseErrorKind::syntax);
+            expect(!parseResult.diagnostics.empty());
+
             halionbridge::Bridge bridge;
             expect(bridge.runDetailed(halionbridge::AppOptions{}) == halionbridge::RunResult::invalidOptions);
         }
@@ -236,6 +241,11 @@ class BridgeTests : public juce::UnitTest
             std::vector<std::string> args = {missingDirectory.getFullPathName().toStdString()};
             auto options = halionbridge::Bridge::parseArguments(args);
             expect(!options.has_value());
+
+            const auto parseResult = halionbridge::detail::parseBuildOptionsDetailed(args);
+            expect(!parseResult.options.has_value());
+            expect(parseResult.errorKind == halionbridge::detail::CliParseErrorKind::validation);
+            expect(!parseResult.diagnostics.empty());
         }
 
         beginTest("Argument Parsing - Timeout seconds");
@@ -320,7 +330,7 @@ class BridgeTests : public juce::UnitTest
                 expect(options.has_value());
                 if (options)
                 {
-                    expectEquals(options->buildChunkSize, 15);
+                    expectEquals(options->buildChunkSize, 1000);
                     expect(!options->failFast);
                 }
             }
@@ -463,6 +473,27 @@ class BridgeTests : public juce::UnitTest
                                                                         "--timeout-seconds", "5"})
                         .has_value());
 
+            {
+                const auto parseResult = halionbridge::detail::parseVstPresetRemapOptionsDetailed({});
+                expect(!parseResult.options.has_value());
+                expect(parseResult.errorKind == halionbridge::detail::CliParseErrorKind::syntax);
+                expect(!parseResult.diagnostics.empty());
+            }
+
+            {
+                auto missingInput = cleanTempDirectory("halionbridge_remap_missing_input");
+                missingInput.deleteRecursively();
+
+                const auto args = std::vector<std::string>{"--input-directory",  missingInput.getFullPathName().toStdString(),
+                                                           "--output-directory", outputDir.getFullPathName().toStdString(),
+                                                           "--old-root",         "C:/old",
+                                                           "--new-root",         "D:/new"};
+                const auto parseResult = halionbridge::detail::parseVstPresetRemapOptionsDetailed(args);
+                expect(!parseResult.options.has_value());
+                expect(parseResult.errorKind == halionbridge::detail::CliParseErrorKind::validation);
+                expect(!parseResult.diagnostics.empty());
+            }
+
             inputDir.deleteRecursively();
             outputDir.deleteRecursively();
         }
@@ -597,6 +628,7 @@ class BridgeTests : public juce::UnitTest
 
             auto pluginFile = tempDir.getChildFile("HALion 7.vst3");
             expect(pluginFile.replaceWithText("plugin"));
+            auto resultFile = tempDir.getChildFile("worker-result.txt");
 
             auto workerArgs = std::vector<std::string>{halionbridge::detail::kBuildWorkerArgument,
                                                        tempDir.getFullPathName().toStdString(),
@@ -612,6 +644,8 @@ class BridgeTests : public juce::UnitTest
                                                        outputDir.getFullPathName().toStdString(),
                                                        "--timeout-seconds",
                                                        "5",
+                                                       "--worker-result-file",
+                                                       resultFile.getFullPathName().toStdString(),
                                                        "--force-scan"};
             auto options = halionbridge::detail::parseBuildWorkerArguments(workerArgs);
 
@@ -625,6 +659,10 @@ class BridgeTests : public juce::UnitTest
                 expectEquals(options->timeoutSeconds, 5);
                 expect(options->forceScan);
                 expect(options->pluginPathOverride.has_value());
+                const auto& parsedResultFile = halionbridge::detail::AppOptionsAccess::buildWorkerResultFile(*options);
+                expect(parsedResultFile.has_value());
+                if (parsedResultFile)
+                    expect(*parsedResultFile == std::filesystem::path(resultFile.getFullPathName().toStdString()));
 
                 const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
                 options->executableFile = halionbridge::detail::toStdPath(executable);
@@ -975,8 +1013,26 @@ class BridgeTests : public juce::UnitTest
 
             const auto converters = registry.list();
             expect(!converters.empty());
-            expect(registry.find("sfz") != nullptr);
+            const auto* sfzConverter = registry.find("sfz");
+            expect(sfzConverter != nullptr);
             expect(registry.find("missing") == nullptr);
+            if (sfzConverter != nullptr)
+            {
+                expect(sfzConverter->validateArguments != nullptr);
+                const auto emptyArgs = std::vector<std::string>{};
+                const auto missingRequired = sfzConverter->validateArguments(emptyArgs);
+                expectEquals(missingRequired.exitCode, 1);
+                expect(missingRequired.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax);
+                expect(!missingRequired.diagnostics.empty());
+
+                const auto missingSourceDirectory = cleanTempDirectory("halionbridge_sfz_missing_preflight");
+                missingSourceDirectory.deleteRecursively();
+                const auto missingSourceArgs = std::vector<std::string>{missingSourceDirectory.getFullPathName().toStdString()};
+                const auto missingSource = sfzConverter->validateArguments(missingSourceArgs);
+                expectEquals(missingSource.exitCode, 1);
+                expect(missingSource.errorKind == halionbridge::converters::ConverterArgumentErrorKind::validation);
+                expect(!missingSource.diagnostics.empty());
+            }
 
             auto duplicate = halionbridge::converters::ConverterDefinition{
                 "sfz", "Duplicate", "Duplicate", converters.front().run, converters.front().runWithContext, nullptr};

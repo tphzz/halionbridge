@@ -70,6 +70,10 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 # Show command-line help
 ./halionbridge --help
 
+# Show command-specific help
+./halionbridge build --help
+./halionbridge convert sfz --help
+
 # Show the Git-derived build version
 ./halionbridge --version
 
@@ -104,7 +108,7 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 # Explicitly wait forever when manually inspecting a problematic build.
 ./halionbridge build /path/to/build-directory --no-timeout
 
-# Build scripts run up to 15 scripts per HALion process by default and continue after failed chunks.
+# Build scripts run up to 1000 scripts per HALion process by default and continue after failed chunks.
 # Use --build-chunk-size 1 for maximum isolation, or tune chunk size when desired.
 ./halionbridge build /path/to/build-directory --build-chunk-size 30
 ./halionbridge build /path/to/build-directory --fail-fast
@@ -119,6 +123,8 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 # Close the GUI window or press Ctrl+C to stop inspection and clean up.
 ./halionbridge build /path/to/build-directory --gui --nokill
 ```
+
+Every halionbridge invocation starts by printing `halionbridge <version>`. Help screens and command-line argument errors use plain text below that header. Missing required arguments print the specific error and the relevant command help; valid command arguments that point to missing files or directories print only the focused validation error.
 
 The SFZ converter is a setup step: it generates normal Lua build files and does not launch HALion. When no output directory is passed, generated files are written flat beside the source `.sfz` files; otherwise they are written to the requested build directory. Existing generated files are refused unless `--overwrite` is supplied. Source names are converted to safe ASCII preset filenames; common musical accidentals such as `#` and `^` become readable words, and remaining duplicate preset names receive deterministic numeric suffixes. Generated build files are staged before commit so a write failure does not leave a half-updated build directory.
 
