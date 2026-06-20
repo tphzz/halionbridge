@@ -46,7 +46,7 @@ For source formats such as SFZ, halionbridge can also generate the Lua build dir
 ### Features
 
 * **Headless & Offline Processing Loop:** Runs as an embeddable standalone console app. It utilizes an offline manual processing loop to keep the HALion plugin alive while Lua scripts execute, completely bypassing the need for an active audio device.
-* **Native Format Conversion Setup:** Commands like `halionbridge convert sfz` parse source directories and generate a flat or explicitly routed `halionbridge` build directory. Users can review or edit these generated Lua scripts before triggering the final build.
+* **Native Format Conversion Setup:** Commands like `halionbridge convert sfz` parse source files or directories and generate a flat or explicitly routed `halionbridge` build directory. Users can review or edit these generated Lua scripts before triggering the final build.
 * **Preset Path Remapping:** `halionbridge remap-vstpresets` stages copied presets, lets HALion rewrite matching `SampleOsc.Filename` prefixes, and copies the remapped presets to a clean output directory.
 * **Marker-Based Status Detection:** Tracks build progress and completion by waiting for HALion to write `.vstpreset` status markers into the build directory. Temporary progress markers are automatically cleaned up, while failure markers are preserved for diagnostics.
 * **Embedded Bootstrap:** Automatically applies the bundled HALion bootstrap `.vstpreset` internally, meaning users only ever need to pass their target build directory to the CLI.
@@ -82,6 +82,9 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 
 # Generate halionbridge Lua build files next to top-level .sfz files
 ./halionbridge convert sfz /path/to/sfz-source-directory
+
+# Generate from one .sfz file
+./halionbridge convert sfz /path/to/instrument.sfz
 
 # Or write generated build files to a separate directory
 ./halionbridge convert sfz /path/to/sfz-source-directory /path/to/generated-build-directory
@@ -126,7 +129,7 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 
 Every halionbridge invocation starts by printing `halionbridge <version>`. Help screens and command-line argument errors use plain text below that header. Missing required arguments print the specific error and the relevant command help; valid command arguments that point to missing files or directories print only the focused validation error.
 
-The SFZ converter is a setup step: it generates normal Lua build files and does not launch HALion. When no output directory is passed, generated files are written flat beside the source `.sfz` files; otherwise they are written to the requested build directory. Existing generated files are refused unless `--overwrite` is supplied. Source names are converted to safe ASCII preset filenames; common musical accidentals such as `#` and `^` become readable words, and remaining duplicate preset names receive deterministic numeric suffixes. Generated build files are staged before commit so a write failure does not leave a half-updated build directory.
+The SFZ converter is a setup step: it generates normal Lua build files and does not launch HALion. Its source path can be a single `.sfz` file or a directory of `.sfz` files. When no output directory is passed, generated files are written beside the source `.sfz` file or flat into the source directory; otherwise they are written to the requested build directory. Existing generated files are refused unless `--overwrite` is supplied. Source names are converted to safe ASCII preset filenames; common musical accidentals such as `#` and `^` become readable words, and remaining duplicate preset names receive deterministic numeric suffixes. Generated build files are staged before commit so a write failure does not leave a half-updated build directory.
 
 Generated SFZ output includes an inspectable helper module, `halionbridge-sfz.lua`, plus one build entrypoint script per source `.sfz`. The current converter covers the common sample-mapping path: sample filenames, key/velocity ranges, root keys, playback ranges, sustain loops, gain, pan, static amplitude envelopes, static pitch/tuning, a simple static pitch-envelope subset, and rough static filter approximations. Unsupported or unverified SFZ features are reported as warnings instead of being silently treated as exact conversions. Detailed mapping notes and current parity limits live in `DEVELOPMENT.md`.
 

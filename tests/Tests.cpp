@@ -1019,6 +1019,8 @@ class BridgeTests : public juce::UnitTest
             if (sfzConverter != nullptr)
             {
                 expect(sfzConverter->validateArguments != nullptr);
+                expect(sfzConverter->visibility == halionbridge::converters::ConverterVisibility::listed);
+                expect(sfzConverter->sourcePathKind == halionbridge::converters::ConverterSourcePathKind::fileOrDirectory);
                 const auto emptyArgs = std::vector<std::string>{};
                 const auto missingRequired = sfzConverter->validateArguments(emptyArgs);
                 expectEquals(missingRequired.exitCode, 1);
@@ -1047,6 +1049,20 @@ class BridgeTests : public juce::UnitTest
                 { return halionbridge::converters::ConverterResult{0, {}}; },
                 nullptr};
             expect(registry.registerConverter(contextOnly));
+
+            auto hidden = halionbridge::converters::ConverterDefinition{"hidden",
+                                                                        "Hidden",
+                                                                        "Hidden test converter",
+                                                                        [](std::span<const std::string>) { return halionbridge::converters::ConverterResult{0, {}}; },
+                                                                        nullptr,
+                                                                        nullptr};
+            hidden.visibility = halionbridge::converters::ConverterVisibility::incognito;
+            expect(registry.registerConverter(hidden));
+            expect(registry.find("hidden") != nullptr);
+
+            const auto visibleConverters = registry.listVisible();
+            expect(std::none_of(visibleConverters.begin(), visibleConverters.end(),
+                                [](const halionbridge::converters::ConverterDefinition& definition) { return definition.id == "hidden"; }));
         }
 
         beginTest("SFZ Helper Lua - exposes conservative v1 API");
@@ -1229,7 +1245,7 @@ class BridgeTests : public juce::UnitTest
             tempDir.deleteRecursively();
         }
 
-        beginTest("SFZ Converter - validates source directories");
+        beginTest("SFZ Converter - validates source paths");
         {
             const auto tempDir = cleanTempDirectory("halionbridge_sfz_validation");
             expect(tempDir.createDirectory());
@@ -1241,13 +1257,14 @@ class BridgeTests : public juce::UnitTest
             auto result = halionbridge::converters::sfz::convertDirectory(missingOptions);
             expect(!result.succeeded);
 
-            const auto fileSource = tempDir.getChildFile("instrument.sfz");
-            expect(fileSource.replaceWithText("<region> sample=missing.wav\n"));
+            const auto fileSource = tempDir.getChildFile("instrument.txt");
+            expect(fileSource.replaceWithText("not sfz\n"));
             auto fileOptions = halionbridge::converters::sfz::ConversionOptions{};
-            fileOptions.sourceDirectory = halionbridge::detail::toStdPath(fileSource);
+            fileOptions.sourcePath = halionbridge::detail::toStdPath(fileSource);
             fileOptions.outputDirectory = outputDirectory;
-            result = halionbridge::converters::sfz::convertDirectory(fileOptions);
+            result = halionbridge::converters::sfz::convertSource(fileOptions);
             expect(!result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "source-not-sfz"));
 
             const auto emptyDirectory = cleanTempDirectory("halionbridge_sfz_empty");
             expect(emptyDirectory.createDirectory());
@@ -1327,6 +1344,23 @@ class BridgeTests : public juce::UnitTest
             expect(explicitOutputDir.getChildFile("halionbridge_build.lua").existsAsFile());
             expect(explicitOutputDir.getChildFile("000_top.lua").existsAsFile());
 
+            auto fileSourceDir = cleanTempDirectory("halionbridge_sfz_cli_file_source");
+            auto fileOutputDir = cleanTempDirectory("halionbridge_sfz_cli_file_output");
+            expect(fileSourceDir.createDirectory());
+            expect(fileSourceDir.getChildFile("sample.wav").replaceWithText(""));
+            const auto sfzFile = fileSourceDir.getChildFile("single.sfz");
+            expect(sfzFile.replaceWithText("<region> sample=sample.wav lokey=63 hikey=63 lovel=0 hivel=127 pitch_keycenter=63\n"));
+
+            result = runSfzConverter({sfzFile.getFullPathName().toStdString(), fileOutputDir.getFullPathName().toStdString()});
+            expectEquals(result.exitCode, 0);
+            expect(fileOutputDir.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(fileOutputDir.getChildFile("000_single.lua").existsAsFile());
+
+            result =
+                runSfzConverter({sfzFile.getFullPathName().toStdString(), fileOutputDir.getFullPathName().toStdString(), "--recursive"});
+            expect(result.exitCode != 0);
+            expect(containsDiagnosticCode(result.diagnostics, "recursive-with-file"));
+
             auto recursiveDir = cleanTempDirectory("halionbridge_sfz_cli_recursive_flat");
             expect(recursiveDir.createDirectory());
             expect(recursiveDir.getChildFile("sample.wav").replaceWithText(""));
@@ -1348,6 +1382,8 @@ class BridgeTests : public juce::UnitTest
             sourceDir.deleteRecursively();
             explicitSourceDir.deleteRecursively();
             explicitOutputDir.deleteRecursively();
+            fileSourceDir.deleteRecursively();
+            fileOutputDir.deleteRecursively();
             recursiveDir.deleteRecursively();
         }
 

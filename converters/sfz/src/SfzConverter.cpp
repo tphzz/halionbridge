@@ -21,6 +21,7 @@
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <utility>
 
 namespace halionbridge::converters::sfz
 {
@@ -629,6 +630,21 @@ std::filesystem::path absoluteNormalizedPath(const std::filesystem::path& path)
         return canonical;
 
     return std::filesystem::absolute(path, error).lexically_normal();
+}
+
+std::filesystem::path configuredSourcePath(const ConversionOptions& options)
+{
+    return options.sourcePath.empty() ? options.sourceDirectory : options.sourcePath;
+}
+
+std::filesystem::path defaultOutputDirectoryForSourcePath(const std::filesystem::path& sourcePath)
+{
+    std::error_code error;
+    if (std::filesystem::is_directory(sourcePath, error))
+        return sourcePath;
+
+    auto outputDirectory = sourcePath.parent_path();
+    return outputDirectory.empty() ? std::filesystem::path{"."} : outputDirectory;
 }
 
 int clampMidi(const int value)
@@ -1345,11 +1361,13 @@ std::optional<ConvertedSfz> loadSfz(const std::filesystem::path& sfzFile, const 
 std::string helpText()
 {
     return "Usage:\n"
-           "  halionbridge convert sfz <source-directory> [options]\n"
-           "  halionbridge convert sfz <source-directory> <output-directory> [options]\n\n"
-           "When output-directory is omitted, generated Lua/build files are written flat into the source directory.\n\n"
+           "  halionbridge convert sfz <source-path> [options]\n"
+           "  halionbridge convert sfz <source-path> <output-directory> [options]\n\n"
+           "<source-path> may be a single .sfz file or a directory containing .sfz files.\n"
+           "When output-directory is omitted, generated Lua/build files are written beside the source .sfz file or flat into the source "
+           "directory.\n\n"
            "Options:\n"
-           "  --recursive             Convert .sfz files below the source directory recursively.\n"
+           "  --recursive             Convert .sfz files below a source directory recursively.\n"
            "  --overwrite             Replace existing generated Lua/build files.\n"
            "  --name <name>           Override the layer and preset basename. Only valid when one .sfz file is converted.\n"
            "  --help, -h              Show this help and exit.\n";
@@ -1359,6 +1377,7 @@ ConverterArgumentParseResult validateArguments(std::span<const std::string> args
 {
     auto result = ConverterArgumentParseResult{};
     std::vector<std::string> positional;
+    auto recursive = false;
 
     const auto fail = [&result](const ConverterArgumentErrorKind kind, Diagnostic diagnostic)
     {
@@ -1374,7 +1393,13 @@ ConverterArgumentParseResult validateArguments(std::span<const std::string> args
         if (arg == "--help" || arg == "-h")
             return result;
 
-        if (arg == "--recursive" || arg == "--overwrite")
+        if (arg == "--recursive")
+        {
+            recursive = true;
+            continue;
+        }
+
+        if (arg == "--overwrite")
             continue;
 
         if (arg == "--name")
@@ -1401,7 +1426,7 @@ ConverterArgumentParseResult validateArguments(std::span<const std::string> args
     if (positional.empty() || positional.size() > 2)
     {
         fail(ConverterArgumentErrorKind::syntax,
-             makeError({}, "argument", "halionbridge convert sfz requires a source directory and optional output directory."));
+             makeError({}, "argument", "halionbridge convert sfz requires a source path and optional output directory."));
         return result;
     }
 
@@ -1409,14 +1434,48 @@ ConverterArgumentParseResult validateArguments(std::span<const std::string> args
     if (!std::filesystem::exists(positional[0], error))
     {
         fail(ConverterArgumentErrorKind::validation,
-             makeError(positional[0], "source-missing", "SFZ source directory does not exist: " + positional[0]));
+             makeError(positional[0], "source-missing", "SFZ source path does not exist: " + positional[0]));
         return result;
     }
 
-    if (!std::filesystem::is_directory(positional[0], error))
+    error.clear();
+    const auto isDirectory = std::filesystem::is_directory(positional[0], error);
+    if (error)
     {
         fail(ConverterArgumentErrorKind::validation,
-             makeError(positional[0], "source-not-directory", "SFZ source path is not a directory: " + positional[0]));
+             makeError(positional[0], "source-inspection-failed",
+                       "Could not inspect SFZ source path " + positional[0] + ": " + error.message()));
+        return result;
+    }
+
+    error.clear();
+    const auto isFile = std::filesystem::is_regular_file(positional[0], error);
+    if (error)
+    {
+        fail(ConverterArgumentErrorKind::validation,
+             makeError(positional[0], "source-inspection-failed",
+                       "Could not inspect SFZ source path " + positional[0] + ": " + error.message()));
+        return result;
+    }
+
+    if (!isDirectory && !isFile)
+    {
+        fail(ConverterArgumentErrorKind::validation,
+             makeError(positional[0], "source-not-file-or-directory", "SFZ source path is not a file or directory: " + positional[0]));
+        return result;
+    }
+
+    if (isFile && !hasSfzExtension(positional[0]))
+    {
+        fail(ConverterArgumentErrorKind::validation,
+             makeError(positional[0], "source-not-sfz", "SFZ source file must have a .sfz extension: " + positional[0]));
+        return result;
+    }
+
+    if (isFile && recursive)
+    {
+        fail(ConverterArgumentErrorKind::validation,
+             makeError(positional[0], "recursive-with-file", "--recursive can only be used when the SFZ source path is a directory."));
         return result;
     }
 
@@ -1479,15 +1538,16 @@ ConverterResult runConverterWithContext(std::span<const std::string> args, const
     if (positional.empty() || positional.size() > 2)
     {
         result.diagnostics.push_back(
-            makeError({}, "argument", "halionbridge convert sfz requires a source directory and optional output directory."));
+            makeError({}, "argument", "halionbridge convert sfz requires a source path and optional output directory."));
         context.report(result.diagnostics.back());
         return result;
     }
 
-    options.sourceDirectory = positional[0];
-    options.outputDirectory = positional.size() == 2 ? std::filesystem::path{positional[1]} : options.sourceDirectory;
+    options.sourcePath = positional[0];
+    options.outputDirectory =
+        positional.size() == 2 ? std::filesystem::path{positional[1]} : defaultOutputDirectoryForSourcePath(options.sourcePath);
 
-    const auto conversion = convertDirectory(options);
+    const auto conversion = convertSource(options);
     result.diagnostics = conversion.diagnostics;
     result.exitCode = conversion.succeeded ? 0 : 1;
     if (conversion.succeeded)
@@ -1510,7 +1570,7 @@ ConverterResult runConverter(std::span<const std::string> args)
 
 } // namespace
 
-ConversionResult convertDirectory(const ConversionOptions& options)
+ConversionResult convertSource(const ConversionOptions& options)
 {
     auto result = ConversionResult{};
     size_t reportedDiagnostics = 0;
@@ -1533,53 +1593,103 @@ ConversionResult convertDirectory(const ConversionOptions& options)
         reportPendingDiagnostics();
     };
 
+    const auto sourcePath = configuredSourcePath(options);
+    const auto outputDirectory =
+        options.outputDirectory.empty() ? defaultOutputDirectoryForSourcePath(sourcePath) : options.outputDirectory;
+
     std::error_code error;
-    if (!std::filesystem::exists(options.sourceDirectory, error))
+    if (!std::filesystem::exists(sourcePath, error))
     {
-        result.diagnostics.push_back(makeError(options.sourceDirectory, "source-missing",
-                                               "SFZ source directory does not exist: " + options.sourceDirectory.string()));
+        result.diagnostics.push_back(makeError(sourcePath, "source-missing", "SFZ source path does not exist: " + sourcePath.string()));
         reportPendingDiagnostics();
         return result;
     }
 
-    if (!std::filesystem::is_directory(options.sourceDirectory, error))
+    error.clear();
+    const auto isSourceDirectory = std::filesystem::is_directory(sourcePath, error);
+    if (error)
     {
-        result.diagnostics.push_back(makeError(options.sourceDirectory, "source-not-directory",
-                                               "SFZ source path is not a directory: " + options.sourceDirectory.string()));
+        result.diagnostics.push_back(makeError(sourcePath, "source-inspection-failed",
+                                               "Could not inspect SFZ source path " + sourcePath.string() + ": " + error.message()));
         reportPendingDiagnostics();
         return result;
     }
 
-    addDiagnostic(makeInfo(options.sourceDirectory, "scan-started", "Scanning " + options.sourceDirectory.string() + " for SFZ files."));
-    auto searchResult = findSfzFiles(options.sourceDirectory, options.recursive, options.context);
-    result.diagnostics.insert(result.diagnostics.end(), searchResult.diagnostics.begin(), searchResult.diagnostics.end());
-    reportPendingDiagnostics();
-    if (!searchResult.diagnostics.empty())
-        return result;
-
-    if (shouldStop(options.context))
+    error.clear();
+    const auto isSourceFile = std::filesystem::is_regular_file(sourcePath, error);
+    if (error)
     {
-        addDiagnostic(makeError(options.sourceDirectory, "stopped", "Conversion stopped by user request."));
+        result.diagnostics.push_back(makeError(sourcePath, "source-inspection-failed",
+                                               "Could not inspect SFZ source path " + sourcePath.string() + ": " + error.message()));
+        reportPendingDiagnostics();
         return result;
     }
 
-    const auto& sfzFiles = searchResult.files;
+    if (!isSourceDirectory && !isSourceFile)
+    {
+        result.diagnostics.push_back(
+            makeError(sourcePath, "source-not-file-or-directory", "SFZ source path is not a file or directory: " + sourcePath.string()));
+        reportPendingDiagnostics();
+        return result;
+    }
+
+    auto sfzFiles = std::vector<std::filesystem::path>{};
+    if (isSourceFile)
+    {
+        if (!hasSfzExtension(sourcePath))
+        {
+            result.diagnostics.push_back(
+                makeError(sourcePath, "source-not-sfz", "SFZ source file must have a .sfz extension: " + sourcePath.string()));
+            reportPendingDiagnostics();
+            return result;
+        }
+
+        if (options.recursive)
+        {
+            result.diagnostics.push_back(
+                makeError(sourcePath, "recursive-with-file", "--recursive can only be used when the SFZ source path is a directory."));
+            reportPendingDiagnostics();
+            return result;
+        }
+
+        addDiagnostic(makeInfo(sourcePath, "scan-complete", "Using SFZ file " + sourcePath.string() + "."));
+        sfzFiles.push_back(sourcePath);
+    }
+    else
+    {
+        addDiagnostic(makeInfo(sourcePath, "scan-started", "Scanning " + sourcePath.string() + " for SFZ files."));
+        auto searchResult = findSfzFiles(sourcePath, options.recursive, options.context);
+        result.diagnostics.insert(result.diagnostics.end(), searchResult.diagnostics.begin(), searchResult.diagnostics.end());
+        reportPendingDiagnostics();
+        if (!searchResult.diagnostics.empty())
+            return result;
+
+        if (shouldStop(options.context))
+        {
+            addDiagnostic(makeError(sourcePath, "stopped", "Conversion stopped by user request."));
+            return result;
+        }
+
+        sfzFiles = std::move(searchResult.files);
+    }
+
     if (sfzFiles.empty())
     {
-        result.diagnostics.push_back(makeError(options.sourceDirectory, "no-sfz",
-                                               "No .sfz files were found in " + options.sourceDirectory.string() +
+        result.diagnostics.push_back(makeError(sourcePath, "no-sfz",
+                                               "No .sfz files were found in " + sourcePath.string() +
                                                    (options.recursive ? "." : ". Use --recursive to include nested directories.")));
         reportPendingDiagnostics();
         return result;
     }
 
-    addDiagnostic(makeInfo(options.sourceDirectory, "scan-complete",
-                           "Found " + std::to_string(sfzFiles.size()) + " SFZ file(s) in " + options.sourceDirectory.string() + "."));
+    if (isSourceDirectory)
+        addDiagnostic(makeInfo(sourcePath, "scan-complete",
+                               "Found " + std::to_string(sfzFiles.size()) + " SFZ file(s) in " + sourcePath.string() + "."));
 
     if (options.name && sfzFiles.size() != 1)
     {
-        result.diagnostics.push_back(makeError(options.sourceDirectory, "name-with-multiple-files",
-                                               "--name can only be used when exactly one .sfz file is converted."));
+        result.diagnostics.push_back(
+            makeError(sourcePath, "name-with-multiple-files", "--name can only be used when exactly one .sfz file is converted."));
         reportPendingDiagnostics();
         return result;
     }
@@ -1612,7 +1722,7 @@ ConversionResult convertDirectory(const ConversionOptions& options)
 
     if (convertedFiles.empty())
     {
-        result.diagnostics.push_back(makeError(options.sourceDirectory, "no-generated-scripts", "No Lua build scripts were generated."));
+        result.diagnostics.push_back(makeError(sourcePath, "no-generated-scripts", "No Lua build scripts were generated."));
         reportPendingDiagnostics();
         return result;
     }
@@ -1635,7 +1745,7 @@ ConversionResult convertDirectory(const ConversionOptions& options)
 
     if (shouldStop(options.context))
     {
-        addDiagnostic(makeError(options.outputDirectory, "stopped", "Conversion stopped by user request before writing generated files."));
+        addDiagnostic(makeError(outputDirectory, "stopped", "Conversion stopped by user request before writing generated files."));
         return result;
     }
 
@@ -1651,10 +1761,9 @@ ConversionResult convertDirectory(const ConversionOptions& options)
         scripts.push_back(GeneratedLuaScript{moduleName, moduleName, buildLuaSource(convertedFiles[i])});
     }
 
-    addDiagnostic(
-        makeInfo(options.outputDirectory, "write-started",
-                 "Writing " + std::to_string(scripts.size()) + " generated Lua file(s) to " + options.outputDirectory.string() + "."));
-    auto emitResult = writeBuildDirectory(BuildDirectoryRequest{options.outputDirectory, options.overwrite, scripts});
+    addDiagnostic(makeInfo(outputDirectory, "write-started",
+                           "Writing " + std::to_string(scripts.size()) + " generated Lua file(s) to " + outputDirectory.string() + "."));
+    auto emitResult = writeBuildDirectory(BuildDirectoryRequest{outputDirectory, options.overwrite, scripts});
     result.buildFile = emitResult.buildFile;
     result.generatedLuaFiles = emitResult.generatedLuaFiles;
     result.diagnostics.insert(result.diagnostics.end(), emitResult.diagnostics.begin(), emitResult.diagnostics.end());
@@ -1663,10 +1772,22 @@ ConversionResult convertDirectory(const ConversionOptions& options)
     return result;
 }
 
+ConversionResult convertDirectory(const ConversionOptions& options)
+{
+    return convertSource(options);
+}
+
 void registerConverter(ConverterRegistry& registry)
 {
-    registry.registerConverter(ConverterDefinition{"sfz", "SFZ", "Generate HALion Lua build scripts from SFZ directories.", runConverter,
-                                                   runConverterWithContext, helpText, validateArguments});
+    auto definition = ConverterDefinition{"sfz",
+                                          "SFZ",
+                                          "Generate HALion Lua build scripts from SFZ files or directories.",
+                                          runConverter,
+                                          runConverterWithContext,
+                                          helpText,
+                                          validateArguments};
+    definition.sourcePathKind = ConverterSourcePathKind::fileOrDirectory;
+    registry.registerConverter(std::move(definition));
 }
 
 } // namespace halionbridge::converters::sfz

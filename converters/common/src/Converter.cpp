@@ -1,6 +1,7 @@
 #include "halionbridge_converters/Converter.h"
 
 #include <algorithm>
+#include <iterator>
 #include <utility>
 
 namespace halionbridge::converters
@@ -30,6 +31,14 @@ const ConverterDefinition* ConverterRegistry::find(const std::string_view id) co
 std::vector<ConverterDefinition> ConverterRegistry::list() const
 {
     return definitions;
+}
+
+std::vector<ConverterDefinition> ConverterRegistry::listVisible() const
+{
+    auto visibleDefinitions = std::vector<ConverterDefinition>{};
+    std::copy_if(definitions.begin(), definitions.end(), std::back_inserter(visibleDefinitions),
+                 [](const ConverterDefinition& definition) { return definition.visibility == ConverterVisibility::listed; });
+    return visibleDefinitions;
 }
 
 } // namespace halionbridge::converters

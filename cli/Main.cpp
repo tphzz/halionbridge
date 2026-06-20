@@ -73,7 +73,7 @@ void writeTopLevelHelp(std::ostream& output, const bool includeHeader = true)
            << "  halionbridge init <build-directory> [--overwrite]\n"
            << "  halionbridge remap-vstpresets --input-directory <dir> --output-directory <dir> --old-root <path> --new-root <path>\n"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
-           << "  halionbridge convert <converter-id> <source-directory> [output-directory] [converter-options]\n"
+           << "  halionbridge convert <converter-id> <source-path> [output-directory] [converter-options]\n"
 #endif
            << "\n"
            << "Build command:\n"
@@ -308,7 +308,7 @@ void writeConvertHelp(std::ostream& output, const bool includeHeader = true)
         writeVersionHeader(output);
 
     output << (includeHeader ? "\n" : "") << "Usage:\n"
-           << "  halionbridge convert <converter-id> <source-directory> [output-directory] [converter-options]\n"
+           << "  halionbridge convert <converter-id> <source-path> [output-directory] [converter-options]\n"
            << "  halionbridge convert --list\n"
            << "  halionbridge convert <converter-id> --help\n";
 }
@@ -382,7 +382,7 @@ int runConvertCommand(std::span<const std::string> args)
     {
         writeVersionHeader(std::cout);
         std::cout << "\n";
-        const auto converters = registry.list();
+        const auto converters = registry.listVisible();
         if (converters.empty())
         {
             std::cout << "No converters are compiled into this halionbridge binary.\n";
