@@ -16,7 +16,7 @@ from typing import Any
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-TEMPLATE_NAME_COLUMN = "preset_name"
+TEMPLATE_NAME_COLUMN = "target_preset_name"
 INPUT_NAME_COLUMN = "preset name"
 
 
