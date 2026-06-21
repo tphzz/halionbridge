@@ -314,6 +314,18 @@ function hb.apply_pitch_lfo_required(zone, lfo)
         return false, "Failed to set required pitch LFO: pitch_lfo table is missing"
     end
 
+    local pitch_offset_cents = lfo.pitch_offset_cents or 0
+    if pitch_offset_cents ~= 0 then
+        local coarse = math.modf(pitch_offset_cents / 100)
+        local fine = pitch_offset_cents - coarse * 100
+
+        local ok, err = hb.set_parameter_required(zone, "Pitch.Coarse", coarse)
+        if not ok then return false, err end
+
+        ok, err = hb.set_parameter_required(zone, "Pitch.Fine", fine)
+        if not ok then return false, err end
+    end
+
     local ok, err = hb.set_parameter_required(zone, "LFO 1.WaveForm", lfo.waveform or 0)
     if not ok then return false, err end
 

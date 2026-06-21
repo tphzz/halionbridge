@@ -42,6 +42,8 @@ constexpr float kHalionPitchEnvelopeReleaseDuration = 0.01f;
 constexpr float kHalionPitchEnvelopeMinDepthCents = -6000.0f;
 constexpr float kHalionPitchEnvelopeMaxDepthCents = 6000.0f;
 constexpr float kHalionPitchLfoDepthScale = 1.0f / 20.0f;
+constexpr float kHalionSquarePitchLfoDepthScale = 3.0f / 100.0f;
+constexpr float kHalionSquarePitchLfoPitchOffsetScale = 0.5f;
 constexpr float kHalionPitchLfoMinDepthCents = -1200.0f;
 constexpr float kHalionPitchLfoMaxDepthCents = 1200.0f;
 constexpr float kHalionPitchLfoMinFrequencyHz = 0.0f;
@@ -105,6 +107,7 @@ struct ConvertedPitchLfo
     float fadeMs = 0.0f;
     int waveForm = 0;
     float shape = 0.0f;
+    float pitchOffsetCents = 0.0f;
 };
 
 struct ConvertedRegion
@@ -1363,6 +1366,12 @@ ConvertedPitchLfo convertPitchLfo(const std::filesystem::path& sourceFile, const
     case 1:
         converted.waveForm = 0;
         break;
+    case 3:
+        converted.depth = depthCents * kHalionSquarePitchLfoDepthScale;
+        converted.waveForm = 3;
+        converted.shape = 50.0f;
+        converted.pitchOffsetCents = depthCents * kHalionSquarePitchLfoPitchOffsetScale;
+        break;
     case 6:
         converted.waveForm = 4;
         break;
@@ -1387,6 +1396,7 @@ bool isSupportedPitchLfoWave(const ExplicitPitchLfo& lfo)
     {
     case 0:
     case 1:
+    case 3:
     case 6:
     case 7:
     case 12:
@@ -1498,7 +1508,7 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
             diagnostics.push_back(makeWarning(sourceFile, "unsupported-pitch-lfo",
                                               "Region " + std::to_string(regionIndex + 1) + " uses lfo" + std::to_string(pitchLfo->index) +
                                                   "_wave=" + std::to_string(*pitchLfo->wave) +
-                                                  "; generated Lua maps only verified static pitch LFO waveforms 0, 1, 6, 7, and 12."));
+                                                  "; generated Lua maps only verified static pitch LFO waveforms 0, 1, 3, 6, 7, and 12."));
         }
     }
 
@@ -1707,6 +1717,7 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
             << "            fade_ms = " << luaNumber(region.pitchLfo->fadeMs) << ",\n"
             << "            waveform = " << region.pitchLfo->waveForm << ",\n"
             << "            shape = " << luaNumber(region.pitchLfo->shape) << ",\n"
+            << "            pitch_offset_cents = " << luaNumber(region.pitchLfo->pitchOffsetCents) << ",\n"
             << "        },\n";
     }
 

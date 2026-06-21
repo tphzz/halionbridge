@@ -2267,7 +2267,9 @@ class BridgeTests : public juce::UnitTest
                        .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 "
                                         "lfo01_pitch=120 lfo01_freq=2 lfo01_phase=0.25 lfo01_delay=1 lfo01_fade=1 lfo01_wave=0\n"
                                         "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 "
-                                        "pitchlfo_depth=240 pitchlfo_freq=4 pitchlfo_delay=0.5 pitchlfo_fade=0.25\n"));
+                                        "pitchlfo_depth=240 pitchlfo_freq=4 pitchlfo_delay=0.5 pitchlfo_fade=0.25\n"
+                                        "<region> sample=sample.wav lokey=59 hikey=59 pitch_keycenter=59 "
+                                        "lfo01_pitch=120 lfo01_freq=2 lfo01_wave=3\n"));
 
             auto options = halionbridge::converters::sfz::ConversionOptions{};
             options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
@@ -2290,11 +2292,17 @@ class BridgeTests : public juce::UnitTest
             expect(lua.contains("delay_ms = 500"));
             expect(lua.contains("fade_ms = 250"));
             expect(lua.contains("waveform = 0"));
+            expect(lua.contains("depth = 3.6"));
+            expect(lua.contains("waveform = 3"));
+            expect(lua.contains("shape = 50"));
+            expect(lua.contains("pitch_offset_cents = 60"));
 
             const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
             expect(helperLua.contains("pitch_lfo = true"));
             expect(helperLua.contains("\"LFO 1.WaveForm\", lfo.waveform or 0"));
             expect(helperLua.contains("\"LFO 1.Shape\", lfo.shape or 0"));
+            expect(helperLua.contains("\"Pitch.Coarse\", coarse"));
+            expect(helperLua.contains("\"Pitch.Fine\", fine"));
             expect(helperLua.contains("\"LFO 1.Trigger\", 1"));
             expect(helperLua.contains("row:setSource1(ModulationSource.lfo1)"));
             expect(helperLua.contains("\"Destination.Destination\", ModulationDestination.pitch"));
