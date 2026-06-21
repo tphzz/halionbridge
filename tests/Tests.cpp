@@ -2214,6 +2214,49 @@ class BridgeTests : public juce::UnitTest
             outputDir.deleteRecursively();
         }
 
+        beginTest("SFZ Converter - writes static filter envelopes");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_filter_envelope");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_filter_envelope_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("filter_env.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 "
+                                        "fil_type=lpf_2p cutoff=500 resonance=6 fileg_depth=1200 "
+                                        "fileg_attack=1.0 fileg_sustain=100\n"
+                                        "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 "
+                                        "fil_type=lpf_2p cutoff=500 resonance=6 fileg_depth=2400 "
+                                        "fileg_attack=0 fileg_decay=1.0 fileg_sustain=0\n"
+                                        "<region> sample=sample.wav lokey=59 hikey=59 pitch_keycenter=59 "
+                                        "fil_type=lpf_2p cutoff=500 resonance=6 fileg_depth=4800 "
+                                        "fileg_attack=0 fileg_decay=1.0 fileg_sustain=0\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_filter_env.lua").loadFileAsString();
+            expect(lua.contains("filter_envelope = {"));
+            expect(lua.contains("amount = 12.5"));
+            expect(lua.contains("amount = 50"));
+            expect(lua.contains("amount = 100"));
+            expect(lua.contains("{ level = 0.720000029, duration = 1, curve = 0 }"));
+            expect(lua.contains("{ level = 0.400000006, duration = 0, curve = 0 }"));
+            expect(lua.contains("{ level = 0, duration = 0.300000012, curve = -0.400000006 }"));
+            expect(lua.contains("{ level = 0, duration = 0.300000012, curve = -0.600000024 }"));
+
+            const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
+            expect(helperLua.contains("filter_envelope = true"));
+            expect(helperLua.contains("Filter.EnvAmount"));
+            expect(helperLua.contains("Filter Env"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
         beginTest("SFZ Converter - writes explicit static amp envelopes");
         {
             auto sourceDir = cleanTempDirectory("halionbridge_sfz_amp_envelope");
@@ -2374,6 +2417,29 @@ class BridgeTests : public juce::UnitTest
             const auto result = halionbridge::converters::sfz::convertDirectory(options);
             expect(result.succeeded);
             expect(containsDiagnosticCode(result.diagnostics, "unsupported-pitch-envelope"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - reports unsupported advanced filter envelope features");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_unsupported_filter_envelope");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_unsupported_filter_envelope_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("unsupported.sfz")
+                       .replaceWithText("<group> fil_type=lpf_2p cutoff=500 resonance=6 fileg_depth=1200 "
+                                        "fileg_decay_shape=-4 fileg_depth_oncc1=50 eg01_filter=100\n"
+                                        "<region> sample=sample.wav lokey=60 hikey=60 pitch_keycenter=60\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "unsupported-filter-envelope"));
 
             sourceDir.deleteRecursively();
             outputDir.deleteRecursively();

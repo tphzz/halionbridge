@@ -41,6 +41,13 @@ constexpr float kHalionPitchEnvelopeDecayCurve = -0.60f;
 constexpr float kHalionPitchEnvelopeReleaseDuration = 0.01f;
 constexpr float kHalionPitchEnvelopeMinDepthCents = -6000.0f;
 constexpr float kHalionPitchEnvelopeMaxDepthCents = 6000.0f;
+constexpr float kHalionFilterEnvelopeAttackAmountScale = 1.0f / 96.0f;
+constexpr float kHalionFilterEnvelopeDecayAmountScale = 1.0f / 48.0f;
+constexpr float kHalionFilterEnvelopePeakLevel = 0.72f;
+constexpr float kHalionFilterEnvelopeDecayScale = 0.30f;
+constexpr float kHalionFilterEnvelopeReleaseDuration = 0.01f;
+constexpr float kHalionFilterEnvelopeMinAmount = -100.0f;
+constexpr float kHalionFilterEnvelopeMaxAmount = 100.0f;
 constexpr int kHalionClassicFilterType = 1;
 constexpr int kHalionClassicSingleFilterMode = 0;
 constexpr int kHalionClassicDualSerialMode = 1;
@@ -76,6 +83,12 @@ struct ConvertedPitchEnvelope
     ConvertedEnvelope envelope;
 };
 
+struct ConvertedFilterEnvelope
+{
+    float amount = 0.0f;
+    ConvertedEnvelope envelope;
+};
+
 struct ConvertedRegion
 {
     std::string name;
@@ -104,6 +117,7 @@ struct ConvertedRegion
     std::optional<int> filterShapeA;
     std::optional<int> filterShapeB;
     std::optional<ConvertedPitchEnvelope> pitchEnvelope;
+    std::optional<ConvertedFilterEnvelope> filterEnvelope;
     struct
     {
         float start = 0.0f;
@@ -140,9 +154,11 @@ struct ExplicitRegionOpcodes
     std::optional<int64_t> loopEnd;
     std::optional<int> decayZero;
     std::optional<float> pitchEnvelopeDepthCents;
+    std::optional<float> filterEnvelopeDepthCents;
     std::optional<std::string> filterTypeText;
     std::set<std::string> unsupportedAmpEnvelopeOpcodes;
     std::set<std::string> unsupportedPitchEnvelopeOpcodes;
+    std::set<std::string> unsupportedFilterEnvelopeOpcodes;
 };
 
 class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
@@ -206,6 +222,8 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
                 explicitOpcodes.decayZero = readZeroFlag(opcode.value);
             else if (opcode.name == "pitcheg_depth")
                 explicitOpcodes.pitchEnvelopeDepthCents = opcode.read(::sfz::Default::egDepth);
+            else if (opcode.name == "fileg_depth")
+                explicitOpcodes.filterEnvelopeDepthCents = opcode.read(::sfz::Default::egDepth);
             else if (opcode.name == "fil_type" || opcode.name == "fil&_type" || opcode.name == "filtype")
                 explicitOpcodes.filterTypeText = lowercaseAscii(opcode.value);
 
@@ -213,6 +231,8 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
                 explicitOpcodes.unsupportedAmpEnvelopeOpcodes.insert(opcode.name);
             if (isUnsupportedPitchEnvelopeOpcode(opcode.name))
                 explicitOpcodes.unsupportedPitchEnvelopeOpcodes.insert(opcode.name);
+            if (isUnsupportedFilterEnvelopeOpcode(opcode.name))
+                explicitOpcodes.unsupportedFilterEnvelopeOpcodes.insert(opcode.name);
         }
     }
 
@@ -253,6 +273,13 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
         return supported.contains(name);
     }
 
+    static bool isSupportedStaticFilterEnvelopeOpcode(const std::string& name)
+    {
+        static const auto supported =
+            std::set<std::string>{"fileg_attack", "fileg_decay", "fileg_delay", "fileg_depth", "fileg_hold", "fileg_sustain"};
+        return supported.contains(name);
+    }
+
     static bool isUnsupportedAmpEnvelopeOpcode(const std::string& name)
     {
         if (startsWith(name, "ampeg_"))
@@ -274,6 +301,17 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
             return false;
 
         return name.find("_pitcheg") != std::string::npos || name.find("_pitch") != std::string::npos;
+    }
+
+    static bool isUnsupportedFilterEnvelopeOpcode(const std::string& name)
+    {
+        if (startsWith(name, "fileg_"))
+            return !isSupportedStaticFilterEnvelopeOpcode(name);
+
+        if (!startsWith(name, "eg"))
+            return false;
+
+        return name.find("_fileg") != std::string::npos || name.find("_filter") != std::string::npos;
     }
 
     std::vector<::sfz::Opcode> globalOpcodes;
@@ -766,6 +804,82 @@ float clampPitchEnvelopeLevel(const std::filesystem::path& sourceFile, const int
     return clamped;
 }
 
+float clampFilterEnvelopeAmount(const std::filesystem::path& sourceFile, const int regionIndex, const std::string_view name,
+                                const float value, std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= kHalionFilterEnvelopeMinAmount && value <= kHalionFilterEnvelopeMaxAmount)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, kHalionFilterEnvelopeMinAmount, kHalionFilterEnvelopeMaxAmount) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "filter-envelope-amount-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " " + std::string(name) +
+                                          " maps outside HALion's Filter.EnvAmount -100..100 range; using " + std::to_string(clamped) +
+                                          "."));
+    return clamped;
+}
+
+float clampFilterEnvelopeDuration(const std::filesystem::path& sourceFile, const int regionIndex, const std::string_view name,
+                                  const float value, std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= 0.0f && value <= 30.0f)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, 0.0f, 30.0f) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "filter-envelope-duration-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " " + std::string(name) + " value " +
+                                          std::to_string(value) + " is outside HALion's 0..30 second envelope-point range; using " +
+                                          std::to_string(clamped) + "."));
+    return clamped;
+}
+
+float clampFilterEnvelopeLevel(const std::filesystem::path& sourceFile, const int regionIndex, const std::string_view name,
+                               const float value, std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= 0.0f && value <= 1.0f)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "filter-envelope-level-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " " + std::string(name) + " value " +
+                                          std::to_string(value) + " is outside HALion's 0..1 filter-envelope level range; using " +
+                                          std::to_string(clamped) + "."));
+    return clamped;
+}
+
+float filterEnvelopeDecayStartLevel(const float absDepthCents)
+{
+    if (absDepthCents <= 1200.0f)
+        return kHalionFilterEnvelopePeakLevel;
+
+    if (absDepthCents < 2400.0f)
+    {
+        const auto t = (absDepthCents - 1200.0f) / 1200.0f;
+        return kHalionFilterEnvelopePeakLevel + ((0.40f - kHalionFilterEnvelopePeakLevel) * t);
+    }
+
+    return 0.40f;
+}
+
+float filterEnvelopeDecayCurve(const float absDepthCents)
+{
+    if (absDepthCents <= 1200.0f)
+        return -0.77f;
+
+    if (absDepthCents < 2400.0f)
+    {
+        const auto t = (absDepthCents - 1200.0f) / 1200.0f;
+        return -0.77f + ((-0.40f - -0.77f) * t);
+    }
+
+    if (absDepthCents < 4800.0f)
+    {
+        const auto t = (absDepthCents - 2400.0f) / 2400.0f;
+        return -0.40f + ((-0.60f - -0.40f) * t);
+    }
+
+    return -0.60f;
+}
+
 float clampSampleOscLevelDb(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
                             std::vector<Diagnostic>& diagnostics)
 {
@@ -973,6 +1087,61 @@ ConvertedPitchEnvelope convertPitchEnvelope(const std::filesystem::path& sourceF
     return converted;
 }
 
+ConvertedFilterEnvelope convertFilterEnvelope(const std::filesystem::path& sourceFile, const int regionIndex,
+                                              const ::sfz::EGDescription& filterEG, const float depthCents,
+                                              std::vector<Diagnostic>& diagnostics)
+{
+    auto converted = ConvertedFilterEnvelope{};
+    const auto absDepthCents = std::abs(depthCents);
+
+    const auto delay = clampFilterEnvelopeDuration(sourceFile, regionIndex, "fileg_delay", filterEG.delay, diagnostics);
+    const auto attack = clampFilterEnvelopeDuration(sourceFile, regionIndex, "fileg_attack", filterEG.attack, diagnostics);
+    const auto hold = clampFilterEnvelopeDuration(sourceFile, regionIndex, "fileg_hold", filterEG.hold, diagnostics);
+    const auto decay = clampFilterEnvelopeDuration(sourceFile, regionIndex, "fileg_decay", filterEG.decay, diagnostics);
+    const auto sustain = clampFilterEnvelopeLevel(sourceFile, regionIndex, "fileg_sustain", filterEG.sustain, diagnostics);
+
+    auto& envelope = converted.envelope;
+    auto appendPoint = [&envelope](const float level, const float duration, const float curve)
+    { envelope.points.push_back(ConvertedEnvelopePoint{level, duration, curve}); };
+
+    if (attack > 0.0f || sustain >= 1.0f)
+    {
+        converted.amount = clampFilterEnvelopeAmount(sourceFile, regionIndex, "fileg_depth",
+                                                     depthCents * kHalionFilterEnvelopeAttackAmountScale, diagnostics);
+
+        if (delay > 0.0f)
+        {
+            appendPoint(0.0f, 0.0f, 0.0f);
+            appendPoint(0.0f, delay, 0.0f);
+        }
+
+        if (envelope.points.empty())
+            appendPoint(0.0f, 0.0f, 0.0f);
+
+        appendPoint(kHalionFilterEnvelopePeakLevel, attack, 0.0f);
+        if (hold > 0.0f)
+            appendPoint(kHalionFilterEnvelopePeakLevel, hold, 0.0f);
+
+        const auto sustainLevel = kHalionFilterEnvelopePeakLevel * sustain;
+        if (decay > 0.0f && sustain < 1.0f)
+            appendPoint(sustainLevel, decay * kHalionFilterEnvelopeDecayScale, filterEnvelopeDecayCurve(absDepthCents));
+        else
+            appendPoint(sustainLevel, 0.0f, 0.0f);
+    }
+    else
+    {
+        converted.amount = clampFilterEnvelopeAmount(sourceFile, regionIndex, "fileg_depth",
+                                                     depthCents * kHalionFilterEnvelopeDecayAmountScale, diagnostics);
+        appendPoint(filterEnvelopeDecayStartLevel(absDepthCents), 0.0f, 0.0f);
+        appendPoint(0.0f, decay * kHalionFilterEnvelopeDecayScale, filterEnvelopeDecayCurve(absDepthCents));
+    }
+
+    envelope.sustainIndex = static_cast<int>(envelope.points.size());
+    appendPoint(0.0f, kHalionFilterEnvelopeReleaseDuration, -1.0f);
+
+    return converted;
+}
+
 ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int regionIndex, const ::sfz::Region& region,
                               const ExplicitRegionOpcodes& explicitOpcodes, std::vector<Diagnostic>& diagnostics)
 {
@@ -1055,6 +1224,21 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
             diagnostics.push_back(makeWarning(sourceFile, "unsupported-filter-type",
                                               "Region " + std::to_string(regionIndex + 1) +
                                                   " uses an SFZ filter type that has not been mapped to HALion output."));
+        }
+    }
+
+    if (region.filterEG && explicitOpcodes.filterEnvelopeDepthCents && differsFromDefault(*explicitOpcodes.filterEnvelopeDepthCents, 0.0f))
+    {
+        if (converted.filterCutoff)
+        {
+            converted.filterEnvelope =
+                convertFilterEnvelope(sourceFile, regionIndex, *region.filterEG, *explicitOpcodes.filterEnvelopeDepthCents, diagnostics);
+        }
+        else
+        {
+            diagnostics.push_back(makeWarning(sourceFile, "filter-envelope-unmapped",
+                                              "Region " + std::to_string(regionIndex + 1) +
+                                                  " uses fileg_depth, but its filter type is not mapped to HALion output."));
         }
     }
 
@@ -1236,6 +1420,19 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
         lua << "        },\n";
     }
 
+    if (region.filterEnvelope)
+    {
+        lua << "        filter_envelope = {\n"
+            << "            amount = " << luaNumber(region.filterEnvelope->amount) << ",\n"
+            << "            points = {\n";
+        for (const auto& point : region.filterEnvelope->envelope.points)
+            lua << "                { level = " << luaNumber(point.level) << ", duration = " << luaNumber(point.duration)
+                << ", curve = " << luaNumber(point.curve) << " },\n";
+        lua << "            },\n"
+            << "            sustain_index = " << region.filterEnvelope->envelope.sustainIndex << ",\n"
+            << "        },\n";
+    }
+
     lua << "    },\n";
 }
 
@@ -1344,6 +1541,13 @@ std::optional<ConvertedSfz> loadSfz(const std::filesystem::path& sfzFile, const 
                                               "Region " + std::to_string(i + 1) + " uses " + opcodeName +
                                                   "; generated Lua maps the current static pitcheg depth/attack/decay/hold/sustain "
                                                   "candidate but does not yet reproduce this advanced pitch envelope feature exactly."));
+        }
+        for (const auto& opcodeName : explicitOpcodes.unsupportedFilterEnvelopeOpcodes)
+        {
+            diagnostics.push_back(makeWarning(sfzFile, "unsupported-filter-envelope",
+                                              "Region " + std::to_string(i + 1) + " uses " + opcodeName +
+                                                  "; generated Lua maps the current static fileg depth/attack/decay/hold/sustain "
+                                                  "candidate but does not yet reproduce this advanced filter envelope feature exactly."));
         }
 
         converted.regions.push_back(convertRegion(sfzFile, i, *region, explicitOpcodes, diagnostics));

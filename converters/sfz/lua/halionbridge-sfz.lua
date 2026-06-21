@@ -33,7 +33,7 @@ hb.capabilities = {
     crossfade = false,
     random_selection = false,
     sequence_selection = false,
-    filter_envelope = false,
+    filter_envelope = true,
 }
 
 local sampleZoneType = 1
@@ -453,6 +453,15 @@ function hb.apply_optional_sample_fields(ctx, zone, region)
         if not ok then return false, err end
     end
 
+    local filter_envelope = region and region.filter_envelope or nil
+    if type(filter_envelope) == "table" then
+        local ok, err = hb.set_parameter_required(zone, "Filter.EnvAmount", filter_envelope.amount)
+        if not ok then return false, err end
+
+        ok, err = hb.set_envelope_required(zone, "Filter Env", filter_envelope)
+        if not ok then return false, err end
+    end
+
     return true
 end
 
@@ -517,7 +526,7 @@ function hb.apply_selection(ctx)
 end
 
 function hb.apply_filter_envelope(ctx)
-    return hb.unsupported(ctx, "filter_envelope", "filter envelope behavior has not been verified")
+    return hb.unsupported(ctx, "filter_envelope", "dynamic filter envelope behavior beyond the verified static fileg subset has not been implemented")
 end
 
 function hb.apply_pitch_features(ctx)
