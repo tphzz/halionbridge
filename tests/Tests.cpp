@@ -1397,7 +1397,7 @@ class BridgeTests : public juce::UnitTest
             expect(source.contains("pan = true"));
             expect(source.contains("sample_offset = true"));
             expect(source.contains("sample_end = true"));
-            expect(source.contains("crossfade = false"));
+            expect(source.contains("crossfade = true"));
             expect(source.contains("function hb.ok"));
             expect(source.contains("function hb.fail"));
             expect(source.contains("function hb.warn"));
@@ -1417,6 +1417,9 @@ class BridgeTests : public juce::UnitTest
             expect(source.contains("\"VelocityToLevelCurve\", 1"));
             expect(source.contains("\"SampleOsc.Level\", sample_osc_level_db"));
             expect(source.contains("\"Amp.Pan\", amp_pan"));
+            expect(source.contains("function hb.apply_crossfade_required"));
+            expect(source.contains("\"Amp.CrossfadePitch\", true"));
+            expect(source.contains("\"Amp.CrossfadeVelocity\", true"));
             expect(!source.contains("type(Layer) ~= \"function\""));
             expect(!source.contains("type(Zone) ~= \"function\""));
             expect(source.contains("function sfz_inclusive_end_to_halion_marker"));
@@ -1838,6 +1841,72 @@ class BridgeTests : public juce::UnitTest
             expect(lua.contains("velocity_high = 64"));
             expect(lua.contains("velocity_low = 126"));
             expect(lua.contains("velocity_high = 127"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - writes verified key and velocity crossfades");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_crossfades");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_crossfades_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("crossfade.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=63 pitch_keycenter=57 "
+                                        "xfin_lokey=57 xfin_hikey=63\n"
+                                        "<region> sample=sample.wav lokey=57 hikey=63 pitch_keycenter=57 "
+                                        "xfout_lokey=57 xfout_hikey=63\n"
+                                        "<region> sample=sample.wav key=57 pitch_keycenter=57 lovel=1 hivel=127 "
+                                        "xfin_lovel=1 xfin_hivel=127\n"
+                                        "<region> sample=sample.wav key=57 pitch_keycenter=57 lovel=1 hivel=127 "
+                                        "xfout_lovel=1 xfout_hivel=127\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_crossfade.lua").loadFileAsString();
+            expect(lua.contains("crossfade = {"));
+            expect(lua.contains("key_low_width = 7"));
+            expect(lua.contains("key_high_width = 7"));
+            expect(lua.contains("velocity_low_width = 126"));
+            expect(lua.contains("velocity_high_width = 126"));
+            expect(lua.contains("velocity_low = 1"));
+            expect(lua.contains("velocity_high = 127"));
+
+            const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
+            expect(helperLua.contains("crossfade = true"));
+            expect(helperLua.contains("function hb.apply_crossfade_required"));
+            expect(helperLua.contains("\"Amp.CrossfadeKeyLo\", crossfade.key_low_width or 0"));
+            expect(helperLua.contains("\"Amp.CrossfadeKeyHi\", crossfade.key_high_width or 0"));
+            expect(helperLua.contains("\"Amp.CrossfadeVelLo\", crossfade.velocity_low_width or 0"));
+            expect(helperLua.contains("\"Amp.CrossfadeVelHi\", crossfade.velocity_high_width or 0"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - reports unsupported crossfade variants");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_unsupported_crossfade");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_unsupported_crossfade_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("crossfade.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 "
+                                        "xfin_locc1=0 xfin_hicc1=127 xf_velcurve=gain\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "unsupported-crossfade"));
 
             sourceDir.deleteRecursively();
             outputDir.deleteRecursively();

@@ -29,9 +29,9 @@ hb.capabilities = {
     pitch_lfo = true,
     sample_offset = true,
     sample_end = true,
+    crossfade = true,
 
     pitch_bend = false,
-    crossfade = false,
     random_selection = false,
     sequence_selection = false,
     filter_envelope = true,
@@ -367,6 +367,36 @@ function hb.apply_pitch_lfo_required(zone, lfo)
     end)
 end
 
+function hb.apply_crossfade_required(zone, crossfade)
+    if type(crossfade) ~= "table" then
+        return false, "Failed to set required crossfade: crossfade table is missing"
+    end
+
+    if crossfade.key_low_width ~= nil or crossfade.key_high_width ~= nil then
+        local ok, err = hb.set_parameter_required(zone, "Amp.CrossfadePitch", true)
+        if not ok then return false, err end
+
+        ok, err = hb.set_parameter_required(zone, "Amp.CrossfadeKeyLo", crossfade.key_low_width or 0)
+        if not ok then return false, err end
+
+        ok, err = hb.set_parameter_required(zone, "Amp.CrossfadeKeyHi", crossfade.key_high_width or 0)
+        if not ok then return false, err end
+    end
+
+    if crossfade.velocity_low_width ~= nil or crossfade.velocity_high_width ~= nil then
+        local ok, err = hb.set_parameter_required(zone, "Amp.CrossfadeVelocity", true)
+        if not ok then return false, err end
+
+        ok, err = hb.set_parameter_required(zone, "Amp.CrossfadeVelLo", crossfade.velocity_low_width or 0)
+        if not ok then return false, err end
+
+        ok, err = hb.set_parameter_required(zone, "Amp.CrossfadeVelHi", crossfade.velocity_high_width or 0)
+        if not ok then return false, err end
+    end
+
+    return true
+end
+
 function hb.sample_path(region)
     local playback = region and region.sample_playback or nil
     if type(playback) == "table" and playback.sample then
@@ -565,6 +595,12 @@ function hb.append_sample_zone(ctx, layer, region)
     ok, err = hb.apply_required_mapping_fields(zone, region)
     if not ok then return nil, err end
 
+    local crossfade = region and region.crossfade or nil
+    if type(crossfade) == "table" then
+        ok, err = hb.apply_crossfade_required(zone, crossfade)
+        if not ok then return nil, err end
+    end
+
     return zone
 end
 
@@ -580,10 +616,6 @@ function hb.save_layer_preset(ctx, layer, output_file)
     end
 
     return true, output_path
-end
-
-function hb.apply_crossfade(ctx)
-    return hb.unsupported(ctx, "crossfade", "crossfade behavior has not been verified for HALion output")
 end
 
 function hb.apply_selection(ctx)

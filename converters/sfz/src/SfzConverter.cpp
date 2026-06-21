@@ -110,6 +110,14 @@ struct ConvertedPitchLfo
     float pitchOffsetCents = 0.0f;
 };
 
+struct ConvertedCrossfade
+{
+    std::optional<int> keyLowWidth;
+    std::optional<int> keyHighWidth;
+    std::optional<int> velocityLowWidth;
+    std::optional<int> velocityHighWidth;
+};
+
 struct ConvertedRegion
 {
     std::string name;
@@ -140,6 +148,7 @@ struct ConvertedRegion
     std::optional<ConvertedPitchEnvelope> pitchEnvelope;
     std::optional<ConvertedPitchLfo> pitchLfo;
     std::optional<ConvertedFilterEnvelope> filterEnvelope;
+    std::optional<ConvertedCrossfade> crossfade;
     struct
     {
         float start = 0.0f;
@@ -195,6 +204,7 @@ struct ExplicitRegionOpcodes
     std::set<std::string> unsupportedPitchEnvelopeOpcodes;
     std::set<std::string> unsupportedPitchLfoOpcodes;
     std::set<std::string> unsupportedFilterEnvelopeOpcodes;
+    std::set<std::string> unsupportedCrossfadeOpcodes;
 };
 
 class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
@@ -264,6 +274,7 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
                 explicitOpcodes.filterTypeText = lowercaseAscii(opcode.value);
 
             inspectPitchLfoOpcode(rawOpcode, explicitOpcodes);
+            inspectCrossfadeOpcode(rawOpcode, explicitOpcodes);
 
             if (isUnsupportedAmpEnvelopeOpcode(opcode.name))
                 explicitOpcodes.unsupportedAmpEnvelopeOpcodes.insert(opcode.name);
@@ -438,6 +449,20 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
         }
 
         explicitOpcodes.unsupportedPitchLfoOpcodes.insert("lfo" + std::to_string(index) + "_" + std::string{suffix});
+    }
+
+    static void inspectCrossfadeOpcode(const ::sfz::Opcode& opcode, ExplicitRegionOpcodes& explicitOpcodes)
+    {
+        const auto name = lowercaseAscii(opcode.name);
+        if (startsWith(name, "xfin_locc") || startsWith(name, "xfin_hicc") || startsWith(name, "xfout_locc") ||
+            startsWith(name, "xfout_hicc") || name == "xf_cccurve")
+        {
+            explicitOpcodes.unsupportedCrossfadeOpcodes.insert(name);
+            return;
+        }
+
+        if ((name == "xf_keycurve" || name == "xf_velcurve") && lowercaseAscii(opcode.value) != "power")
+            explicitOpcodes.unsupportedCrossfadeOpcodes.insert(name);
     }
 
     static bool isSupportedStaticAmpEnvelopeOpcode(const std::string& name)
@@ -922,6 +947,16 @@ float clampEnvelopeLevel(const std::filesystem::path& sourceFile, const int regi
 bool differsFromDefault(const float value, const float defaultValue)
 {
     return std::abs(value - defaultValue) > 0.0001f;
+}
+
+template <typename Type> bool rangeDiffersFromDefault(const ::sfz::Range<Type, false>& range, const ::sfz::Range<Type>& defaultRange)
+{
+    return range.getStart() != defaultRange.getStart() || range.getEnd() != defaultRange.getEnd();
+}
+
+bool rangeDiffersFromDefault(const ::sfz::Range<float, false>& range, const ::sfz::Range<float>& defaultRange)
+{
+    return differsFromDefault(range.getStart(), defaultRange.getStart()) || differsFromDefault(range.getEnd(), defaultRange.getEnd());
 }
 
 float clampPitchTuneCents(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
@@ -1461,6 +1496,48 @@ ConvertedFilterEnvelope convertFilterEnvelope(const std::filesystem::path& sourc
     return converted;
 }
 
+std::optional<ConvertedCrossfade> convertCrossfade(const ::sfz::Region& region, ConvertedRegion& converted)
+{
+    auto crossfade = ConvertedCrossfade{};
+
+    if (rangeDiffersFromDefault(region.crossfadeKeyInRange, ::sfz::Default::crossfadeKeyInRange))
+    {
+        const auto low = clampMidi(static_cast<int>(region.crossfadeKeyInRange.getStart()));
+        const auto high = clampMidi(static_cast<int>(region.crossfadeKeyInRange.getEnd()));
+        converted.keyLow = std::max(converted.keyLow, low);
+        crossfade.keyLowWidth = std::max(0, high - low + 1);
+    }
+
+    if (rangeDiffersFromDefault(region.crossfadeKeyOutRange, ::sfz::Default::crossfadeKeyOutRange))
+    {
+        const auto low = clampMidi(static_cast<int>(region.crossfadeKeyOutRange.getStart()));
+        const auto high = clampMidi(static_cast<int>(region.crossfadeKeyOutRange.getEnd()));
+        converted.keyHigh = std::min(converted.keyHigh, high);
+        crossfade.keyHighWidth = std::max(0, high - low + 1);
+    }
+
+    if (rangeDiffersFromDefault(region.crossfadeVelInRange, ::sfz::Default::crossfadeVelInRange))
+    {
+        const auto low = normalizedVelocityStartToMidi(region.crossfadeVelInRange.getStart());
+        const auto high = normalizedVelocityEndToMidi(region.crossfadeVelInRange.getEnd());
+        converted.velocityLow = std::max(converted.velocityLow, low);
+        crossfade.velocityLowWidth = std::max(0, high - low);
+    }
+
+    if (rangeDiffersFromDefault(region.crossfadeVelOutRange, ::sfz::Default::crossfadeVelOutRange))
+    {
+        const auto low = normalizedVelocityStartToMidi(region.crossfadeVelOutRange.getStart());
+        const auto high = normalizedVelocityEndToMidi(region.crossfadeVelOutRange.getEnd());
+        converted.velocityHigh = std::min(converted.velocityHigh, high);
+        crossfade.velocityHighWidth = std::max(0, high - low);
+    }
+
+    if (crossfade.keyLowWidth || crossfade.keyHighWidth || crossfade.velocityLowWidth || crossfade.velocityHighWidth)
+        return crossfade;
+
+    return std::nullopt;
+}
+
 ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int regionIndex, const ::sfz::Region& region,
                               const ExplicitRegionOpcodes& explicitOpcodes, std::vector<Diagnostic>& diagnostics)
 {
@@ -1474,6 +1551,7 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
     converted.velocityLow = normalizedVelocityStartToMidi(region.velocityRange.getStart());
     converted.velocityHigh = normalizedVelocityEndToMidi(region.velocityRange.getEnd());
     converted.rootKey = clampMidi(static_cast<int>(region.pitchKeycenter));
+    converted.crossfade = convertCrossfade(region, converted);
     if (region.offset != ::sfz::Default::offset)
         converted.sampleOffset = region.offset;
     if (explicitOpcodes.sampleEnd)
@@ -1731,6 +1809,20 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
         lua << "        },\n";
     }
 
+    if (region.crossfade)
+    {
+        lua << "        crossfade = {\n";
+        if (region.crossfade->keyLowWidth)
+            lua << "            key_low_width = " << *region.crossfade->keyLowWidth << ",\n";
+        if (region.crossfade->keyHighWidth)
+            lua << "            key_high_width = " << *region.crossfade->keyHighWidth << ",\n";
+        if (region.crossfade->velocityLowWidth)
+            lua << "            velocity_low_width = " << *region.crossfade->velocityLowWidth << ",\n";
+        if (region.crossfade->velocityHighWidth)
+            lua << "            velocity_high_width = " << *region.crossfade->velocityHighWidth << ",\n";
+        lua << "        },\n";
+    }
+
     if (region.hasLoop)
     {
         lua << "        loop = {\n"
@@ -1912,6 +2004,13 @@ std::optional<ConvertedSfz> loadSfz(const std::filesystem::path& sfzFile, const 
                                               "Region " + std::to_string(i + 1) + " uses " + opcodeName +
                                                   "; generated Lua maps the current static fileg depth/attack/decay/hold/sustain "
                                                   "candidate but does not yet reproduce this advanced filter envelope feature exactly."));
+        }
+        for (const auto& opcodeName : explicitOpcodes.unsupportedCrossfadeOpcodes)
+        {
+            diagnostics.push_back(
+                makeWarning(sfzFile, "unsupported-crossfade",
+                            "Region " + std::to_string(i + 1) + " uses " + opcodeName +
+                                "; generated Lua maps only key and velocity xfin/xfout crossfades with the default power curve."));
         }
 
         converted.regions.push_back(convertRegion(sfzFile, i, *region, explicitOpcodes, diagnostics));
