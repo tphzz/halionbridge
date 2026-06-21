@@ -41,6 +41,13 @@ constexpr float kHalionPitchEnvelopeDecayCurve = -0.60f;
 constexpr float kHalionPitchEnvelopeReleaseDuration = 0.01f;
 constexpr float kHalionPitchEnvelopeMinDepthCents = -6000.0f;
 constexpr float kHalionPitchEnvelopeMaxDepthCents = 6000.0f;
+constexpr float kHalionPitchLfoDepthScale = 1.0f / 20.0f;
+constexpr float kHalionPitchLfoMinDepthCents = -1200.0f;
+constexpr float kHalionPitchLfoMaxDepthCents = 1200.0f;
+constexpr float kHalionPitchLfoMinFrequencyHz = 0.0f;
+constexpr float kHalionPitchLfoMaxFrequencyHz = 20.0f;
+constexpr float kHalionPitchLfoMinDurationSeconds = 0.0f;
+constexpr float kHalionPitchLfoMaxDurationSeconds = 100.0f;
 constexpr float kHalionFilterEnvelopeAttackAmountScale = 1.0f / 96.0f;
 constexpr float kHalionFilterEnvelopeDecayAmountScale = 1.0f / 48.0f;
 constexpr float kHalionFilterEnvelopePeakLevel = 0.72f;
@@ -89,6 +96,15 @@ struct ConvertedFilterEnvelope
     ConvertedEnvelope envelope;
 };
 
+struct ConvertedPitchLfo
+{
+    float depth = 0.0f;
+    float rateHz = 0.0f;
+    float phaseDegrees = 0.0f;
+    float delayMs = 0.0f;
+    float fadeMs = 0.0f;
+};
+
 struct ConvertedRegion
 {
     std::string name;
@@ -117,6 +133,7 @@ struct ConvertedRegion
     std::optional<int> filterShapeA;
     std::optional<int> filterShapeB;
     std::optional<ConvertedPitchEnvelope> pitchEnvelope;
+    std::optional<ConvertedPitchLfo> pitchLfo;
     std::optional<ConvertedFilterEnvelope> filterEnvelope;
     struct
     {
@@ -147,6 +164,17 @@ struct SfzFileSearchResult
     std::vector<Diagnostic> diagnostics;
 };
 
+struct ExplicitPitchLfo
+{
+    int index = 1;
+    bool legacy = false;
+    std::optional<float> depthCents;
+    std::optional<float> frequencyHz;
+    std::optional<float> phase;
+    std::optional<float> delaySeconds;
+    std::optional<float> fadeSeconds;
+};
+
 struct ExplicitRegionOpcodes
 {
     std::optional<int64_t> sampleEnd;
@@ -156,8 +184,10 @@ struct ExplicitRegionOpcodes
     std::optional<float> pitchEnvelopeDepthCents;
     std::optional<float> filterEnvelopeDepthCents;
     std::optional<std::string> filterTypeText;
+    std::vector<ExplicitPitchLfo> pitchLfos;
     std::set<std::string> unsupportedAmpEnvelopeOpcodes;
     std::set<std::string> unsupportedPitchEnvelopeOpcodes;
+    std::set<std::string> unsupportedPitchLfoOpcodes;
     std::set<std::string> unsupportedFilterEnvelopeOpcodes;
 };
 
@@ -227,10 +257,14 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
             else if (opcode.name == "fil_type" || opcode.name == "fil&_type" || opcode.name == "filtype")
                 explicitOpcodes.filterTypeText = lowercaseAscii(opcode.value);
 
+            inspectPitchLfoOpcode(rawOpcode, explicitOpcodes);
+
             if (isUnsupportedAmpEnvelopeOpcode(opcode.name))
                 explicitOpcodes.unsupportedAmpEnvelopeOpcodes.insert(opcode.name);
             if (isUnsupportedPitchEnvelopeOpcode(opcode.name))
                 explicitOpcodes.unsupportedPitchEnvelopeOpcodes.insert(opcode.name);
+            if (isUnsupportedLegacyPitchLfoOpcode(opcode.name))
+                explicitOpcodes.unsupportedPitchLfoOpcodes.insert(opcode.name);
             if (isUnsupportedFilterEnvelopeOpcode(opcode.name))
                 explicitOpcodes.unsupportedFilterEnvelopeOpcodes.insert(opcode.name);
         }
@@ -257,6 +291,116 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
     static bool startsWith(const std::string& text, const std::string_view prefix)
     {
         return text.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), text.begin());
+    }
+
+    static std::optional<float> readFloat(const std::string& value)
+    {
+        auto parsed = 0.0f;
+        const auto* begin = value.data();
+        const auto* end = value.data() + value.size();
+        const auto result = std::from_chars(begin, end, parsed);
+        if (result.ec == std::errc{} && result.ptr == end)
+            return parsed;
+
+        return std::nullopt;
+    }
+
+    static ExplicitPitchLfo& pitchLfoFor(ExplicitRegionOpcodes& explicitOpcodes, const int index, const bool legacy)
+    {
+        const auto existing =
+            std::find_if(explicitOpcodes.pitchLfos.begin(), explicitOpcodes.pitchLfos.end(),
+                         [index, legacy](const ExplicitPitchLfo& lfo) { return lfo.index == index && lfo.legacy == legacy; });
+        if (existing != explicitOpcodes.pitchLfos.end())
+            return *existing;
+
+        auto& lfo = explicitOpcodes.pitchLfos.emplace_back();
+        lfo.index = index;
+        lfo.legacy = legacy;
+        return lfo;
+    }
+
+    static void inspectPitchLfoOpcode(const ::sfz::Opcode& opcode, ExplicitRegionOpcodes& explicitOpcodes)
+    {
+        const auto name = lowercaseAscii(opcode.name);
+        if (startsWith(name, "pitchlfo_"))
+        {
+            inspectLegacyPitchLfoOpcode(name, opcode.value, explicitOpcodes);
+            return;
+        }
+
+        if (!startsWith(name, "lfo") || name.size() <= 4)
+            return;
+
+        auto cursor = size_t{3};
+        auto index = 0;
+        while (cursor < name.size() && std::isdigit(static_cast<unsigned char>(name[cursor])))
+        {
+            index = (index * 10) + (name[cursor] - '0');
+            ++cursor;
+        }
+
+        if (index <= 0 || cursor >= name.size() || name[cursor] != '_')
+            return;
+
+        const auto suffix = std::string_view{name}.substr(cursor + 1);
+        inspectNumberedPitchLfoOpcode(index, suffix, opcode.value, explicitOpcodes);
+    }
+
+    static void inspectLegacyPitchLfoOpcode(const std::string& name, const std::string& value, ExplicitRegionOpcodes& explicitOpcodes)
+    {
+        const auto parsed = readFloat(value);
+        if (name == "pitchlfo_depth")
+        {
+            auto& lfo = pitchLfoFor(explicitOpcodes, 1, true);
+            lfo.depthCents = parsed.value_or(0.0f);
+        }
+        else if (name == "pitchlfo_freq")
+        {
+            auto& lfo = pitchLfoFor(explicitOpcodes, 1, true);
+            lfo.frequencyHz = parsed.value_or(0.0f);
+        }
+        else if (name == "pitchlfo_delay")
+        {
+            auto& lfo = pitchLfoFor(explicitOpcodes, 1, true);
+            lfo.delaySeconds = parsed.value_or(0.0f);
+        }
+        else if (name == "pitchlfo_fade")
+        {
+            auto& lfo = pitchLfoFor(explicitOpcodes, 1, true);
+            lfo.fadeSeconds = parsed.value_or(0.0f);
+        }
+        else if (name == "pitchlfo_phase")
+        {
+            auto& lfo = pitchLfoFor(explicitOpcodes, 1, true);
+            lfo.phase = parsed.value_or(0.0f);
+        }
+        else
+        {
+            explicitOpcodes.unsupportedPitchLfoOpcodes.insert(name);
+        }
+    }
+
+    static void inspectNumberedPitchLfoOpcode(const int index, const std::string_view suffix, const std::string& value,
+                                              ExplicitRegionOpcodes& explicitOpcodes)
+    {
+        if (suffix == "pitch" || suffix == "freq" || suffix == "phase" || suffix == "delay" || suffix == "fade")
+        {
+            auto& lfo = pitchLfoFor(explicitOpcodes, index, false);
+            const auto parsed = readFloat(value);
+            if (suffix == "pitch")
+                lfo.depthCents = parsed.value_or(0.0f);
+            else if (suffix == "freq")
+                lfo.frequencyHz = parsed.value_or(0.0f);
+            else if (suffix == "phase")
+                lfo.phase = parsed.value_or(0.0f);
+            else if (suffix == "delay")
+                lfo.delaySeconds = parsed.value_or(0.0f);
+            else if (suffix == "fade")
+                lfo.fadeSeconds = parsed.value_or(0.0f);
+            return;
+        }
+
+        explicitOpcodes.unsupportedPitchLfoOpcodes.insert("lfo" + std::to_string(index) + "_" + std::string{suffix});
     }
 
     static bool isSupportedStaticAmpEnvelopeOpcode(const std::string& name)
@@ -301,6 +445,16 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
             return false;
 
         return name.find("_pitcheg") != std::string::npos || name.find("_pitch") != std::string::npos;
+    }
+
+    static bool isUnsupportedLegacyPitchLfoOpcode(const std::string& name)
+    {
+        if (!startsWith(name, "pitchlfo_"))
+            return false;
+
+        static const auto supported =
+            std::set<std::string>{"pitchlfo_depth", "pitchlfo_freq", "pitchlfo_phase", "pitchlfo_delay", "pitchlfo_fade"};
+        return !supported.contains(name);
     }
 
     static bool isUnsupportedFilterEnvelopeOpcode(const std::string& name)
@@ -804,6 +958,61 @@ float clampPitchEnvelopeLevel(const std::filesystem::path& sourceFile, const int
     return clamped;
 }
 
+float clampPitchLfoDepthCents(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
+                              std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= kHalionPitchLfoMinDepthCents && value <= kHalionPitchLfoMaxDepthCents)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, kHalionPitchLfoMinDepthCents, kHalionPitchLfoMaxDepthCents) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "pitch-lfo-depth-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " pitch LFO depth value " + std::to_string(value) +
+                                          " cents is outside the verified -1200..1200 cent range; using " + std::to_string(clamped) +
+                                          " cents."));
+    return clamped;
+}
+
+float clampPitchLfoFrequencyHz(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
+                               std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= kHalionPitchLfoMinFrequencyHz && value <= kHalionPitchLfoMaxFrequencyHz)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, kHalionPitchLfoMinFrequencyHz, kHalionPitchLfoMaxFrequencyHz) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "pitch-lfo-frequency-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " pitch LFO frequency value " + std::to_string(value) +
+                                          " Hz is outside the verified 0..20 Hz range; using " + std::to_string(clamped) + " Hz."));
+    return clamped;
+}
+
+float clampPitchLfoDurationSeconds(const std::filesystem::path& sourceFile, const int regionIndex, const std::string_view name,
+                                   const float value, std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= kHalionPitchLfoMinDurationSeconds && value <= kHalionPitchLfoMaxDurationSeconds)
+        return value;
+
+    const auto clamped =
+        std::isfinite(value) ? std::clamp(value, kHalionPitchLfoMinDurationSeconds, kHalionPitchLfoMaxDurationSeconds) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "pitch-lfo-duration-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " " + std::string(name) + " value " +
+                                          std::to_string(value) + " is outside the verified 0..100 second range; using " +
+                                          std::to_string(clamped) + "."));
+    return clamped;
+}
+
+float clampPitchLfoPhase(const std::filesystem::path& sourceFile, const int regionIndex, const float value,
+                         std::vector<Diagnostic>& diagnostics)
+{
+    if (std::isfinite(value) && value >= 0.0f && value <= 1.0f)
+        return value;
+
+    const auto clamped = std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : 0.0f;
+    diagnostics.push_back(makeWarning(sourceFile, "pitch-lfo-phase-clamped",
+                                      "Region " + std::to_string(regionIndex + 1) + " pitch LFO phase value " + std::to_string(value) +
+                                          " is outside the verified 0..1 cycle range; using " + std::to_string(clamped) + "."));
+    return clamped;
+}
+
 float clampFilterEnvelopeAmount(const std::filesystem::path& sourceFile, const int regionIndex, const std::string_view name,
                                 const float value, std::vector<Diagnostic>& diagnostics)
 {
@@ -1087,6 +1296,33 @@ ConvertedPitchEnvelope convertPitchEnvelope(const std::filesystem::path& sourceF
     return converted;
 }
 
+std::optional<ExplicitPitchLfo> selectPitchLfo(const ExplicitRegionOpcodes& explicitOpcodes)
+{
+    const auto candidate = std::find_if(explicitOpcodes.pitchLfos.begin(), explicitOpcodes.pitchLfos.end(), [](const ExplicitPitchLfo& lfo)
+                                        { return lfo.depthCents && differsFromDefault(*lfo.depthCents, 0.0f); });
+    if (candidate == explicitOpcodes.pitchLfos.end())
+        return std::nullopt;
+
+    return *candidate;
+}
+
+ConvertedPitchLfo convertPitchLfo(const std::filesystem::path& sourceFile, const int regionIndex, const ExplicitPitchLfo& source,
+                                  std::vector<Diagnostic>& diagnostics)
+{
+    auto converted = ConvertedPitchLfo{};
+    const auto depthCents = clampPitchLfoDepthCents(sourceFile, regionIndex, source.depthCents.value_or(0.0f), diagnostics);
+    converted.depth = depthCents * kHalionPitchLfoDepthScale;
+    converted.rateHz = clampPitchLfoFrequencyHz(sourceFile, regionIndex, source.frequencyHz.value_or(0.0f), diagnostics);
+    converted.phaseDegrees = clampPitchLfoPhase(sourceFile, regionIndex, source.phase.value_or(0.0f), diagnostics) * 360.0f;
+    converted.delayMs = clampPitchLfoDurationSeconds(sourceFile, regionIndex, source.legacy ? "pitchlfo_delay" : "lfo_delay",
+                                                     source.delaySeconds.value_or(0.0f), diagnostics) *
+                        1000.0f;
+    converted.fadeMs = clampPitchLfoDurationSeconds(sourceFile, regionIndex, source.legacy ? "pitchlfo_fade" : "lfo_fade",
+                                                    source.fadeSeconds.value_or(0.0f), diagnostics) *
+                       1000.0f;
+    return converted;
+}
+
 ConvertedFilterEnvelope convertFilterEnvelope(const std::filesystem::path& sourceFile, const int regionIndex,
                                               const ::sfz::EGDescription& filterEG, const float depthCents,
                                               std::vector<Diagnostic>& diagnostics)
@@ -1178,6 +1414,8 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
         converted.pitchEnvelope =
             convertPitchEnvelope(sourceFile, regionIndex, *region.pitchEG, *explicitOpcodes.pitchEnvelopeDepthCents, diagnostics);
     }
+    if (const auto pitchLfo = selectPitchLfo(explicitOpcodes))
+        converted.pitchLfo = convertPitchLfo(sourceFile, regionIndex, *pitchLfo, diagnostics);
 
     (void)clampEnvelopeLevel(sourceFile, regionIndex, "ampeg_start", region.amplitudeEG.start, diagnostics);
     converted.ampEnvelope.start = 0.0f;
@@ -1374,6 +1612,17 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
             << "        },\n";
     }
 
+    if (region.pitchLfo)
+    {
+        lua << "        pitch_lfo = {\n"
+            << "            depth = " << luaNumber(region.pitchLfo->depth) << ",\n"
+            << "            rate_hz = " << luaNumber(region.pitchLfo->rateHz) << ",\n"
+            << "            phase_degrees = " << luaNumber(region.pitchLfo->phaseDegrees) << ",\n"
+            << "            delay_ms = " << luaNumber(region.pitchLfo->delayMs) << ",\n"
+            << "            fade_ms = " << luaNumber(region.pitchLfo->fadeMs) << ",\n"
+            << "        },\n";
+    }
+
     if (region.tuneCents || region.pitchKeytrack)
     {
         lua << "        pitch = {\n";
@@ -1541,6 +1790,23 @@ std::optional<ConvertedSfz> loadSfz(const std::filesystem::path& sfzFile, const 
                                               "Region " + std::to_string(i + 1) + " uses " + opcodeName +
                                                   "; generated Lua maps the current static pitcheg depth/attack/decay/hold/sustain "
                                                   "candidate but does not yet reproduce this advanced pitch envelope feature exactly."));
+        }
+        for (const auto& opcodeName : explicitOpcodes.unsupportedPitchLfoOpcodes)
+        {
+            diagnostics.push_back(makeWarning(
+                sfzFile, "unsupported-pitch-lfo",
+                "Region " + std::to_string(i + 1) + " uses " + opcodeName +
+                    "; generated Lua maps only the verified static pitch LFO subset: pitch depth, rate, phase, delay, and fade."));
+        }
+        const auto pitchLfoCandidateCount =
+            std::count_if(explicitOpcodes.pitchLfos.begin(), explicitOpcodes.pitchLfos.end(),
+                          [](const ExplicitPitchLfo& lfo) { return lfo.depthCents && differsFromDefault(*lfo.depthCents, 0.0f); });
+        if (pitchLfoCandidateCount > 1)
+        {
+            diagnostics.push_back(
+                makeWarning(sfzFile, "unsupported-pitch-lfo",
+                            "Region " + std::to_string(i + 1) +
+                                " uses multiple pitch LFOs; generated Lua maps the first verified static pitch LFO only."));
         }
         for (const auto& opcodeName : explicitOpcodes.unsupportedFilterEnvelopeOpcodes)
         {

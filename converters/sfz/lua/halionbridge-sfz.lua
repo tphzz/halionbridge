@@ -26,6 +26,7 @@ hb.capabilities = {
     tune = true,
     pitch_keytrack = true,
     pitch_envelope = true,
+    pitch_lfo = true,
     sample_offset = true,
     sample_end = true,
 
@@ -308,6 +309,49 @@ function hb.set_envelope_required(zone, parameter_prefix, envelope)
     end)
 end
 
+function hb.apply_pitch_lfo_required(zone, lfo)
+    if type(lfo) ~= "table" then
+        return false, "Failed to set required pitch LFO: pitch_lfo table is missing"
+    end
+
+    local ok, err = hb.set_parameter_required(zone, "LFO 1.WaveForm", 0)
+    if not ok then return false, err end
+
+    ok, err = hb.set_parameter_required(zone, "LFO 1.Sync", 0)
+    if not ok then return false, err end
+
+    ok, err = hb.set_parameter_required(zone, "LFO 1.Rate", lfo.rate_hz or 0)
+    if not ok then return false, err end
+
+    ok, err = hb.set_parameter_required(zone, "LFO 1.Delay", lfo.delay_ms or 0)
+    if not ok then return false, err end
+
+    ok, err = hb.set_parameter_required(zone, "LFO 1.FadeIn", lfo.fade_ms or 0)
+    if not ok then return false, err end
+
+    ok, err = hb.set_parameter_required(zone, "LFO 1.RandomPhase", false)
+    if not ok then return false, err end
+
+    ok, err = hb.set_parameter_required(zone, "LFO 1.InitPhase", lfo.phase_degrees or 0)
+    if not ok then return false, err end
+
+    ok, err = hb.set_parameter_required(zone, "LFO 1.Trigger", 1)
+    if not ok then return false, err end
+
+    return call_with_error("Failed to assign required pitch LFO modulation row", function()
+        local row = zone:getModulationMatrixRow(1)
+        if row == nil then
+            error("getModulationMatrixRow(1) returned nil")
+        end
+
+        row:setSource1(ModulationSource.lfo1)
+        row:setParameter("Source1.Polarity", 1)
+        row:setParameter("Destination.Destination", ModulationDestination.pitch)
+        row:setParameter("Destination.Depth", lfo.depth or 0)
+        row:setParameter("Destination.Bypass", false)
+    end)
+end
+
 function hb.sample_path(region)
     local playback = region and region.sample_playback or nil
     if type(playback) == "table" and playback.sample then
@@ -450,6 +494,12 @@ function hb.apply_optional_sample_fields(ctx, zone, region)
         if not ok then return false, err end
 
         ok, err = hb.set_envelope_required(zone, "Pitch Env", pitch_envelope)
+        if not ok then return false, err end
+    end
+
+    local pitch_lfo = region and region.pitch_lfo or nil
+    if type(pitch_lfo) == "table" then
+        local ok, err = hb.apply_pitch_lfo_required(zone, pitch_lfo)
         if not ok then return false, err end
     end
 

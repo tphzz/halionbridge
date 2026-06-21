@@ -2257,6 +2257,48 @@ class BridgeTests : public juce::UnitTest
             outputDir.deleteRecursively();
         }
 
+        beginTest("SFZ Converter - writes static pitch LFOs");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_pitch_lfo");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_pitch_lfo_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("pitch_lfo.sfz")
+                       .replaceWithText("<region> sample=sample.wav lokey=57 hikey=57 pitch_keycenter=57 "
+                                        "lfo01_pitch=120 lfo01_freq=2 lfo01_phase=0.25 lfo01_delay=1 lfo01_fade=1\n"
+                                        "<region> sample=sample.wav lokey=58 hikey=58 pitch_keycenter=58 "
+                                        "pitchlfo_depth=240 pitchlfo_freq=4 pitchlfo_delay=0.5 pitchlfo_fade=0.25\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+
+            const auto lua = outputDir.getChildFile("000_pitch_lfo.lua").loadFileAsString();
+            expect(lua.contains("pitch_lfo = {"));
+            expect(lua.contains("depth = 6"));
+            expect(lua.contains("rate_hz = 2"));
+            expect(lua.contains("phase_degrees = 90"));
+            expect(lua.contains("delay_ms = 1000"));
+            expect(lua.contains("fade_ms = 1000"));
+            expect(lua.contains("depth = 12"));
+            expect(lua.contains("rate_hz = 4"));
+            expect(lua.contains("delay_ms = 500"));
+            expect(lua.contains("fade_ms = 250"));
+
+            const auto helperLua = outputDir.getChildFile("halionbridge-sfz.lua").loadFileAsString();
+            expect(helperLua.contains("pitch_lfo = true"));
+            expect(helperLua.contains("\"LFO 1.Trigger\", 1"));
+            expect(helperLua.contains("row:setSource1(ModulationSource.lfo1)"));
+            expect(helperLua.contains("\"Destination.Destination\", ModulationDestination.pitch"));
+            expect(helperLua.contains("\"Destination.Depth\", lfo.depth or 0"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
         beginTest("SFZ Converter - writes explicit static amp envelopes");
         {
             auto sourceDir = cleanTempDirectory("halionbridge_sfz_amp_envelope");
@@ -2417,6 +2459,29 @@ class BridgeTests : public juce::UnitTest
             const auto result = halionbridge::converters::sfz::convertDirectory(options);
             expect(result.succeeded);
             expect(containsDiagnosticCode(result.diagnostics, "unsupported-pitch-envelope"));
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
+        beginTest("SFZ Converter - reports unsupported advanced pitch LFO features");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_unsupported_pitch_lfo");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_unsupported_pitch_lfo_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+            expect(sourceDir.getChildFile("unsupported.sfz")
+                       .replaceWithText("<group> lfo01_pitch=120 lfo01_freq=2 lfo01_pitch_oncc1=50 lfo01_wave=5 "
+                                        "lfo02_pitch=240 lfo02_freq=4 pitchlfo_depth_oncc1=60\n"
+                                        "<region> sample=sample.wav lokey=60 hikey=60 pitch_keycenter=60\n"));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+
+            const auto result = halionbridge::converters::sfz::convertDirectory(options);
+            expect(result.succeeded);
+            expect(containsDiagnosticCode(result.diagnostics, "unsupported-pitch-lfo"));
 
             sourceDir.deleteRecursively();
             outputDir.deleteRecursively();
