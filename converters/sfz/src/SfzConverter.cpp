@@ -103,6 +103,8 @@ struct ConvertedPitchLfo
     float phaseDegrees = 0.0f;
     float delayMs = 0.0f;
     float fadeMs = 0.0f;
+    int waveForm = 0;
+    float shape = 0.0f;
 };
 
 struct ConvertedRegion
@@ -173,6 +175,7 @@ struct ExplicitPitchLfo
     std::optional<float> phase;
     std::optional<float> delaySeconds;
     std::optional<float> fadeSeconds;
+    std::optional<int> wave;
 };
 
 struct ExplicitRegionOpcodes
@@ -305,6 +308,18 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
         return std::nullopt;
     }
 
+    static std::optional<int> readInt(const std::string& value)
+    {
+        auto parsed = 0;
+        const auto* begin = value.data();
+        const auto* end = value.data() + value.size();
+        const auto result = std::from_chars(begin, end, parsed);
+        if (result.ec == std::errc{} && result.ptr == end)
+            return parsed;
+
+        return std::nullopt;
+    }
+
     static ExplicitPitchLfo& pitchLfoFor(ExplicitRegionOpcodes& explicitOpcodes, const int index, const bool legacy)
     {
         const auto existing =
@@ -383,20 +398,39 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
     static void inspectNumberedPitchLfoOpcode(const int index, const std::string_view suffix, const std::string& value,
                                               ExplicitRegionOpcodes& explicitOpcodes)
     {
-        if (suffix == "pitch" || suffix == "freq" || suffix == "phase" || suffix == "delay" || suffix == "fade")
+        if (suffix == "pitch" || suffix == "freq" || suffix == "phase" || suffix == "delay" || suffix == "fade" || suffix == "wave")
         {
             auto& lfo = pitchLfoFor(explicitOpcodes, index, false);
-            const auto parsed = readFloat(value);
             if (suffix == "pitch")
+            {
+                const auto parsed = readFloat(value);
                 lfo.depthCents = parsed.value_or(0.0f);
+            }
             else if (suffix == "freq")
+            {
+                const auto parsed = readFloat(value);
                 lfo.frequencyHz = parsed.value_or(0.0f);
+            }
             else if (suffix == "phase")
+            {
+                const auto parsed = readFloat(value);
                 lfo.phase = parsed.value_or(0.0f);
+            }
             else if (suffix == "delay")
+            {
+                const auto parsed = readFloat(value);
                 lfo.delaySeconds = parsed.value_or(0.0f);
+            }
             else if (suffix == "fade")
+            {
+                const auto parsed = readFloat(value);
                 lfo.fadeSeconds = parsed.value_or(0.0f);
+            }
+            else if (suffix == "wave")
+            {
+                const auto parsed = readInt(value);
+                lfo.wave = parsed.value_or(1);
+            }
             return;
         }
 
@@ -1320,7 +1354,46 @@ ConvertedPitchLfo convertPitchLfo(const std::filesystem::path& sourceFile, const
     converted.fadeMs = clampPitchLfoDurationSeconds(sourceFile, regionIndex, source.legacy ? "pitchlfo_fade" : "lfo_fade",
                                                     source.fadeSeconds.value_or(0.0f), diagnostics) *
                        1000.0f;
+    switch (source.wave.value_or(1))
+    {
+    case 0:
+        converted.waveForm = 1;
+        converted.shape = 25.0f;
+        break;
+    case 1:
+        converted.waveForm = 0;
+        break;
+    case 6:
+        converted.waveForm = 4;
+        break;
+    case 7:
+        converted.waveForm = 2;
+        break;
+    case 12:
+        converted.waveForm = 6;
+        break;
+    default:
+        break;
+    }
     return converted;
+}
+
+bool isSupportedPitchLfoWave(const ExplicitPitchLfo& lfo)
+{
+    if (!lfo.wave)
+        return true;
+
+    switch (*lfo.wave)
+    {
+    case 0:
+    case 1:
+    case 6:
+    case 7:
+    case 12:
+        return true;
+    default:
+        return false;
+    }
 }
 
 ConvertedFilterEnvelope convertFilterEnvelope(const std::filesystem::path& sourceFile, const int regionIndex,
@@ -1415,7 +1488,19 @@ ConvertedRegion convertRegion(const std::filesystem::path& sourceFile, const int
             convertPitchEnvelope(sourceFile, regionIndex, *region.pitchEG, *explicitOpcodes.pitchEnvelopeDepthCents, diagnostics);
     }
     if (const auto pitchLfo = selectPitchLfo(explicitOpcodes))
-        converted.pitchLfo = convertPitchLfo(sourceFile, regionIndex, *pitchLfo, diagnostics);
+    {
+        if (isSupportedPitchLfoWave(*pitchLfo))
+        {
+            converted.pitchLfo = convertPitchLfo(sourceFile, regionIndex, *pitchLfo, diagnostics);
+        }
+        else
+        {
+            diagnostics.push_back(makeWarning(sourceFile, "unsupported-pitch-lfo",
+                                              "Region " + std::to_string(regionIndex + 1) + " uses lfo" + std::to_string(pitchLfo->index) +
+                                                  "_wave=" + std::to_string(*pitchLfo->wave) +
+                                                  "; generated Lua maps only verified static pitch LFO waveforms 0, 1, 6, 7, and 12."));
+        }
+    }
 
     (void)clampEnvelopeLevel(sourceFile, regionIndex, "ampeg_start", region.amplitudeEG.start, diagnostics);
     converted.ampEnvelope.start = 0.0f;
@@ -1620,6 +1705,8 @@ void appendRegionLua(std::ostringstream& lua, const ConvertedRegion& region)
             << "            phase_degrees = " << luaNumber(region.pitchLfo->phaseDegrees) << ",\n"
             << "            delay_ms = " << luaNumber(region.pitchLfo->delayMs) << ",\n"
             << "            fade_ms = " << luaNumber(region.pitchLfo->fadeMs) << ",\n"
+            << "            waveform = " << region.pitchLfo->waveForm << ",\n"
+            << "            shape = " << luaNumber(region.pitchLfo->shape) << ",\n"
             << "        },\n";
     }
 

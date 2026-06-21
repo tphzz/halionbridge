@@ -314,7 +314,10 @@ function hb.apply_pitch_lfo_required(zone, lfo)
         return false, "Failed to set required pitch LFO: pitch_lfo table is missing"
     end
 
-    local ok, err = hb.set_parameter_required(zone, "LFO 1.WaveForm", 0)
+    local ok, err = hb.set_parameter_required(zone, "LFO 1.WaveForm", lfo.waveform or 0)
+    if not ok then return false, err end
+
+    ok, err = hb.set_parameter_required(zone, "LFO 1.Shape", lfo.shape or 0)
     if not ok then return false, err end
 
     ok, err = hb.set_parameter_required(zone, "LFO 1.Sync", 0)
