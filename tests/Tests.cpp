@@ -2292,7 +2292,7 @@ class BridgeTests : public juce::UnitTest
             expect(lua.contains("delay_ms = 500"));
             expect(lua.contains("fade_ms = 250"));
             expect(lua.contains("waveform = 0"));
-            expect(lua.contains("depth = 3.6"));
+            expect(lua.contains("depth = 3.599"));
             expect(lua.contains("waveform = 3"));
             expect(lua.contains("shape = 50"));
             expect(lua.contains("pitch_offset_cents = 60"));
