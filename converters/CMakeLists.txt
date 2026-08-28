@@ -44,6 +44,56 @@ target_include_directories(halionbridge_converter_common_static
 )
 enable_halionbridge_strict_warnings(${HALIONBRIDGE_CONVERTER_COMMON_SOURCES})
 
+if(HALIONBRIDGE_ENABLE_CONVERTER_DX7)
+    add_subdirectory(
+        ${CMAKE_SOURCE_DIR}/forks/dxsyx
+        ${CMAKE_CURRENT_BINARY_DIR}/forks/dxsyx
+    )
+
+    file(GLOB HALIONBRIDGE_DX7_TEMPLATE_FILES CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/resources/dx7/dx7_*.vstpreset"
+    )
+    list(SORT HALIONBRIDGE_DX7_TEMPLATE_FILES)
+    list(LENGTH HALIONBRIDGE_DX7_TEMPLATE_FILES HALIONBRIDGE_DX7_TEMPLATE_COUNT)
+    if(NOT HALIONBRIDGE_DX7_TEMPLATE_COUNT EQUAL 32)
+        message(FATAL_ERROR
+            "The DX7 converter requires exactly 32 algorithm templates under resources/dx7; found ${HALIONBRIDGE_DX7_TEMPLATE_COUNT}."
+        )
+    endif()
+
+    juce_add_binary_data(halionbridge_dx7_assets
+        NAMESPACE halionbridge_dx7_assets
+        HEADER_NAME halionbridge_dx7_assets.h
+        SOURCES
+            ${CMAKE_SOURCE_DIR}/converters/dx7/lua/halionbridge-dx7.lua
+            ${HALIONBRIDGE_DX7_TEMPLATE_FILES}
+    )
+
+    set(HALIONBRIDGE_CONVERTER_DX7_SOURCES
+        ${CMAKE_SOURCE_DIR}/converters/dx7/src/Dx7Converter.cpp
+    )
+    add_library(halionbridge_converter_dx7_static STATIC ${HALIONBRIDGE_CONVERTER_DX7_SOURCES})
+    target_compile_features(halionbridge_converter_dx7_static PUBLIC cxx_std_23)
+    target_include_directories(halionbridge_converter_dx7_static
+        PUBLIC
+            ${CMAKE_SOURCE_DIR}/converters/dx7/include
+            ${CMAKE_SOURCE_DIR}/converters/common/include
+    )
+    target_link_libraries(halionbridge_converter_dx7_static
+        PRIVATE
+            halionbridge_converter_common_static
+            halionbridge_dx7_assets
+            dxsyx::dxsyx
+    )
+    enable_halionbridge_strict_warnings(${HALIONBRIDGE_CONVERTER_DX7_SOURCES})
+
+    halionbridge_register_converter_target(
+        TARGET halionbridge_converter_dx7_static
+        REGISTRATION_FUNCTION halionbridge::converters::dx7::registerConverter
+        HEADER halionbridge_converters/dx7/Dx7Converter.h
+    )
+endif()
+
 if(HALIONBRIDGE_ENABLE_CONVERTER_SFZ)
     function(halionbridge_add_sfizz_dependency)
         set(HALIONBRIDGE_RESTORE_BUILD_TESTING "${BUILD_TESTING}")

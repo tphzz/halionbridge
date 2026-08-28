@@ -15,20 +15,29 @@ namespace
 {
 
 constexpr const char* kBuildFileName = "halionbridge_build.lua";
-constexpr const char* kSfzHelperFileName = "halionbridge-sfz.lua";
 
 Diagnostic makeError(const std::filesystem::path& source, std::string code, std::string message)
 {
     return Diagnostic{DiagnosticLevel::error, source, 0, std::move(code), std::move(message)};
 }
 
-bool writeTextFile(const std::filesystem::path& path, const std::string& text)
+std::vector<std::byte> textBytes(const std::string_view text)
 {
-    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    auto result = std::vector<std::byte>{};
+    result.reserve(text.size());
+    for (const auto character : text)
+        result.push_back(static_cast<std::byte>(static_cast<unsigned char>(character)));
+    return result;
+}
+
+bool writeBinaryFile(const std::filesystem::path& path, const std::span<const std::byte> data)
+{
+    auto stream = std::ofstream(path, std::ios::binary | std::ios::trunc);
     if (!stream)
         return false;
 
-    stream.write(text.data(), static_cast<std::streamsize>(text.size()));
+    if (!data.empty())
+        stream.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
     return stream.good();
 }
 
@@ -43,7 +52,7 @@ std::filesystem::path makeTransactionPath(const std::filesystem::path& directory
              << targetFileName.filename().generic_string();
 
         auto path = directory / name.str();
-        std::error_code error;
+        auto error = std::error_code{};
         if (!std::filesystem::exists(path, error) && !error)
             return path;
     }
@@ -77,6 +86,20 @@ bool isFlatRelativeFilename(const std::filesystem::path& fileName)
     return normalized == fileName && normalized.filename() == fileName;
 }
 
+bool isSafeRelativePath(const std::filesystem::path& path)
+{
+    if (path.empty() || path.is_absolute() || path.has_root_name() || path.has_root_directory() || path.filename().empty())
+        return false;
+
+    for (const auto& component : path)
+    {
+        if (component.empty() || component == "." || component == "..")
+            return false;
+    }
+
+    return path.lexically_normal() == path;
+}
+
 bool hasLuaSuffix(const std::filesystem::path& fileName)
 {
     auto extension = fileName.extension().string();
@@ -94,17 +117,45 @@ std::string normalizedModuleNameKey(std::string text)
     return key;
 }
 
-bool isReservedHelperEntrypointName(const GeneratedLuaScript& script)
+bool generatedPathsConflict(const std::string_view first, const std::string_view second)
 {
-    return normalizedKey(script.fileName) == kSfzHelperFileName || normalizedModuleNameKey(script.moduleName) == "halionbridge-sfz";
+    if (first == second)
+        return true;
+
+    const auto isParent = [](const std::string_view parent, const std::string_view child)
+    { return child.size() > parent.size() && child.starts_with(parent) && child[parent.size()] == '/'; };
+    return isParent(first, second) || isParent(second, first);
+}
+
+bool addGeneratedPath(const std::filesystem::path& path, std::set<std::string>& seenPaths)
+{
+    const auto key = normalizedKey(path.generic_string());
+    if (std::ranges::any_of(seenPaths, [&key](const auto& existing) { return generatedPathsConflict(existing, key); }))
+        return false;
+
+    seenPaths.insert(key);
+    return true;
+}
+
+bool pathExistsNoFollow(const std::filesystem::path& path, std::error_code& error)
+{
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (status.type() == std::filesystem::file_type::not_found || error == std::make_error_code(std::errc::no_such_file_or_directory))
+    {
+        error.clear();
+        return false;
+    }
+    return !error && status.type() != std::filesystem::file_type::not_found;
 }
 
 struct PendingWrite
 {
+    std::filesystem::path relativePath;
     std::filesystem::path target;
     std::filesystem::path temporary;
     std::filesystem::path backup;
-    std::string text;
+    std::vector<std::byte> data;
+    bool isLuaFile = false;
     bool includeInGeneratedFiles = false;
     bool hadExistingTarget = false;
     bool committed = false;
@@ -114,7 +165,7 @@ void cleanupTransactionFiles(std::span<const PendingWrite> writes)
 {
     for (const auto& write : writes)
     {
-        std::error_code error;
+        auto error = std::error_code{};
         if (!write.temporary.empty())
             std::filesystem::remove(write.temporary, error);
         if (!write.backup.empty())
@@ -126,11 +177,12 @@ void rollbackWrites(std::span<PendingWrite> writes)
 {
     for (auto it = writes.rbegin(); it != writes.rend(); ++it)
     {
-        std::error_code error;
+        auto error = std::error_code{};
         if (it->committed)
             std::filesystem::remove(it->target, error);
 
-        if (it->hadExistingTarget && !it->backup.empty() && std::filesystem::exists(it->backup, error))
+        error.clear();
+        if (it->hadExistingTarget && !it->backup.empty() && pathExistsNoFollow(it->backup, error))
         {
             error.clear();
             std::filesystem::rename(it->backup, it->target, error);
@@ -140,6 +192,74 @@ void rollbackWrites(std::span<PendingWrite> writes)
         if (!it->temporary.empty())
             std::filesystem::remove(it->temporary, error);
     }
+}
+
+void removeCreatedDirectories(std::span<const std::filesystem::path> directories)
+{
+    for (auto it = directories.rbegin(); it != directories.rend(); ++it)
+    {
+        auto error = std::error_code{};
+        std::filesystem::remove(*it, error);
+    }
+}
+
+bool inspectParentDirectories(const std::filesystem::path& outputDirectory, const std::filesystem::path& relativePath,
+                              std::filesystem::path& invalidParent)
+{
+    auto current = outputDirectory;
+    for (const auto& component : relativePath.parent_path())
+    {
+        current /= component;
+        auto error = std::error_code{};
+        const auto exists = pathExistsNoFollow(current, error);
+        if (error)
+        {
+            invalidParent = current;
+            return false;
+        }
+
+        if (!exists)
+            continue;
+
+        const auto status = std::filesystem::symlink_status(current, error);
+        if (error || std::filesystem::is_symlink(status) || !std::filesystem::is_directory(status))
+        {
+            invalidParent = current;
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool createParentDirectories(const std::filesystem::path& outputDirectory, const std::filesystem::path& relativePath,
+                             std::vector<std::filesystem::path>& createdDirectories, std::filesystem::path& failedDirectory)
+{
+    auto current = outputDirectory;
+    for (const auto& component : relativePath.parent_path())
+    {
+        current /= component;
+        auto error = std::error_code{};
+        if (pathExistsNoFollow(current, error))
+        {
+            if (error)
+            {
+                failedDirectory = current;
+                return false;
+            }
+            continue;
+        }
+
+        error.clear();
+        if (!std::filesystem::create_directory(current, error) || error)
+        {
+            failedDirectory = current;
+            return false;
+        }
+        createdDirectories.push_back(current);
+    }
+
+    return true;
 }
 
 } // namespace
@@ -192,8 +312,9 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
     }
 
     auto buildEntrypointCount = 0;
-    std::set<std::string> seenModuleNames;
-    std::set<std::string> seenFileNames;
+    auto seenModuleNames = std::set<std::string>{};
+    auto seenScriptFileNames = std::set<std::string>{};
+    auto seenGeneratedPaths = std::set<std::string>{normalizedKey(kBuildFileName)};
     for (const auto& script : request.scripts)
     {
         const auto scriptFileName = std::filesystem::path(script.fileName);
@@ -206,10 +327,17 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
         }
 
         const auto fileKey = normalizedKey(scriptFileName.generic_string());
-        if (!seenFileNames.insert(fileKey).second)
+        if (!seenScriptFileNames.insert(fileKey).second)
         {
             result.diagnostics.push_back(makeError(request.outputDirectory, "duplicate-script-filename",
                                                    "Duplicate generated Lua script filename: " + script.fileName));
+            return result;
+        }
+
+        if (!addGeneratedPath(scriptFileName, seenGeneratedPaths))
+        {
+            result.diagnostics.push_back(makeError(request.outputDirectory, "duplicate-generated-path",
+                                                   "Generated output path collides with another output: " + script.fileName));
             return result;
         }
 
@@ -224,18 +352,30 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
             return result;
         }
 
-        if (isReservedHelperEntrypointName(script))
-        {
-            result.diagnostics.push_back(makeError(request.outputDirectory, "reserved-helper-entrypoint",
-                                                   "Generated helper module must not be listed as a build entrypoint: " + script.fileName));
-            return result;
-        }
-
         const auto moduleKey = normalizedModuleNameKey(script.moduleName);
         if (!seenModuleNames.insert(moduleKey).second)
         {
             result.diagnostics.push_back(makeError(request.outputDirectory, "duplicate-module-name",
                                                    "Duplicate generated Lua build entrypoint module name: " + script.moduleName));
+            return result;
+        }
+    }
+
+    for (const auto& file : request.files)
+    {
+        if (!isSafeRelativePath(file.relativePath))
+        {
+            result.diagnostics.push_back(
+                makeError(request.outputDirectory, "invalid-generated-path",
+                          "Generated file paths must stay below the build directory: " + file.relativePath.generic_string()));
+            return result;
+        }
+
+        if (!addGeneratedPath(file.relativePath, seenGeneratedPaths))
+        {
+            result.diagnostics.push_back(
+                makeError(request.outputDirectory, "duplicate-generated-path",
+                          "Generated output path collides with another output: " + file.relativePath.generic_string()));
             return result;
         }
     }
@@ -247,7 +387,7 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
         return result;
     }
 
-    std::error_code error;
+    auto error = std::error_code{};
     if (!std::filesystem::exists(request.outputDirectory, error))
         std::filesystem::create_directories(request.outputDirectory, error);
 
@@ -258,38 +398,7 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
         return result;
     }
 
-    std::vector<std::filesystem::path> outputFiles;
-    outputFiles.reserve(request.scripts.size() + 1);
-    outputFiles.push_back(result.buildFile);
-    for (const auto& script : request.scripts)
-        outputFiles.push_back(request.outputDirectory / script.fileName);
-
-    if (!request.overwrite)
-    {
-        for (const auto& outputFile : outputFiles)
-        {
-            if (std::filesystem::exists(outputFile, error))
-            {
-                result.diagnostics.push_back(
-                    makeError(outputFile, "already-exists", outputFile.string() + " already exists. Use --overwrite to replace it."));
-                return result;
-            }
-        }
-    }
-    else
-    {
-        for (const auto& outputFile : outputFiles)
-        {
-            if (std::filesystem::exists(outputFile, error) && !std::filesystem::is_regular_file(outputFile, error))
-            {
-                result.diagnostics.push_back(
-                    makeError(outputFile, "not-regular-file", outputFile.string() + " exists but is not a regular file."));
-                return result;
-            }
-        }
-    }
-
-    std::ostringstream buildFileText;
+    auto buildFileText = std::ostringstream{};
     buildFileText << "return {\n";
     for (const auto& script : request.scripts)
     {
@@ -298,11 +407,56 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
     }
     buildFileText << "}\n";
 
-    auto pendingWrites = std::vector<PendingWrite>();
-    pendingWrites.reserve(request.scripts.size() + 1);
-    pendingWrites.push_back(PendingWrite{result.buildFile, {}, {}, buildFileText.str(), false});
+    auto pendingWrites = std::vector<PendingWrite>{};
+    pendingWrites.reserve(request.scripts.size() + request.files.size() + 1);
+    pendingWrites.push_back(PendingWrite{kBuildFileName, result.buildFile, {}, {}, textBytes(buildFileText.str()), false, false});
     for (const auto& script : request.scripts)
-        pendingWrites.push_back(PendingWrite{request.outputDirectory / script.fileName, {}, {}, script.luaSource, true});
+    {
+        pendingWrites.push_back(
+            PendingWrite{script.fileName, request.outputDirectory / script.fileName, {}, {}, textBytes(script.luaSource), true, true});
+    }
+    for (const auto& file : request.files)
+    {
+        pendingWrites.push_back(
+            PendingWrite{file.relativePath, request.outputDirectory / file.relativePath, {}, {}, file.data, false, true});
+    }
+
+    for (const auto& write : pendingWrites)
+    {
+        auto invalidParent = std::filesystem::path{};
+        if (!inspectParentDirectories(request.outputDirectory, write.relativePath, invalidParent))
+        {
+            result.diagnostics.push_back(
+                makeError(invalidParent, "not-directory", invalidParent.string() + " is not a usable output directory."));
+            return result;
+        }
+
+        error.clear();
+        const auto targetExists = pathExistsNoFollow(write.target, error);
+        if (error)
+        {
+            result.diagnostics.push_back(makeError(write.target, "write-failed", "Failed to inspect " + write.target.string()));
+            return result;
+        }
+
+        if (targetExists && !request.overwrite)
+        {
+            result.diagnostics.push_back(
+                makeError(write.target, "already-exists", write.target.string() + " already exists. Use --overwrite to replace it."));
+            return result;
+        }
+
+        if (targetExists)
+        {
+            const auto status = std::filesystem::symlink_status(write.target, error);
+            if (error || std::filesystem::is_symlink(status) || !std::filesystem::is_regular_file(status))
+            {
+                result.diagnostics.push_back(
+                    makeError(write.target, "not-regular-file", write.target.string() + " exists but is not a regular file."));
+                return result;
+            }
+        }
+    }
 
     for (size_t i = 0; i < pendingWrites.size(); ++i)
     {
@@ -316,7 +470,7 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
             return result;
         }
 
-        if (!writeTextFile(write.temporary, write.text))
+        if (!writeBinaryFile(write.temporary, write.data))
         {
             result.diagnostics.push_back(makeError(write.target, "write-failed", "Failed to write " + write.target.string()));
             cleanupTransactionFiles(pendingWrites);
@@ -324,15 +478,31 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
         }
     }
 
+    auto createdDirectories = std::vector<std::filesystem::path>{};
+    for (const auto& write : pendingWrites)
+    {
+        auto failedDirectory = std::filesystem::path{};
+        if (!createParentDirectories(request.outputDirectory, write.relativePath, createdDirectories, failedDirectory))
+        {
+            result.diagnostics.push_back(
+                makeError(failedDirectory, "write-failed", "Failed to create output directory " + failedDirectory.string()));
+            rollbackWrites(pendingWrites);
+            removeCreatedDirectories(createdDirectories);
+            return result;
+        }
+    }
+
     for (size_t i = 0; i < pendingWrites.size(); ++i)
     {
         auto& write = pendingWrites[i];
-        if (std::filesystem::exists(write.target, error))
+        error.clear();
+        if (pathExistsNoFollow(write.target, error))
         {
             if (error)
             {
                 result.diagnostics.push_back(makeError(write.target, "write-failed", "Failed to inspect " + write.target.string()));
                 rollbackWrites(pendingWrites);
+                removeCreatedDirectories(createdDirectories);
                 return result;
             }
 
@@ -343,6 +513,7 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
                 result.diagnostics.push_back(
                     makeError(write.target, "write-failed", "Failed to reserve backup path for " + write.target.string()));
                 rollbackWrites(pendingWrites);
+                removeCreatedDirectories(createdDirectories);
                 return result;
             }
 
@@ -352,6 +523,7 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
             {
                 result.diagnostics.push_back(makeError(write.target, "write-failed", "Failed to back up " + write.target.string()));
                 rollbackWrites(pendingWrites);
+                removeCreatedDirectories(createdDirectories);
                 return result;
             }
         }
@@ -359,6 +531,7 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
         {
             result.diagnostics.push_back(makeError(write.target, "write-failed", "Failed to inspect " + write.target.string()));
             rollbackWrites(pendingWrites);
+            removeCreatedDirectories(createdDirectories);
             return result;
         }
 
@@ -368,6 +541,7 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
         {
             result.diagnostics.push_back(makeError(write.target, "write-failed", "Failed to write " + write.target.string()));
             rollbackWrites(pendingWrites);
+            removeCreatedDirectories(createdDirectories);
             return result;
         }
 
@@ -378,7 +552,11 @@ BuildDirectoryResult writeBuildDirectory(const BuildDirectoryRequest& request)
 
     for (const auto& write : pendingWrites)
     {
-        if (write.includeInGeneratedFiles)
+        if (!write.includeInGeneratedFiles)
+            continue;
+
+        result.generatedFiles.push_back(write.target);
+        if (write.isLuaFile)
             result.generatedLuaFiles.push_back(write.target);
     }
 

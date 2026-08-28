@@ -14,6 +14,9 @@
 #include "halionbridge_converters/BuildDirectoryEmitter.h"
 #include "halionbridge_converters/Converter.h"
 #include "halionbridge_converters/sfz/SfzConverter.h"
+#if defined(HALIONBRIDGE_ENABLE_CONVERTER_DX7) && HALIONBRIDGE_ENABLE_CONVERTER_DX7
+#include "halionbridge_converters/dx7/Dx7Converter.h"
+#endif
 #endif
 #include <juce_core/juce_core.h>
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -449,6 +452,7 @@ class BridgeTests : public juce::UnitTest
             expect(classify({"init", "C:/build"}) == halionbridge::detail::CliCommandKind::init);
             expect(classify({"convert", "sfz"}) == halionbridge::detail::CliCommandKind::convert);
             expect(classify({"remap-vstpresets"}) == halionbridge::detail::CliCommandKind::remapVstPresets);
+            expect(classify({"inspect-vstpresets"}) == halionbridge::detail::CliCommandKind::inspectVstPresets);
             expect(classify({"vstpreset-metadata"}) == halionbridge::detail::CliCommandKind::vstPresetMetadata);
             expect(classify({"--halionbridge-build-worker", "C:/build"}) == halionbridge::detail::CliCommandKind::buildWorker);
             expect(classify({"--halionbridge-scan-plugin"}) == halionbridge::detail::CliCommandKind::scanPluginWorker);
@@ -1063,7 +1067,8 @@ class BridgeTests : public juce::UnitTest
                   halionbridge::RunResult::runtimeSetupFailed, halionbridge::RunResult::anotherInstanceRunning,
                   halionbridge::RunResult::pluginNotFound, halionbridge::RunResult::pluginLoadFailed,
                   halionbridge::RunResult::startupStopped, halionbridge::RunResult::presetApplyFailed, halionbridge::RunResult::buildFailed,
-                  halionbridge::RunResult::stopped, halionbridge::RunResult::timedOut, halionbridge::RunResult::cleanupFailed})
+                  halionbridge::RunResult::stopped, halionbridge::RunResult::timedOut, halionbridge::RunResult::cleanupFailed,
+                  halionbridge::RunResult::inspectionFailed})
             {
                 const auto exitCode = halionbridge::detail::runResultToBuildWorkerExitCode(result);
                 const auto mapped = halionbridge::detail::buildWorkerExitCodeToRunResult(exitCode);
@@ -1198,10 +1203,12 @@ class BridgeTests : public juce::UnitTest
             expect(tempDir.getChildFile("halionbridge_builder.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("builder_bootstrap.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("halionbridge-sfz.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("halionbridge-dx7.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("HALIONBRIDGE_RUNTIME.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("HALIONBRIDGE_BUILDER.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("BUILDER_BOOTSTRAP.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("HALIONBRIDGE-SFZ.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("HALIONBRIDGE-DX7.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("nested").createDirectory());
             expect(tempDir.getChildFile("nested").getChildFile("000_nested.lua").replaceWithText("return {}"));
 
@@ -1222,10 +1229,12 @@ class BridgeTests : public juce::UnitTest
             expect(!contains(generatedNames, "halionbridge_builder.lua"));
             expect(!contains(generatedNames, "builder_bootstrap.lua"));
             expect(!contains(generatedNames, "halionbridge-sfz.lua"));
+            expect(!contains(generatedNames, "halionbridge-dx7.lua"));
             expect(!contains(generatedNames, "HALIONBRIDGE_RUNTIME.lua"));
             expect(!contains(generatedNames, "HALIONBRIDGE_BUILDER.lua"));
             expect(!contains(generatedNames, "BUILDER_BOOTSTRAP.lua"));
             expect(!contains(generatedNames, "HALIONBRIDGE-SFZ.lua"));
+            expect(!contains(generatedNames, "HALIONBRIDGE-DX7.lua"));
             expect(!contains(generatedNames, "000_nested.lua"));
 
             tempDir.deleteRecursively();
@@ -1238,6 +1247,7 @@ class BridgeTests : public juce::UnitTest
             expect(tempDir.getChildFile("001_first.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("helper.lua").replaceWithText("return {}"));
             expect(tempDir.getChildFile("halionbridge-sfz.lua").replaceWithText("return {}"));
+            expect(tempDir.getChildFile("halionbridge-dx7.lua").replaceWithText("return {}"));
 
             auto result = halionbridge::detail::runInitCommand(juce::StringArray{"init"});
             expectEquals(result.exitCode, 1);
@@ -1265,6 +1275,7 @@ class BridgeTests : public juce::UnitTest
             expect(tempDir.getChildFile("halionbridge_build.lua").existsAsFile());
             expect(tempDir.getChildFile("halionbridge_build.lua").loadFileAsString().contains("helper.lua"));
             expect(!tempDir.getChildFile("halionbridge_build.lua").loadFileAsString().contains("halionbridge-sfz.lua"));
+            expect(!tempDir.getChildFile("halionbridge_build.lua").loadFileAsString().contains("halionbridge-dx7.lua"));
 
             result = halionbridge::detail::runInitCommand(juce::StringArray{"init", tempDir.getFullPathName()});
             expectEquals(result.exitCode, 1);
@@ -1330,6 +1341,16 @@ class BridgeTests : public juce::UnitTest
             expect(!converters.empty());
             const auto* sfzConverter = registry.find("sfz");
             expect(sfzConverter != nullptr);
+#if defined(HALIONBRIDGE_ENABLE_CONVERTER_DX7) && HALIONBRIDGE_ENABLE_CONVERTER_DX7
+            const auto* dx7Converter = registry.find("dx7");
+            expect(dx7Converter != nullptr);
+            if (dx7Converter != nullptr)
+            {
+                expect(dx7Converter->validateArguments != nullptr);
+                expect(dx7Converter->visibility == halionbridge::converters::ConverterVisibility::listed);
+                expect(dx7Converter->sourcePathKind == halionbridge::converters::ConverterSourcePathKind::fileOrDirectory);
+            }
+#endif
             expect(registry.find("missing") == nullptr);
             if (sfzConverter != nullptr)
             {
@@ -1553,12 +1574,11 @@ class BridgeTests : public juce::UnitTest
             expect(!result.succeeded);
             expect(containsDiagnosticCode(result.diagnostics, "no-build-entrypoints"));
 
-            auto reservedHelperEntrypoint = request;
-            reservedHelperEntrypoint.scripts.front().moduleName = "halionbridge-sfz.lua";
-            reservedHelperEntrypoint.scripts.front().fileName = "halionbridge-sfz.lua";
-            result = halionbridge::converters::writeBuildDirectory(reservedHelperEntrypoint);
-            expect(!result.succeeded);
-            expect(containsDiagnosticCode(result.diagnostics, "reserved-helper-entrypoint"));
+            auto roleIsAuthoritative = request;
+            roleIsAuthoritative.scripts.front().moduleName = "halionbridge-sfz.lua";
+            roleIsAuthoritative.scripts.front().fileName = "halionbridge-sfz.lua";
+            result = halionbridge::converters::writeBuildDirectory(roleIsAuthoritative);
+            expect(result.succeeded);
 
             tempDir.deleteRecursively();
         }

@@ -24,6 +24,7 @@ constexpr auto kRunResultValues = std::array{
     RunResult::stopped,
     RunResult::timedOut,
     RunResult::cleanupFailed,
+    RunResult::inspectionFailed,
 };
 
 } // namespace

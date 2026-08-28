@@ -18,6 +18,7 @@ enum class CliCommandKind
     init,
     convert,
     remapVstPresets,
+    inspectVstPresets,
     vstPresetMetadata,
     buildWorker,
     scanPluginWorker,
@@ -58,11 +59,20 @@ struct VstPresetRemapOptionsParseResult
     std::vector<CliDiagnostic> diagnostics;
 };
 
+struct VstPresetInspectionOptionsParseResult
+{
+    std::optional<VstPresetInspectionOptions> options;
+    CliParseErrorKind errorKind = CliParseErrorKind::none;
+    std::vector<CliDiagnostic> diagnostics;
+};
+
 CliCommandKind classifyCliCommand(std::span<const std::string> args) noexcept;
 BuildOptionsParseResult parseBuildOptionsDetailed(std::span<const std::string> args);
 std::optional<AppOptions> parseBuildOptions(std::span<const std::string> args);
 VstPresetRemapOptionsParseResult parseVstPresetRemapOptionsDetailed(std::span<const std::string> args);
 std::optional<VstPresetRemapOptions> parseVstPresetRemapOptions(std::span<const std::string> args);
+VstPresetInspectionOptionsParseResult parseVstPresetInspectionOptionsDetailed(std::span<const std::string> args);
+std::optional<VstPresetInspectionOptions> parseVstPresetInspectionOptions(std::span<const std::string> args);
 std::optional<AppOptions> parseBuildWorkerOptions(std::span<const std::string> args);
 
 } // namespace halionbridge::detail

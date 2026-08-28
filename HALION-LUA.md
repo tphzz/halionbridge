@@ -36,6 +36,26 @@ The builder treats the required positional build directory as the runtime root f
 
 The generic bootstrap vstpreset must contain inline Lua that calls `require("halionbridge_runtime")`. `halion-lua/builder_bootstrap.lua` is the reference source for the inline script embedded in `halion-lua/builder_bootstrap.vstpreset`; it is not a runtime module to load from the build directory.
 
+## Optional Build Manifest
+
+A build directory may contain `halionbridge_build_manifest.json` when its scripts save artifacts into nested relative directories. The manifest is a host-side preflight contract and is not loaded by Lua:
+
+```json
+{
+  "schema_version": 1,
+  "output_directories": [
+    "library/instrument_a",
+    "library/instrument_b"
+  ]
+}
+```
+
+`schema_version` must be the integer `1`. `output_directories` must be an array of unique, non-empty relative directory strings normalized with forward slashes. Entries must not contain backslashes, absolute or rooted paths, empty components, `.` or `..`; duplicates are compared case-insensitively so one manifest remains portable between Windows and macOS.
+
+Before HALion is loaded or instantiated, halionbridge parses the optional manifest and creates every declared directory below the effective preset output root. The effective root is the build directory unless `--output-directory` was supplied. Existing parents must be real directories rather than files or symbolic links. A malformed/unsupported manifest, unusable parent, or directory-creation failure stops the build before plugin startup; directories created during a failed preflight are rolled back. Omitting the manifest preserves existing behavior, so flat-output and script-managed build directories do not need one.
+
+Build scripts still own their output filenames and call `ctx.save_preset()` normally. The manifest declares only directories that must exist before synchronous HALion script execution; it is not an artifact list, does not constrain scripts to those directories, and does not change the `ctx` API.
+
 ## Build Script Entrypoint
 
 Each listed module must return either a function:
@@ -169,10 +189,8 @@ end
 
 More examples can be found in `examples`.
 
-## Converter-generated Lua
+## Generated Build Directories
 
-Converters such as `halionbridge convert sfz` generate ordinary build directories that follow this same contract. The generated `halionbridge_build.lua` is just an ordered list of generated Lua build script modules, and each listed module returns a normal build script function. A converter-generated directory may also contain helper modules that are required by those build scripts but are intentionally not listed in `halionbridge_build.lua`. Generated scripts should remain readable source: comments should explain the HALion object assumptions, path handling, and parameter assignments so converter authors can inspect and adjust the output before running `halionbridge build <build-directory>`.
+Converters and other generators produce ordinary build directories that follow this same contract. Their `halionbridge_build.lua` is an ordered list of normal build script modules, and each listed module returns one of the documented entrypoint forms. A generated directory may also contain helper modules or binary resources that are required by its build scripts but intentionally not listed in `halionbridge_build.lua`.
 
-Generated build scripts must distinguish assignments that are essential to a correct preset from optional decoration. For the built-in SFZ converter, sample-zone type, sample filename, root key, key range, velocity range, and amp-envelope assignment are required assignments: if HALion rejects any of them, the generated build script returns `ok = false` before saving. Optional assignments such as display names, sustain-loop parameters, amp velocity-to-level, and filter cutoff may be attempted defensively and logged as skipped when HALion rejects them. Generated SFZ scripts write the sample filename, root key, loop parameters, amp envelope, and optional tone parameters before the final key/velocity fields so audio-file sampler metadata cannot overwrite the intended SFZ mapping.
-
-Generated SFZ scripts always set `Amp Env.EnvelopePoints` and `Amp Env.SustainIndex` explicitly. This is part of the build-script contract because SFZ amp-envelope defaults affect playback: for example, `ampeg_release=0` means an immediate release, while HALion's default sample-zone envelope may fade. Converter authors extending the generated scripts should preserve this required assignment behavior unless they intentionally replace it with a more accurate envelope implementation.
+Generated scripts should remain readable source. Comments should explain relevant HALion object assumptions, required assignments, path handling, and failure behavior so authors can inspect or adjust the build before running `halionbridge build <build-directory>`. Essential assignments should fail the current entrypoint before saving an incomplete preset; optional decoration may be attempted defensively when the generated format contract permits it. Format-specific mapping behavior belongs in the converter documentation, not in this generic builder API.

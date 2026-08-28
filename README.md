@@ -19,7 +19,7 @@ This makes scripted instrument builds practical while keeping the file-writing l
 5. Build scripts create HALion objects such as layers, zones, sample mappings, parameters, and presets.
 6. HALion saves the requested output presets and writes success or failure marker presets that halionbridge observes.
 
-For source formats such as SFZ, halionbridge can also generate the Lua build directory first. The generated Lua remains normal, inspectable build source that can be edited before running the HALion build.
+For source formats such as SFZ and Yamaha DX7 SysEx, halionbridge can also generate the Lua build directory first. The generated Lua remains normal, inspectable build source that can be edited before running the HALion build.
 
 ## What This Is
 
@@ -37,9 +37,10 @@ For source formats such as SFZ, halionbridge can also generate the Lua build dir
 ### Use Cases
 
 * **Programmatic Instrument Creation:** Build sample-mapped instruments—including layers, zones, key ranges, velocity ranges, sample assignments, and parameters—directly via Lua instead of manually assembling them in the HALion GUI.
-* **Automated Converter Workflows:** Generate `.vstpreset` files automatically from structured data (e.g., CSV databases) or existing source formats (like SFZ) by bridging them through Lua build scripts.
+* **Automated Converter Workflows:** Generate `.vstpreset` files automatically from structured data or existing source formats such as SFZ and Yamaha DX7 SysEx by bridging them through Lua build scripts.
 * **Reproducible Preset Libraries:** Treat HALion presets as reliable build artifacts that can be entirely regenerated from source Lua scripts and sample files.
 * **Preset Relocation:** Copy existing HALion `.vstpreset` trees and ask HALion to rewrite embedded sample path prefixes after moving a sample library.
+* **HALion-Side Preset Introspection:** Load one preset or a preset tree through HALion and export its Program Tree, parameter definitions, current values, display strings, and modulation rows as versioned JSON.
 * **Metadata Batch Editing:** Export VSTPreset metadata to CSV, edit it in a spreadsheet or script, and apply it to copied preset files.
 * **CI and Headless Automation:** Execute scripted HALion builds seamlessly on build servers or CI pipelines without opening an audio device.
 * **Script Debugging:** Visually inspect scripted builds by using `--gui` or `--nokill` flags to keep the HALion GUI open after a run.
@@ -47,8 +48,9 @@ For source formats such as SFZ, halionbridge can also generate the Lua build dir
 ### Features
 
 * **Headless & Offline Processing Loop:** Runs as an embeddable standalone console app. It utilizes an offline manual processing loop to keep the HALion plugin alive while Lua scripts execute, completely bypassing the need for an active audio device.
-* **Native Format Conversion Setup:** Commands like `halionbridge convert sfz` parse source files or directories and generate a flat or explicitly routed `halionbridge` build directory. Users can review or edit these generated Lua scripts before triggering the final build.
+* **Native Format Conversion Setup:** Commands such as `halionbridge convert sfz` and `halionbridge convert dx7` parse source files or directories and generate a flat or explicitly routed `halionbridge` build directory. Users can review or edit these generated Lua scripts before triggering the final build.
 * **Preset Path Remapping:** `halionbridge remap-vstpresets` stages copied presets, lets HALion rewrite matching `SampleOsc.Filename` prefixes, and copies the remapped presets to a clean output directory.
+* **Preset Parameter Reports:** `halionbridge inspect-vstpresets` asks HALion itself to load each preset and writes a deterministic JSON report for converter validation and other inspection tooling.
 * **Preset Metadata CSV Editing:** `halionbridge vstpreset-metadata` reads and rewrites VST3 preset `Info` metadata offline, preserving the HALion program data in the preset file.
 * **Marker-Based Status Detection:** Tracks build progress and completion by waiting for HALion to write `.vstpreset` status markers into the build directory. Temporary progress markers are automatically cleaned up, while failure markers are preserved for diagnostics.
 * **Embedded Bootstrap:** Automatically applies the bundled HALion bootstrap `.vstpreset` internally, meaning users only ever need to pass their target build directory to the CLI.
@@ -66,7 +68,7 @@ halionbridge looks for the HALion 7 VST3 plugin at the normal Steinberg install 
 - Windows: `C:\Program Files\Common Files\VST3\Steinberg\HALion 7.vst3`
 - macOS: `/Library/Audio/Plug-Ins/VST3/Steinberg/HALion 7.vst3`
 
-The build directory must contain `halionbridge_build.lua` and the Lua build script files referenced from that file. You can find examples in `examples`. If you already have Lua build scripts in a directory, run `halionbridge init <directory>` to create a simple sorted `halionbridge_build.lua` for them. Review the generated file before building: `init` lists every top-level non-infrastructure `.lua` file, so helper modules that are required by build scripts but are not build entrypoints should be removed from the list. Converter-owned infrastructure helpers such as `halionbridge-sfz.lua` are excluded automatically.
+The build directory must contain `halionbridge_build.lua` and the Lua build script files referenced from that file. You can find examples in `examples`. If you already have Lua build scripts in a directory, run `halionbridge init <directory>` to create a simple sorted `halionbridge_build.lua` for them. Review the generated file before building: `init` lists every top-level non-infrastructure `.lua` file, so helper modules that are required by build scripts but are not build entrypoints should be removed from the list. Converter-owned infrastructure helpers such as `halionbridge-sfz.lua` and `halionbridge-dx7.lua` are excluded automatically.
 
 ```bash
 # Show command-line help
@@ -75,6 +77,8 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 # Show command-specific help
 ./halionbridge build --help
 ./halionbridge convert sfz --help
+./halionbridge convert dx7 --help
+./halionbridge inspect-vstpresets --help
 ./halionbridge vstpreset-metadata --help
 
 # Show the Git-derived build version
@@ -95,12 +99,27 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 # Include nested .sfz files below the source directory; generated Lua stays flat in the build root
 ./halionbridge convert sfz /path/to/sfz-source-directory --recursive
 
+# Generate one HALion preset build entrypoint for every voice in one DX7 SysEx bank
+./halionbridge convert dx7 /path/to/bank.syx /path/to/generated-dx7-build
+
+# Batch-convert every .syx file below a directory, including nested folders
+./halionbridge convert dx7 /path/to/dx7-library /path/to/generated-dx7-build --recursive
+
+# Run the generated scripts in HALion and keep the nested preset library separate
+./halionbridge build /path/to/generated-dx7-build --output-directory /path/to/dx7-presets
+
 # Copy a preset tree and remap embedded sample path prefixes through HALion
 ./halionbridge remap-vstpresets \
   --input-directory /path/to/old-presets \
   --output-directory /path/to/remapped-presets \
   --old-root /path/to/old-samples \
   --new-root /path/to/new-samples
+
+# Load every preset through HALion and export its complete parameter surface
+./halionbridge inspect-vstpresets \
+  --input /path/to/presets \
+  --output-json /path/to/inspection.json \
+  --recursive
 
 # Export editable VSTPreset metadata to CSV
 ./halionbridge vstpreset-metadata export \
@@ -149,9 +168,15 @@ The SFZ converter is a setup step: it generates normal Lua build files and does 
 
 Generated SFZ output includes an inspectable helper module, `halionbridge-sfz.lua`, plus one build entrypoint script per source `.sfz`. The current converter covers the common sample-mapping path: sample filenames, key/velocity ranges, root keys, playback ranges, sustain loops, gain, pan, key/velocity crossfades, static amplitude envelopes, static pitch/tuning, a simple static pitch LFO subset with selected wave shapes including square/pulse pitch LFOs, simple static pitch and filter envelope subsets, and rough static filter approximations. Unsupported or unverified SFZ features are reported as warnings instead of being silently treated as exact conversions. Detailed mapping notes and current parity limits live in `DEVELOPMENT.md`.
 
-Build scripts receive `ctx.output_dir`, which equals `ctx.script_dir` unless `--output-directory` is supplied. The builder's `ctx.save_preset()` wrapper redirects ordinary build-directory preset saves into `ctx.output_dir`, so generated SFZ builds and older scripts that save to `ctx.path_join(ctx.script_dir, "name.vstpreset")` can write their presets to a separate output tree without moving Lua source or samples.
+The DX7 converter is also an offline setup step. It accepts one Yamaha DX7 `.syx` file or a directory, scans nested folders only with `--recursive`, validates the complete selected batch, and emits one readable Lua entrypoint per voice. Supported input includes Yamaha-framed 32-voice banks, exact 4,096-byte raw banks, framed single voices, and concatenated framed messages. A checksum, framing, high-bit, or other structural error aborts the batch before any build output is written. Out-of-range stored parameters are normalized with warnings by default; use `--strict-parameters` to reject them instead.
+
+Each generated DX7 entrypoint selects one of 32 embedded, algorithm-specific HALion FM Zone templates and records the complete normalized operator and global voice data. The later `halionbridge build` run loads a fresh template for every voice and writes nested `.vstpreset` output such as `source/bank_001/01_BRASS_1.vstpreset`. The converter never tries to set the FM algorithm through Lua. HALion-backed comparison has verified algorithm topology, direct global fields, operator placement, key-level curve translation, LFO state, and all persistent modulation-matrix parameter values for a 32-preset calibration bank against native FMLab imports. Pitch-envelope response remains a calibration target. Until that transform is calibrated, generated Lua explicitly sets `Pitch.EnvAmount` to `0` so the templates' inherited non-neutral amount cannot shift a voice; decoded pitch-envelope source values remain inspectable in the generated Lua. Generated builds may be large, so the ordinary build chunking options remain available. Exact parameter and audible parity should be checked against HALion's native DX7 importer and a trusted DX7 reference before treating a converted library as final.
+
+Build scripts receive `ctx.output_dir`, which equals `ctx.script_dir` unless `--output-directory` is supplied. The builder's `ctx.save_preset()` wrapper redirects ordinary build-directory preset saves into `ctx.output_dir`, so generated converter builds and older scripts that save to `ctx.path_join(ctx.script_dir, "name.vstpreset")` can write their presets to a separate output tree without moving Lua source or samples. When a generated build includes `halionbridge_build_manifest.json`, halionbridge validates and creates its declared relative output directories below this effective output root before starting HALion.
 
 `remap-vstpresets` is for moved sample libraries. It scans the input directory recursively for `.vstpreset` files, works on temporary copies in HALion's user preset area, and leaves the input directory untouched. The output directory must be missing or empty; halionbridge refuses to merge into an existing tree. The command rewrites exact normalized path prefixes only, so choose `--old-root` and `--new-root` as directory roots, not partial filename fragments. If temporary cleanup fails after the remapped presets were copied, halionbridge prints a warning and the temporary staging directory can be deleted later.
+
+`inspect-vstpresets` is for parameter and structure analysis. It accepts one `.vstpreset` file or a directory, scans only the top level unless `--recursive` is supplied, and loads every selected preset through HALion's Lua `loadPreset()` API. The versioned JSON report records the Program Tree, mapping fields, parameter definitions, current values, display strings, and all 32 modulation-matrix rows for each Zone. Failed presets remain in the report and make the command return a failure status after the report is published. Existing reports are refused unless `--overwrite` is supplied. Because HALion is the decoder, this mode requires the installed HALion 7 VST3 and the same user-script search-path setup as a build; it does not infer parameters by reading opaque preset bytes directly.
 
 `vstpreset-metadata` is for spreadsheet-style metadata cleanup. `export` scans `.vstpreset` files, reads the VST3 `Info` XML metadata chunk, and writes a UTF-8 CSV with `filename_path`, `target_preset_name`, and editable metadata columns: `MediaAuthor`, `MediaLibraryManufacturerName`, `MediaLibraryName`, `MediaComment`, `MediaRating`, `MusicalArticulations`, `MusicalCategory`, `MusicalInstrument`, `MusicalMoods`, `MusicalProperties`, `MusicalStyle`, `MusicalSubStyle`, and `VST3UnitTypePath`. `apply` reads the CSV as UTF-8, matches rows by `filename_path`, uses `target_preset_name` as the output preset filename stem, removes filename characters that are not portable across Windows and macOS, rewrites only the VST3 metadata chunk, preserves the other preset chunks byte-for-byte, and writes copied presets to an empty output directory. Successful export/apply runs print an `Info:` summary with the number of processed presets and output path. Scanning is top-level only unless `--recursive` is supplied. Existing CSV files are refused unless `export --overwrite` is used. Apply mode is strict: every scanned preset must have one CSV row, every CSV row must match a scanned preset, and renamed output paths must be unique after sanitization. See `vstpreset-metadata/README.md` for field meanings and recommended values.
 
@@ -160,3 +185,7 @@ halionbridge prints timestamped console logs. The default log level is `info`, w
 Only one halionbridge build can run at a time for a user account. HALion resolves temporary runtime modules from the shared HALion user script directory, so a second overlapping run exits with a clear error instead of corrupting build output.
 
 Press Ctrl+C to stop a run. Conversion commands stop at converter checkpoints before writing more generated files. Normal headless HALion builds stop the active worker process and do not start later chunks. GUI and `--nokill` inspection runs remain cooperative so HALion can clean up normally.
+
+## License And Notices
+
+halionbridge is distributed under the GNU Affero General Public License version 3; see `LICENSE`. Third-party attributions and packaged license locations are documented in `THIRD_PARTY_NOTICES.md`.

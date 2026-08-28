@@ -193,6 +193,49 @@ bool applyTimeoutOption(VstPresetRemapOptions& options, const std::vector<std::s
     return true;
 }
 
+bool applyTimeoutOption(VstPresetInspectionOptions& options, const std::vector<std::string>& values, const bool noTimeoutRequested,
+                        std::vector<CliDiagnostic>& diagnostics)
+{
+    auto noTimeoutSeen = noTimeoutRequested;
+    auto positiveTimeoutSeen = false;
+
+    if (noTimeoutSeen)
+        options.timeoutSeconds = 0;
+
+    for (const auto& value : values)
+    {
+        const auto parsed = parseNonNegativeInt(value);
+        if (!parsed)
+        {
+            addError(diagnostics, "--timeout-seconds must be a non-negative integer.");
+            return false;
+        }
+
+        if (*parsed == 0)
+        {
+            if (positiveTimeoutSeen)
+            {
+                addError(diagnostics, "--timeout-seconds 0 cannot be combined with a positive --timeout-seconds value.");
+                return false;
+            }
+            noTimeoutSeen = true;
+        }
+        else
+        {
+            if (noTimeoutSeen)
+            {
+                addError(diagnostics, "--timeout-seconds cannot be combined with --no-timeout or --timeout-seconds 0.");
+                return false;
+            }
+            positiveTimeoutSeen = true;
+        }
+
+        options.timeoutSeconds = *parsed;
+    }
+
+    return true;
+}
+
 bool parseCli11App(CLI::App& app, std::span<const std::string> args, std::vector<CliDiagnostic>& diagnostics)
 {
     auto mutableArgs = toMutableArgs(args);
@@ -233,6 +276,8 @@ CliCommandKind classifyCliCommand(std::span<const std::string> args) noexcept
         return CliCommandKind::convert;
     if (command == "remap-vstpresets")
         return CliCommandKind::remapVstPresets;
+    if (command == "inspect-vstpresets")
+        return CliCommandKind::inspectVstPresets;
     if (command == "vstpreset-metadata")
         return CliCommandKind::vstPresetMetadata;
 
@@ -454,6 +499,101 @@ VstPresetRemapOptionsParseResult parseVstPresetRemapOptionsDetailed(std::span<co
 std::optional<VstPresetRemapOptions> parseVstPresetRemapOptions(std::span<const std::string> args)
 {
     return parseVstPresetRemapOptionsDetailed(args).options;
+}
+
+VstPresetInspectionOptionsParseResult parseVstPresetInspectionOptionsDetailed(std::span<const std::string> args)
+{
+    auto result = VstPresetInspectionOptionsParseResult{};
+    auto options = VstPresetInspectionOptions{};
+    auto inputText = std::string{};
+    auto outputText = std::string{};
+    auto pluginText = std::string{};
+    auto timeoutValues = std::vector<std::string>{};
+    auto noTimeoutRequested = false;
+
+    CLI::App app{"halionbridge inspect-vstpresets"};
+    app.set_help_flag();
+    app.add_option("--input", inputText);
+    app.add_option("--output-json", outputText);
+    app.add_option("--plugin", pluginText);
+    app.add_flag("--recursive", options.recursive);
+    app.add_flag("--overwrite", options.overwrite);
+    app.add_flag("--gui", options.showGui);
+    app.add_flag("--force-scan", options.forceScan);
+    app.add_flag("--nokill", options.noKill);
+    app.add_flag("--no-timeout", noTimeoutRequested);
+    app.add_option("--timeout-seconds", timeoutValues)->expected(1);
+
+    if (!parseCli11App(app, args, result.diagnostics))
+    {
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+
+    if (app.remaining_size() > 0)
+    {
+        const auto unexpected = app.remaining().empty() ? std::string{} : app.remaining().front();
+        addError(result.diagnostics, "inspect-vstpresets uses named options. Unexpected positional argument: " + unexpected);
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+
+    if (inputText.empty() || outputText.empty())
+    {
+        addError(result.diagnostics, "inspect-vstpresets requires --input and --output-json.");
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+
+    const auto input = normalizeCliPath(toJuceString(std::string_view(inputText)));
+    if (!input.existsAsFile() && !input.isDirectory())
+    {
+        addError(result.diagnostics, "Inspection input path does not exist at " + input.getFullPathName().toStdString());
+        result.errorKind = CliParseErrorKind::validation;
+        return result;
+    }
+    if (input.existsAsFile() && input.getFileExtension().toLowerCase() != ".vstpreset")
+    {
+        addError(result.diagnostics, "Inspection input file must have a .vstpreset extension: " + input.getFullPathName().toStdString());
+        result.errorKind = CliParseErrorKind::validation;
+        return result;
+    }
+    options.inputPath = toStdPath(input);
+
+    const auto output = normalizeCliPath(toJuceString(std::string_view(outputText)));
+    if (output.getFileExtension().toLowerCase() != ".json")
+    {
+        addError(result.diagnostics, "--output-json must name a .json file.");
+        result.errorKind = CliParseErrorKind::validation;
+        return result;
+    }
+    options.outputJson = toStdPath(output);
+
+    if (!pluginText.empty())
+    {
+        const auto plugin = normalizeCliPath(toJuceString(std::string_view(pluginText)));
+        if (!plugin.existsAsFile() && !plugin.isDirectory())
+        {
+            addError(result.diagnostics, "Override plugin path does not exist at " + plugin.getFullPathName().toStdString());
+            result.errorKind = CliParseErrorKind::validation;
+            return result;
+        }
+        options.pluginPathOverride = toStdPath(plugin);
+    }
+
+    if (!applyTimeoutOption(options, timeoutValues, noTimeoutRequested, result.diagnostics))
+    {
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+
+    result.options = std::move(options);
+    return result;
+}
+
+std::optional<VstPresetInspectionOptions> parseVstPresetInspectionOptions(std::span<const std::string> args)
+{
+    return parseVstPresetInspectionOptionsDetailed(args).options;
 }
 
 std::optional<AppOptions> parseBuildWorkerOptions(std::span<const std::string> args)

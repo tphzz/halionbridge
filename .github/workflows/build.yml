@@ -315,6 +315,22 @@ jobs:
           mkdir -p "${{ steps.package.outputs.staging_dir }}"
           git archive --format=tar HEAD examples | tar -x -C "${{ steps.package.outputs.staging_dir }}"
 
+      - name: Stage licenses and third-party notices
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging_dir="${{ steps.package.outputs.staging_dir }}"
+          mkdir -p "$staging_dir/licenses/dxsyx"
+          cp LICENSE "$staging_dir/LICENSE"
+          cp THIRD_PARTY_NOTICES.md "$staging_dir/THIRD_PARTY_NOTICES.md"
+          cp external/JUCE/LICENSE.md "$staging_dir/licenses/JUCE-LICENSE.md"
+          cp external/spdlog/LICENSE "$staging_dir/licenses/spdlog-LICENSE.txt"
+          cp external/CLI11/LICENSE "$staging_dir/licenses/CLI11-LICENSE.txt"
+          cp external/sfizz/LICENSE "$staging_dir/licenses/sfizz-LICENSE.txt"
+          cp external/sfizz/external/abseil-cpp/LICENSE "$staging_dir/licenses/Apache-2.0.txt"
+          cp forks/dxsyx/LICENSE.txt "$staging_dir/licenses/dxsyx/LICENSE.txt"
+          cp forks/dxsyx/UPSTREAM.md "$staging_dir/licenses/dxsyx/UPSTREAM.md"
+
       - name: Notarize macOS release zip
         if: runner.os == 'macOS' && inputs.notarize_macos
         shell: bash
@@ -370,6 +386,16 @@ jobs:
             find "$staging_dir" -maxdepth 2 -print >&2
             exit 1
           fi
+
+          for notice in LICENSE THIRD_PARTY_NOTICES.md licenses/JUCE-LICENSE.md licenses/spdlog-LICENSE.txt \
+                        licenses/CLI11-LICENSE.txt licenses/sfizz-LICENSE.txt licenses/Apache-2.0.txt \
+                        licenses/dxsyx/LICENSE.txt licenses/dxsyx/UPSTREAM.md; do
+            if [ ! -f "$staging_dir/$notice" ]; then
+              echo "Expected staged license or notice not found: $staging_dir/$notice" >&2
+              find "$staging_dir" -maxdepth 3 -print >&2
+              exit 1
+            fi
+          done
 
           if ! find "$staging_dir/examples" -name halionbridge_build.lua -type f | grep -q .; then
             echo "Expected at least one halionbridge_build.lua under staged examples." >&2

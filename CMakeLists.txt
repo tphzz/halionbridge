@@ -30,6 +30,7 @@ option(HALIONBRIDGE_ENABLE_DIAGNOSTICS "Enable verbose JUCE/VST3 diagnostic logg
 option(HALIONBRIDGE_ENABLE_CRASH_DUMPS "Write a Windows minidump when the bridge process crashes." ON)
 option(HALIONBRIDGE_ENABLE_CONVERTERS "Build converter support into the halionbridge CLI." ON)
 option(HALIONBRIDGE_ENABLE_CONVERTER_SFZ "Build the built-in SFZ converter." ON)
+option(HALIONBRIDGE_ENABLE_CONVERTER_DX7 "Build the built-in Yamaha DX7 SysEx converter." ON)
 set(HALIONBRIDGE_EXTRA_CONVERTER_DIRS "" CACHE STRING "Semicolon-separated extra converter source directories.")
 
 set(HALIONBRIDGE_GENERATED_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-src")
@@ -76,6 +77,7 @@ juce_add_binary_data(halionbridge_assets
     SOURCES
         halion-lua/builder_bootstrap.vstpreset
         halion-lua/builder.lua
+        halion-lua/preset_inspect.lua
         halion-lua/preset_remap.lua
 )
 
@@ -97,6 +99,7 @@ set(HALIONBRIDGE_DIAGNOSTIC_DEFINITIONS
 
 set(HALIONBRIDGE_LIBRARY_SOURCES
     src/Bridge.cpp
+    src/BuildManifest.cpp
     src/BuildWorker.cpp
     src/ChildProcessOutput.cpp
     src/CliCommand.cpp
@@ -106,6 +109,7 @@ set(HALIONBRIDGE_LIBRARY_SOURCES
     src/PathUtils.cpp
     src/PluginScan.cpp
     src/ProgressMarkers.cpp
+    src/PresetInspection.cpp
     src/PresetRemap.cpp
     src/VstPresetMetadata.cpp
     "${HALIONBRIDGE_BUILD_INFO_CPP}"
@@ -266,6 +270,12 @@ if(HALIONBRIDGE_BUILD_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/converters/common/include
             ${CMAKE_CURRENT_SOURCE_DIR}/converters/sfz/include
         )
+        if(HALIONBRIDGE_ENABLE_CONVERTER_DX7)
+            target_compile_definitions(halionbridge_public_header_smoke PRIVATE HALIONBRIDGE_ENABLE_CONVERTER_DX7=1)
+            target_include_directories(halionbridge_public_header_smoke PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/converters/dx7/include
+            )
+        endif()
     endif()
 
     # Create Unit Tests Executable
@@ -273,9 +283,34 @@ if(HALIONBRIDGE_BUILD_TESTS)
         PRODUCT_NAME "halionbridge_tests")
 
     target_sources(halionbridge_tests PRIVATE
+        tests/BuildManifestTests.cpp
         tests/Tests.cpp
+        tests/VstPresetInspectionTests.cpp
     )
-    enable_halionbridge_strict_warnings(tests/Tests.cpp)
+    enable_halionbridge_strict_warnings(
+        tests/BuildManifestTests.cpp
+        tests/Tests.cpp
+        tests/VstPresetInspectionTests.cpp
+    )
+
+    if(HALIONBRIDGE_ENABLE_CONVERTER_DX7)
+        target_sources(halionbridge_tests PRIVATE
+            tests/BuildDirectoryEmitterAssetTests.cpp
+            tests/Dx7ConverterTests.cpp
+            tests/Dx7SysexTests.cpp
+        )
+        target_include_directories(halionbridge_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/converters/dx7/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/forks/dxsyx/include
+        )
+        target_compile_definitions(halionbridge_tests PRIVATE HALIONBRIDGE_ENABLE_CONVERTER_DX7=1)
+        target_link_libraries(halionbridge_tests PRIVATE dxsyx::dxsyx)
+        enable_halionbridge_strict_warnings(
+            tests/BuildDirectoryEmitterAssetTests.cpp
+            tests/Dx7ConverterTests.cpp
+            tests/Dx7SysexTests.cpp
+        )
+    endif()
 
     target_compile_features(halionbridge_tests PRIVATE cxx_std_23)
     target_compile_definitions(halionbridge_tests PRIVATE JUCE_UNIT_TESTS=1)
@@ -351,6 +386,22 @@ if(HALIONBRIDGE_BUILD_TESTS)
             add_halionbridge_cli_expect(halionbridge_cli_remap_missing_required_header 1 "^halionbridge [^\r\n]+" remap-vstpresets)
             add_halionbridge_cli_expect(halionbridge_cli_remap_missing_required_help 1 "halionbridge remap-vstpresets --input-directory" remap-vstpresets)
             add_halionbridge_cli_reject(halionbridge_cli_remap_missing_required_no_log_prefix 1 "\\[[0-9][0-9][0-9][0-9]-" remap-vstpresets)
+            add_halionbridge_cli_expect(halionbridge_cli_inspect_help 0
+                "halionbridge inspect-vstpresets --input"
+                inspect-vstpresets --help
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_inspect_missing_required_header 1
+                "^halionbridge [^\r\n]+"
+                inspect-vstpresets
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_inspect_missing_required_help 1
+                "halionbridge inspect-vstpresets --input"
+                inspect-vstpresets
+            )
+            add_halionbridge_cli_reject(halionbridge_cli_inspect_missing_required_no_log_prefix 1
+                "\\[[0-9][0-9][0-9][0-9]-"
+                inspect-vstpresets
+            )
             add_halionbridge_cli_expect(halionbridge_cli_vstpreset_metadata_help 0
                 "halionbridge vstpreset-metadata export"
                 vstpreset-metadata --help
@@ -394,6 +445,11 @@ if(HALIONBRIDGE_BUILD_TESTS)
                 add_halionbridge_cli_reject(halionbridge_cli_convert_sfz_missing_path_no_help 1 "Usage:" convert sfz "${CMAKE_BINARY_DIR}/missing-sfz-source")
                 add_halionbridge_cli_reject(halionbridge_cli_convert_sfz_missing_path_no_log_prefix 1 "\\[[0-9][0-9][0-9][0-9]-" convert sfz "${CMAKE_BINARY_DIR}/missing-sfz-source")
                 add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_rejects_non_sfz_file 1 "SFZ source file must have a \\.sfz extension" convert sfz "${CMAKE_SOURCE_DIR}/README.md")
+                if(HALIONBRIDGE_ENABLE_CONVERTER_DX7)
+                    add_halionbridge_cli_expect(halionbridge_cli_convert_dx7_help 0 "halionbridge convert dx7 <source-path>" convert dx7 --help)
+                    add_halionbridge_cli_expect(halionbridge_cli_convert_dx7_missing_source_error 1 "requires a source path" convert dx7)
+                    add_halionbridge_cli_expect(halionbridge_cli_convert_dx7_rejects_non_syx_file 1 "DX7 source file must have a \\.syx extension" convert dx7 "${CMAKE_SOURCE_DIR}/README.md")
+                endif()
             endif()
         endif()
     endif()

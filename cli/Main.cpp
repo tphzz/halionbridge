@@ -73,6 +73,7 @@ void writeTopLevelHelp(std::ostream& output, const bool includeHeader = true)
            << "  halionbridge build <build-directory> [--output-directory <dir>] [options]\n"
            << "  halionbridge init <build-directory> [--overwrite]\n"
            << "  halionbridge remap-vstpresets --input-directory <dir> --output-directory <dir> --old-root <path> --new-root <path>\n"
+           << "  halionbridge inspect-vstpresets --input <file-or-directory> --output-json <report.json> [options]\n"
            << "  halionbridge vstpreset-metadata export --input-directory <dir> --metadata-csv <file> [options]\n"
            << "  halionbridge vstpreset-metadata apply --input-directory <dir> --metadata-csv <file> --output-directory <dir> [options]\n"
 #if HALIONBRIDGE_ENABLE_CONVERTERS
@@ -101,6 +102,13 @@ void writeTopLevelHelp(std::ostream& output, const bool includeHeader = true)
            << "  --new-root <path>      New sample path prefix.\n"
            << "  --preset-plugin-code <H7|HS>\n"
            << "                          HALion savePreset plugin code for remapped presets. Defaults to H7.\n"
+           << "\n"
+           << "VSTPreset inspection command:\n"
+           << "  inspect-vstpresets      Load presets through HALion and write a versioned JSON parameter report.\n"
+           << "  --input <path>          One .vstpreset file or a directory scanned non-recursively by default.\n"
+           << "  --output-json <file>    Destination .json report.\n"
+           << "  --recursive             Include subdirectories when --input is a directory.\n"
+           << "  --overwrite             Replace an existing report file.\n"
            << "\n"
            << "VSTPreset metadata command:\n"
            << "  vstpreset-metadata export\n"
@@ -211,6 +219,36 @@ void writeRemapVstPresetsHelp(std::ostream& output, const bool includeHeader = t
 void printRemapVstPresetsHelp()
 {
     writeRemapVstPresetsHelp(std::cout);
+}
+
+void writeInspectVstPresetsHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge inspect-vstpresets --input <file-or-directory> --output-json <report.json> [options]\n"
+           << "\n"
+           << "Required options:\n"
+           << "  --input <path>             One .vstpreset file or a directory.\n"
+           << "  --output-json <file>       Destination for the versioned JSON inspection report.\n"
+           << "\n"
+           << "Inspection options:\n"
+           << "  --recursive                Include subdirectories when --input is a directory.\n"
+           << "  --overwrite                Replace an existing report file.\n"
+           << "\n"
+           << "Runtime options:\n"
+           << "  --plugin <path>            Override the HALion 7 VST3 path.\n"
+           << "  --timeout-seconds <n>      Completion timeout. Defaults to 3600 seconds.\n"
+           << "  --no-timeout               Wait indefinitely.\n"
+           << "  --gui                      Use JUCE's GUI-capable VST3 host format and show HALion's editor.\n"
+           << "  --nokill                   Keep HALion loaded after completion or failure for inspection.\n"
+           << "  --force-scan               Force VST3 plugin scanning instead of using the embedded class ID shortcut.\n";
+}
+
+void printInspectVstPresetsHelp()
+{
+    writeInspectVstPresetsHelp(std::cout);
 }
 
 void writeVstPresetMetadataHelp(std::ostream& output, const bool includeHeader = true)
@@ -620,6 +658,12 @@ int main(int argc, char* argv[])
         return 0;
     }
 
+    if (juceArgs.size() > 0 && juceArgs[0] == "inspect-vstpresets" && hasHelpArgument(juceArgs, 1))
+    {
+        printInspectVstPresetsHelp();
+        return 0;
+    }
+
     if (juceArgs.size() > 0 && juceArgs[0] == "vstpreset-metadata" && hasHelpArgument(juceArgs, 1))
     {
         const auto metadataArgs = std::span<const std::string>(args.data() + 1, args.size() - 1);
@@ -720,6 +764,7 @@ int main(int argc, char* argv[])
 #endif
 
     auto parsedRemapOptions = std::optional<halionbridge::VstPresetRemapOptions>{};
+    auto parsedInspectionOptions = std::optional<halionbridge::VstPresetInspectionOptions>{};
     auto parsedBuildOptions = std::optional<halionbridge::AppOptions>{};
 
     if (command == halionbridge::detail::CliCommandKind::remapVstPresets)
@@ -737,6 +782,25 @@ int main(int argc, char* argv[])
         }
 
         parsedRemapOptions = std::move(*parseResult.options);
+        writeVersionHeader(std::cout);
+        std::cout << "\n";
+        halionbridge::log::configureFromEnvironment();
+    }
+    else if (command == halionbridge::detail::CliCommandKind::inspectVstPresets)
+    {
+        const auto inspectionArgs = std::vector<std::string>(args.begin() + 1, args.end());
+        auto parseResult = halionbridge::detail::parseVstPresetInspectionOptionsDetailed(inspectionArgs);
+        if (!parseResult.options)
+        {
+            writeVersionHeader(std::cerr);
+            std::cerr << "\n";
+            writeCliDiagnostics(std::cerr, parseResult.diagnostics);
+            if (parseResult.errorKind == halionbridge::detail::CliParseErrorKind::syntax)
+                writeInspectVstPresetsHelp(std::cerr, false);
+            return 1;
+        }
+
+        parsedInspectionOptions = std::move(*parseResult.options);
         writeVersionHeader(std::cout);
         std::cout << "\n";
         halionbridge::log::configureFromEnvironment();
@@ -824,6 +888,34 @@ int main(int argc, char* argv[])
                 halionbridge::log::warn("halionbridge preset remap stopped by user request.");
             else
                 halionbridge::log::error("Failed to run halionbridge preset remap.");
+
+            juce::Logger::setCurrentLogger(nullptr);
+            halionbridge::log::flush();
+            return 1;
+        }
+
+        juce::Logger::setCurrentLogger(nullptr);
+        halionbridge::log::flush();
+        return 0;
+    }
+
+    if (command == halionbridge::detail::CliCommandKind::inspectVstPresets)
+    {
+        jassert(parsedInspectionOptions.has_value());
+
+        const auto executableFile = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        parsedInspectionOptions->executableFile = halionbridge::detail::toStdPath(executableFile);
+
+        halionbridge::Bridge app;
+        const auto runResult = app.inspectVstPresetsDetailed(*parsedInspectionOptions);
+        if (runResult != halionbridge::RunResult::success)
+        {
+            if (runResult == halionbridge::RunResult::stopped)
+                halionbridge::log::warn("halionbridge VSTPreset inspection stopped by user request.");
+            else if (runResult == halionbridge::RunResult::inspectionFailed)
+                halionbridge::log::error("VSTPreset inspection completed with one or more failed presets.");
+            else
+                halionbridge::log::error("Failed to run halionbridge VSTPreset inspection.");
 
             juce::Logger::setCurrentLogger(nullptr);
             halionbridge::log::flush();
