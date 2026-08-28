@@ -273,6 +273,12 @@ class Dx7ConverterTests final : public juce::UnitTest
             const auto helper = output.directory.getChildFile("halionbridge-dx7.lua").loadFileAsString();
             expect(helper.contains("Required HALion \" .. element_label .. \" name assignment is unavailable"));
             expect(helper.contains("FM-Oscillator.EmulationMode"));
+            expect(helper.contains("set_required(preset, \"InheritVelocitySettings\", false, \"program or layer\")"),
+                   "Generated DX7 presets must use local velocity settings instead of inherited defaults");
+            expect(helper.contains("set_required(preset, \"VelocityToLevelCurve\", 2, \"program or layer\")"),
+                   "Generated DX7 presets must select HALion's Squared Inverse Main velocity curve");
+            expect(helper.contains("Could not set required HALion \" .. element_label .. \" parameter"),
+                   "Required Program/Layer assignment failures must identify the target element");
             const auto pitchTableMarker = juce::String{"local pitch_envelope_level_offset = {"};
             const auto pitchTableStart = helper.indexOf(pitchTableMarker);
             expect(pitchTableStart >= 0, "Generated DX7 Lua must contain the native 100-entry pitch-envelope level table");

@@ -93,18 +93,19 @@ local function path_join(ctx, base, child)
     return base .. "/" .. child
 end
 
-local function set_required(target, name, value)
+local function set_required(target, name, value, element_label)
+    element_label = element_label or "FM Zone"
     if target == nil then return false, "Cannot set " .. tostring(name) .. ": target is nil" end
     if not has_method(target, "hasParameter") then
-        return false, "Cannot validate required HALion parameter " .. tostring(name)
+        return false, "Cannot validate required HALion " .. element_label .. " parameter " .. tostring(name)
     end
     local okHas, hasParameter = pcall(function() return target:hasParameter(name) end)
     if not okHas or not hasParameter then
-        return false, "Required HALion FM Zone parameter is unavailable: " .. tostring(name)
+        return false, "Required HALion " .. element_label .. " parameter is unavailable: " .. tostring(name)
     end
     local okSet, setError = pcall(function() target:setParameter(name, value) end)
     if not okSet then
-        return false, "Could not set required HALion parameter " .. tostring(name) .. ": " .. tostring(setError)
+        return false, "Could not set required HALion " .. element_label .. " parameter " .. tostring(name) .. ": " .. tostring(setError)
     end
     return true, nil
 end
@@ -411,6 +412,16 @@ function dx7.build_voice(ctx, voice)
     local ok, err = set_required_name(preset, voice.name, "program")
     if not ok then return { ok = false, saved = 0, failed = 1, message = err } end
     ok, err = set_required_name(zone, voice.name, "FM Zone")
+    if not ok then return { ok = false, saved = 0, failed = 1, message = err } end
+
+    -- HALion's native DX7 import leaves the Main-section velocity remap at its
+    -- linear default. The DX7 response is concave, so use HALion's third menu
+    -- entry (zero-based value 2, Squared Inverse) before operator sensitivity.
+    -- HALion remap contract: https://www.steinberg.help/r/halion/7.1/en/halion/topics/editing_programs_and_layers/sound_editor_main_section_r.html
+    -- DX7 velocity table: https://github.com/asb2m10/dexed/blob/master/Source/msfa/dx7note.cc#L80-L93
+    ok, err = set_required(preset, "InheritVelocitySettings", false, "program or layer")
+    if not ok then return { ok = false, saved = 0, failed = 1, message = err } end
+    ok, err = set_required(preset, "VelocityToLevelCurve", 2, "program or layer")
     if not ok then return { ok = false, saved = 0, failed = 1, message = err } end
 
     ok, err = set_required(zone, "FM-Oscillator.FMFeedback", clamp(voice.feedback, 0, 7))
