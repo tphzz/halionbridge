@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <span>
@@ -13,6 +14,109 @@
 
 namespace
 {
+
+constexpr auto nativePitchEnvelopeLevelOffsets = std::array<double, 100>{
+    -55.254833221435575,
+    -48.054628655322425,
+    -41.99999942862066,
+    -36.90868301783964,
+    -32.62741851806642,
+    -29.027315019157427,
+    -26.000001358023848,
+    -23.454344806853452,
+    -21.313709259033203,
+    -19.513658390222872,
+    -18.000000529675617,
+    -16.727171651972412,
+    -15.6568546295166,
+    -14.756828984410161,
+    -14.00000054209181,
+    -13.363585638756716,
+    -12.828427314758299,
+    -12.378413530010503,
+    -11.9999992946353,
+    -11.619999973282573,
+    -11.250000000000002,
+    -10.870000049471857,
+    -10.500000044703485,
+    -10.12000009417534,
+    -9.75,
+    -9.370000138878822,
+    -9.000000044703484,
+    -8.620000183582306,
+    -8.25,
+    -7.869999870657921,
+    -7.500000223517418,
+    -7.120000094175339,
+    -6.750000000000002,
+    -6.370000049471857,
+    -6.000000044703485,
+    -5.6200000941753405,
+    -5.249999999999998,
+    -4.869999960064886,
+    -4.500000044703482,
+    -4.12000000476837,
+    -3.749999999999999,
+    -3.3700000494718543,
+    -3.0000000447034827,
+    -2.6200000941753383,
+    -2.2500000000000004,
+    -1.8700000494718556,
+    -1.5000000447034838,
+    -1.1200000271201136,
+    -0.7500000000000011,
+    -0.37000000476837214,
+    0.0,
+    0.37000000476837214,
+    0.7500000078729128,
+    1.1199999968954584,
+    1.5000000157458255,
+    1.8700000047683711,
+    2.249999855047519,
+    2.6199998669206925,
+    2.999999873685907,
+    3.3699998855590807,
+    3.749999963734184,
+    4.119999950867169,
+    4.499999898426098,
+    4.869999885559083,
+    5.249999972437761,
+    5.620000052217219,
+    5.999999805779621,
+    6.369999885559079,
+    6.749999847605241,
+    7.120000006733736,
+    7.499999726430591,
+    7.869999885559086,
+    8.249999682277345,
+    8.620000168304554,
+    8.999999958027384,
+    9.369999885559078,
+    9.750000020732218,
+    10.119999634771036,
+    10.499999623617784,
+    10.869999885559084,
+    11.2500001409935,
+    11.619999803942157,
+    11.999999756893878,
+    12.378414154052727,
+    12.828427610819741,
+    13.36358509922638,
+    13.999999320265484,
+    14.756828308105465,
+    15.656854198884494,
+    16.727170939516316,
+    17.999999306297457,
+    19.513656616210927,
+    21.31370953229544,
+    23.45434308513223,
+    26.000000830597866,
+    29.02731513977052,
+    32.6274193188931,
+    36.90868603353353,
+    42.00000240384908,
+    48.05463027954103,
+};
 
 class ScopedTestDirectory
 {
@@ -169,8 +273,38 @@ class Dx7ConverterTests final : public juce::UnitTest
             const auto helper = output.directory.getChildFile("halionbridge-dx7.lua").loadFileAsString();
             expect(helper.contains("Required HALion \" .. element_label .. \" name assignment is unavailable"));
             expect(helper.contains("FM-Oscillator.EmulationMode"));
-            expect(helper.contains("set_required(zone, \"Pitch.EnvAmount\", 0)"),
-                   "Generated DX7 Lua must neutralize the algorithm template pitch-envelope amount");
+            const auto pitchTableMarker = juce::String{"local pitch_envelope_level_offset = {"};
+            const auto pitchTableStart = helper.indexOf(pitchTableMarker);
+            expect(pitchTableStart >= 0, "Generated DX7 Lua must contain the native 100-entry pitch-envelope level table");
+            if (pitchTableStart >= 0)
+            {
+                const auto valuesStart = pitchTableStart + pitchTableMarker.length();
+                const auto valuesEnd = helper.indexOf(valuesStart, "}");
+                expect(valuesEnd > valuesStart);
+                auto tokens = juce::StringArray{};
+                tokens.addTokens(helper.substring(valuesStart, valuesEnd), ",", "");
+                tokens.trim();
+                tokens.removeEmptyStrings();
+                expectEquals(tokens.size(), static_cast<int>(nativePitchEnvelopeLevelOffsets.size()));
+                if (tokens.size() == static_cast<int>(nativePitchEnvelopeLevelOffsets.size()))
+                {
+                    for (auto index = std::size_t{0}; index < nativePitchEnvelopeLevelOffsets.size(); ++index)
+                    {
+                        const auto actual = tokens[static_cast<int>(index)].getDoubleValue();
+                        expect(std::abs(actual - nativePitchEnvelopeLevelOffsets[index]) <= 1.0e-12,
+                               "Generated DX7 Lua pitch-envelope level table differs at source level " +
+                                   juce::String{static_cast<int>(index)});
+                    }
+                }
+            }
+            expect(helper.contains("local neutral_durations = { 0, 0.1, 0.25, 0.2 }"));
+            expect(helper.contains("set_required(zone, \"Pitch Env.SustainIndex\", 3)"),
+                   "Neutral DX7 pitch envelopes must preserve FMLab's four-point default form");
+            expect(helper.contains("math.abs(target_offset - start_offset) * 0.0075 * 2 ^ ((99 - clamp(rate, 0, 99)) / 18)"));
+            expect(helper.contains("set_required(zone, \"Pitch.EnvAmount\", amount)"),
+                   "Non-neutral DX7 pitch envelopes must use the native maximum absolute offset");
+            expect(helper.contains("set_required(zone, \"Pitch Env.SustainIndex\", 4)"));
+            expect(!helper.contains("0.001 + normalized * normalized * 21.3"));
             expect(helper.contains("local prefix = \"FM-Operator \""));
             expect(helper.contains("local key_level_curve = { 2, 4, 3, 1 }"));
             expect(helper.contains("local targetOperatorIndex = 7 - sourceOperatorIndex"));

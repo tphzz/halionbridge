@@ -16,6 +16,33 @@ local lfo_low_frequency_hz = {
     3.80, 3.98, 4.17, 4.30, 4.48, 4.60, 4.79, 4.92,
 }
 
+-- HALion's native FMLab importer converts the nonlinear DX7 pitch-envelope
+-- level scale to signed semitone offsets. The complete table was measured from
+-- native imports so generated voices do not interpolate across the steep
+-- ranges near source levels 0 and 99.
+local pitch_envelope_level_offset = {
+    -55.254833221435575, -48.054628655322425, -41.99999942862066, -36.90868301783964, -32.62741851806642,
+    -29.027315019157427, -26.000001358023848, -23.454344806853452, -21.313709259033203, -19.513658390222872,
+    -18.000000529675617, -16.727171651972412, -15.6568546295166, -14.756828984410161, -14.00000054209181,
+    -13.363585638756716, -12.828427314758299, -12.378413530010503, -11.9999992946353, -11.619999973282573,
+    -11.250000000000002, -10.870000049471857, -10.500000044703485, -10.12000009417534, -9.75,
+    -9.370000138878822, -9.000000044703484, -8.620000183582306, -8.25, -7.869999870657921,
+    -7.500000223517418, -7.120000094175339, -6.750000000000002, -6.370000049471857, -6.000000044703485,
+    -5.6200000941753405, -5.249999999999998, -4.869999960064886, -4.500000044703482, -4.12000000476837,
+    -3.749999999999999, -3.3700000494718543, -3.0000000447034827, -2.6200000941753383, -2.2500000000000004,
+    -1.8700000494718556, -1.5000000447034838, -1.1200000271201136, -0.7500000000000011, -0.37000000476837214,
+    0.0, 0.37000000476837214, 0.7500000078729128, 1.1199999968954584, 1.5000000157458255,
+    1.8700000047683711, 2.249999855047519, 2.6199998669206925, 2.999999873685907, 3.3699998855590807,
+    3.749999963734184, 4.119999950867169, 4.499999898426098, 4.869999885559083, 5.249999972437761,
+    5.620000052217219, 5.999999805779621, 6.369999885559079, 6.749999847605241, 7.120000006733736,
+    7.499999726430591, 7.869999885559086, 8.249999682277345, 8.620000168304554, 8.999999958027384,
+    9.369999885559078, 9.750000020732218, 10.119999634771036, 10.499999623617784, 10.869999885559084,
+    11.2500001409935, 11.619999803942157, 11.999999756893878, 12.378414154052727, 12.828427610819741,
+    13.36358509922638, 13.999999320265484, 14.756828308105465, 15.656854198884494, 16.727170939516316,
+    17.999999306297457, 19.513656616210927, 21.31370953229544, 23.45434308513223, 26.000000830597866,
+    29.02731513977052, 32.6274193188931, 36.90868603353353, 42.00000240384908, 48.05463027954103,
+}
+
 -- These depth and source-offset tables are persisted by HALion's native FMLab
 -- importer. The nonzero pitch offsets are part of that importer topology; they
 -- must not be normalized away even when the destination depths already match.
@@ -152,6 +179,10 @@ local function apply_operator(zone, number, operator, oscillator_sync)
     return true, nil
 end
 
+local function pitch_envelope_duration(start_offset, target_offset, rate)
+    return math.abs(target_offset - start_offset) * 0.0075 * 2 ^ ((99 - clamp(rate, 0, 99)) / 18)
+end
+
 local function set_pitch_envelope(zone, rates, levels)
     rates = rates or {}
     levels = levels or {}
@@ -160,30 +191,51 @@ local function set_pitch_envelope(zone, rates, levels)
         return false, "Required HALion pitch envelope point table is unavailable"
     end
 
+    local source_levels = {
+        clamp(levels[1], 0, 99),
+        clamp(levels[2], 0, 99),
+        clamp(levels[3], 0, 99),
+        clamp(levels[4], 0, 99),
+    }
+    local neutral = source_levels[1] == 50 and source_levels[2] == 50
+                    and source_levels[3] == 50 and source_levels[4] == 50
+    if neutral then
+        while #points > 4 do removeEnvelopePoint(points, #points) end
+        while #points < 4 do insertEnvelopePoint(points, #points, 0, 0, 0) end
+        local neutral_durations = { 0, 0.1, 0.25, 0.2 }
+        for index = 1, 4 do
+            points[index].level = 0
+            points[index].duration = neutral_durations[index]
+            points[index].curve = 0
+        end
+        local ok, err = set_required(zone, "Pitch.EnvAmount", 0)
+        if not ok then return false, err end
+        ok, err = set_required(zone, "Pitch Env.EnvelopePoints", points)
+        if not ok then return false, err end
+        return set_required(zone, "Pitch Env.SustainIndex", 3)
+    end
+
     while #points > 5 do removeEnvelopePoint(points, #points) end
     while #points < 5 do insertEnvelopePoint(points, #points, 0, 0, 0) end
 
-    local function pitch_level(value)
-        -- DX7 pitch-envelope level 50 is the neutral point. Keep the decoded
-        -- contour inspectable while its HALion response is calibrated.
-        return clamp((clamp(value, 0, 99) - 50) / 50, -1, 1)
-    end
-    local function duration(value)
-        local normalized = (99 - clamp(value, 0, 99)) / 99
-        return 0.001 + normalized * normalized * 21.3
-    end
-
-    local sourceLevels = { levels[4], levels[1], levels[2], levels[3], levels[4] }
-    local sourceRates = { 99, rates[1], rates[2], rates[3], rates[4] }
+    local offsets = {
+        pitch_envelope_level_offset[source_levels[1] + 1],
+        pitch_envelope_level_offset[source_levels[2] + 1],
+        pitch_envelope_level_offset[source_levels[3] + 1],
+        pitch_envelope_level_offset[source_levels[4] + 1],
+    }
+    local amount = 0
+    for index = 1, 4 do amount = math.max(amount, math.abs(offsets[index])) end
+    local ordered_offsets = { offsets[4], offsets[1], offsets[2], offsets[3], offsets[4] }
+    local source_rates = { rates[1], rates[2], rates[3], rates[4] }
     for index = 1, 5 do
-        points[index].level = pitch_level(sourceLevels[index])
-        points[index].duration = index == 1 and 0 or duration(sourceRates[index])
+        points[index].level = ordered_offsets[index] / amount
+        points[index].duration = index == 1 and 0 or
+            pitch_envelope_duration(ordered_offsets[index - 1], ordered_offsets[index], source_rates[index - 1])
         points[index].curve = 0
     end
 
-    -- The algorithm templates currently inherit a non-neutral amount. Disable
-    -- it explicitly so an uncalibrated contour cannot shift the voice pitch.
-    local ok, err = set_required(zone, "Pitch.EnvAmount", 0)
+    local ok, err = set_required(zone, "Pitch.EnvAmount", amount)
     if not ok then return false, err end
     ok, err = set_required(zone, "Pitch Env.EnvelopePoints", points)
     if not ok then return false, err end
