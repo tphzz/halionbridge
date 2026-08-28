@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <ranges>
 #include <set>
@@ -33,6 +34,7 @@ namespace
 constexpr auto kMaximumSyxFileBytes = std::streamoff{64 * 1024 * 1024};
 constexpr auto kHelperFileName = std::string_view{"halionbridge-dx7.lua"};
 constexpr auto kManifestFileName = std::string_view{"halionbridge_build_manifest.json"};
+constexpr auto kConversionReportFileName = std::string_view{"halionbridge_dx7_conversion_report.json"};
 
 struct DiscoveredFiles
 {
@@ -46,6 +48,29 @@ struct ParsedSource
     std::filesystem::path relativeParent;
     std::string safeSourceStem;
     std::vector<dxsyx::Message> messages;
+};
+
+enum class SourceOutcome
+{
+    converted,
+    partial,
+    skipped,
+};
+
+struct SourceReport
+{
+    std::filesystem::path relativeSource;
+    SourceOutcome outcome = SourceOutcome::skipped;
+    std::size_t messagesSeen = 0;
+    std::size_t messagesConverted = 0;
+    std::size_t bankMessagesConverted = 0;
+    std::size_t singleMessagesConverted = 0;
+    std::size_t messagesSkipped = 0;
+    std::size_t fragmentsSkipped = 0;
+    std::size_t voicesConverted = 0;
+    std::size_t normalizationsApplied = 0;
+    std::size_t voicesNormalized = 0;
+    std::vector<dxsyx::ParseIssue> issues;
 };
 
 struct VoiceJob
@@ -75,6 +100,11 @@ Diagnostic makeError(const std::filesystem::path& source, std::string code, std:
 Diagnostic makeInfo(const std::filesystem::path& source, std::string code, std::string message)
 {
     return makeDiagnostic(DiagnosticLevel::info, source, std::move(code), std::move(message));
+}
+
+Diagnostic makeWarning(const std::filesystem::path& source, std::string code, std::string message)
+{
+    return makeDiagnostic(DiagnosticLevel::warning, source, std::move(code), std::move(message));
 }
 
 std::string lowerCase(std::string text)
@@ -348,10 +378,12 @@ std::vector<VoiceJob> makeVoiceJobs(const std::vector<ParsedSource>& parsedSourc
     for (const auto& parsed : parsedSources)
     {
         const auto sourceBase = parsed.relativeParent / parsed.safeSourceStem;
-        for (auto messageIndex = std::size_t{0}; messageIndex < parsed.messages.size(); ++messageIndex)
+        const auto bankMessageCount = std::ranges::count_if(parsed.messages, [](const auto& message)
+                                                            { return std::holds_alternative<dxsyx::BankMessage>(message.data); });
+        const auto needsBankDirectories = bankMessageCount > 1;
+        for (const auto& message : parsed.messages)
         {
-            const auto ordinal = zeroPadded(messageIndex + 1, 3);
-            const auto& message = parsed.messages[messageIndex];
+            const auto ordinal = zeroPadded(message.sourceMessageIndex + 1, 3);
             if (const auto* bank = std::get_if<dxsyx::BankMessage>(&message.data))
             {
                 for (auto voiceIndex = std::size_t{0}; voiceIndex < bank->voices.size(); ++voiceIndex)
@@ -359,7 +391,10 @@ std::vector<VoiceJob> makeVoiceJobs(const std::vector<ParsedSource>& parsedSourc
                     const auto displayName = trimVoiceName(bank->voices[voiceIndex].name);
                     const auto fileName =
                         zeroPadded(voiceIndex + 1, 2) + "_" + safeVoiceFileStem(bank->voices[voiceIndex].name, displayName) + ".vstpreset";
-                    auto output = sourceBase / ("bank_" + ordinal) / fileName;
+                    auto output = sourceBase;
+                    if (needsBankDirectories)
+                        output /= "bank_" + ordinal;
+                    output /= fileName;
                     output = makeUniqueOutputPath(std::move(output), usedPaths);
                     jobs.push_back(VoiceJob{parsed.sourceFile, std::move(output), displayName, bank->voices[voiceIndex]});
                 }
@@ -514,6 +549,177 @@ std::optional<EmbeddedAssets> loadEmbeddedAssets(std::vector<Diagnostic>& diagno
     return result;
 }
 
+std::size_t voiceCount(const dxsyx::Message& message)
+{
+    return std::holds_alternative<dxsyx::BankMessage>(message.data) ? dxsyx::bankVoiceCount : std::size_t{1};
+}
+
+std::filesystem::path reportSourcePath(const std::filesystem::path& sourceFile, const std::filesystem::path& sourceRoot,
+                                       const bool sourceIsDirectory)
+{
+    if (!sourceIsDirectory)
+        return sourceFile.filename();
+    const auto relative = sourceFile.lexically_relative(sourceRoot);
+    return relative.empty() ? sourceFile.filename() : relative;
+}
+
+std::string genericUtf8(const std::filesystem::path& path)
+{
+    const auto text = path.generic_u8string();
+    auto result = std::string{};
+    result.reserve(text.size());
+    std::ranges::transform(text, std::back_inserter(result), [](const char8_t character) { return static_cast<char>(character); });
+    return result;
+}
+
+std::string jsonQuoted(const std::string_view value)
+{
+    static constexpr auto hex = std::string_view{"0123456789abcdef"};
+    auto result = std::string{"\""};
+    result.reserve(value.size() + 2);
+    for (const auto rawCharacter : value)
+    {
+        const auto character = static_cast<unsigned char>(rawCharacter);
+        switch (character)
+        {
+        case '"':
+            result += "\\\"";
+            break;
+        case '\\':
+            result += "\\\\";
+            break;
+        case '\b':
+            result += "\\b";
+            break;
+        case '\f':
+            result += "\\f";
+            break;
+        case '\n':
+            result += "\\n";
+            break;
+        case '\r':
+            result += "\\r";
+            break;
+        case '\t':
+            result += "\\t";
+            break;
+        default:
+            if (character < 0x20U)
+            {
+                result += "\\u00";
+                result.push_back(hex[(character >> 4U) & 0x0fU]);
+                result.push_back(hex[character & 0x0fU]);
+            }
+            else
+            {
+                result.push_back(static_cast<char>(character));
+            }
+            break;
+        }
+    }
+    result.push_back('"');
+    return result;
+}
+
+std::string_view outcomeName(const SourceOutcome outcome)
+{
+    switch (outcome)
+    {
+    case SourceOutcome::converted:
+        return "converted";
+    case SourceOutcome::partial:
+        return "partial";
+    case SourceOutcome::skipped:
+        return "skipped";
+    }
+    return "skipped";
+}
+
+std::string buildConversionReport(const ConversionOptions& options, const ConversionResult& result,
+                                  const std::vector<SourceReport>& sources)
+{
+    auto json = std::ostringstream{};
+    json << "{\n"
+         << "  \"format\": \"halionbridge-dx7-conversion-report\",\n"
+         << "  \"schema_version\": 1,\n"
+         << "  \"mode\": " << jsonQuoted(options.continueOnError ? "continue-on-error" : "fail-closed") << ",\n"
+         << "  \"strict_parameters\": " << (options.strictParameters ? "true" : "false") << ",\n"
+         << "  \"summary\": {\n"
+         << "    \"files_scanned\": " << result.syxFilesScanned << ",\n"
+         << "    \"files_converted\": " << result.syxFilesConverted << ",\n"
+         << "    \"files_partial\": " << result.syxFilesPartial << ",\n"
+         << "    \"files_skipped\": " << result.syxFilesSkipped << ",\n"
+         << "    \"messages_converted\": " << result.messagesConverted << ",\n"
+         << "    \"bank_messages_converted\": " << result.bankMessagesConverted << ",\n"
+         << "    \"single_messages_converted\": " << result.singleMessagesConverted << ",\n"
+         << "    \"messages_skipped\": " << result.messagesSkipped << ",\n"
+         << "    \"fragments_skipped\": " << result.fragmentsSkipped << ",\n"
+         << "    \"voices_converted\": " << result.voicesConverted << ",\n"
+         << "    \"normalizations_applied\": " << result.normalizationsApplied << ",\n"
+         << "    \"voices_normalized\": " << result.voicesNormalized << "\n"
+         << "  },\n"
+         << "  \"sources\": [\n";
+
+    for (auto sourceIndex = std::size_t{0}; sourceIndex < sources.size(); ++sourceIndex)
+    {
+        const auto& source = sources[sourceIndex];
+        json << "    {\n"
+             << "      \"source\": " << jsonQuoted(genericUtf8(source.relativeSource)) << ",\n"
+             << "      \"outcome\": " << jsonQuoted(outcomeName(source.outcome)) << ",\n"
+             << "      \"messages_seen\": " << source.messagesSeen << ",\n"
+             << "      \"messages_converted\": " << source.messagesConverted << ",\n"
+             << "      \"bank_messages_converted\": " << source.bankMessagesConverted << ",\n"
+             << "      \"single_messages_converted\": " << source.singleMessagesConverted << ",\n"
+             << "      \"messages_skipped\": " << source.messagesSkipped << ",\n"
+             << "      \"fragments_skipped\": " << source.fragmentsSkipped << ",\n"
+             << "      \"voices_converted\": " << source.voicesConverted << ",\n"
+             << "      \"normalizations_applied\": " << source.normalizationsApplied << ",\n"
+             << "      \"voices_normalized\": " << source.voicesNormalized << ",\n"
+             << "      \"issues\": [\n";
+
+        for (auto issueIndex = std::size_t{0}; issueIndex < source.issues.size(); ++issueIndex)
+        {
+            const auto& issue = source.issues[issueIndex];
+            json << "        {\n"
+                 << "          \"code\": " << jsonQuoted(issue.code) << ",\n"
+                 << "          \"severity\": " << jsonQuoted(issue.severity == dxsyx::IssueSeverity::error ? "error" : "warning") << ",\n"
+                 << "          \"byte_offset\": " << issue.byteOffset << ",\n"
+                 << "          \"message\": " << issue.messageIndex + 1 << ",\n"
+                 << "          \"voice\": ";
+            if (issue.voiceIndex)
+                json << *issue.voiceIndex + 1;
+            else
+                json << "null";
+            json << ",\n"
+                 << "          \"field\": " << jsonQuoted(issue.field) << ",\n"
+                 << "          \"original_value\": ";
+            if (issue.originalValue)
+                json << static_cast<int>(*issue.originalValue);
+            else
+                json << "null";
+            json << ",\n"
+                 << "          \"normalized_value\": ";
+            if (issue.normalizedValue)
+                json << static_cast<int>(*issue.normalizedValue);
+            else
+                json << "null";
+            json << ",\n"
+                 << "          \"description\": " << jsonQuoted(issue.message) << "\n"
+                 << "        }";
+            if (issueIndex + 1 != source.issues.size())
+                json << ',';
+            json << '\n';
+        }
+        json << "      ]\n"
+             << "    }";
+        if (sourceIndex + 1 != sources.size())
+            json << ',';
+        json << '\n';
+    }
+    json << "  ]\n}\n";
+    return json.str();
+}
+
 std::string buildManifest(const std::vector<VoiceJob>& jobs)
 {
     auto directories = std::set<std::string>{};
@@ -555,6 +761,7 @@ std::string helpText()
            "Options:\n"
            "  --recursive             Include .syx files below a source directory recursively.\n"
            "  --overwrite             Replace existing generated build files.\n"
+           "  --continue-on-error     Skip invalid or unsupported SysEx messages and convert independently validated DX7 voices.\n"
            "  --strict-parameters     Reject out-of-range DX7 parameter values instead of normalizing them.\n"
            "  --help, -h              Show this help and exit.\n";
 }
@@ -580,7 +787,7 @@ ConverterArgumentParseResult validateArguments(const std::span<const std::string
             recursive = true;
             continue;
         }
-        if (argument == "--overwrite" || argument == "--strict-parameters")
+        if (argument == "--overwrite" || argument == "--continue-on-error" || argument == "--strict-parameters")
             continue;
         if (!argument.empty() && argument.front() == '-')
         {
@@ -654,6 +861,8 @@ ConverterResult runConverterWithContext(const std::span<const std::string> args,
             options.recursive = true;
         else if (argument == "--overwrite")
             options.overwrite = true;
+        else if (argument == "--continue-on-error")
+            options.continueOnError = true;
         else if (argument == "--strict-parameters")
             options.strictParameters = true;
         else if (!argument.empty() && argument.front() == '-')
@@ -681,10 +890,12 @@ ConverterResult runConverterWithContext(const std::span<const std::string> args,
     result.exitCode = conversion.succeeded ? 0 : 1;
     if (conversion.succeeded)
     {
-        result.diagnostics.push_back(makeInfo(conversion.buildFile, "generated",
-                                              "Generated " + std::to_string(conversion.voicesConverted) +
-                                                  " DX7 preset build script(s) from " + std::to_string(conversion.syxFilesConverted) +
-                                                  " SysEx file(s). Run halionbridge build to create the .vstpreset files."));
+        result.diagnostics.push_back(makeInfo(
+            conversion.buildFile, "generated",
+            "Generated " + std::to_string(conversion.voicesConverted) + " DX7 preset build script(s) from " +
+                std::to_string(conversion.syxFilesConverted) + " SysEx file(s)" +
+                (conversion.syxFilesSkipped > 0 ? "; skipped " + std::to_string(conversion.syxFilesSkipped) + " file(s)" : std::string{}) +
+                ". Run halionbridge build to create the .vstpreset files."));
         context.report(result.diagnostics.back());
     }
     return result;
@@ -789,10 +1000,14 @@ ConversionResult convertSource(const ConversionOptions& options)
         return result;
     }
     addDiagnostic(makeInfo(sourcePath, "scan-complete", "Found " + std::to_string(syxFiles.size()) + " DX7 .syx file(s)."));
+    result.syxFilesScanned = static_cast<int>(syxFiles.size());
 
     auto parsedSources = std::vector<ParsedSource>{};
     parsedSources.reserve(syxFiles.size());
+    auto sourceReports = std::vector<SourceReport>{};
+    sourceReports.reserve(syxFiles.size());
     auto parseFailed = false;
+    auto normalizationFiles = std::size_t{0};
     for (const auto& syxFile : syxFiles)
     {
         if (shouldStop(options.context))
@@ -801,30 +1016,103 @@ ConversionResult convertSource(const ConversionOptions& options)
             return result;
         }
 
+        auto sourceReport = SourceReport{};
+        sourceReport.relativeSource = reportSourcePath(syxFile, sourcePath, sourceIsDirectory);
+
         auto bytes = readSyxFile(syxFile, result.diagnostics);
         reportPending();
         if (!bytes)
         {
             parseFailed = true;
-            continue;
-        }
-        auto parsed = dxsyx::parse(*bytes, dxsyx::ParseOptions{options.strictParameters});
-        for (const auto& issue : parsed.issues)
-            result.diagnostics.push_back(issueDiagnostic(syxFile, issue));
-        reportPending();
-        if (!parsed.succeeded())
-        {
-            parseFailed = true;
+            ++result.syxFilesSkipped;
+            sourceReports.push_back(std::move(sourceReport));
             continue;
         }
 
-        auto messageCount = parsed.messages.size();
+        auto parsed = dxsyx::parse(
+            *bytes, dxsyx::ParseOptions{.strictParameters = options.strictParameters, .continueOnError = options.continueOnError});
+        sourceReport.messagesSeen = parsed.messagesSeen;
+        sourceReport.messagesSkipped = parsed.messagesSkipped;
+        sourceReport.fragmentsSkipped = parsed.fragmentsSkipped;
+
+        auto normalizedVoices = std::set<std::pair<std::size_t, std::size_t>>{};
+        for (const auto& issue : parsed.issues)
+        {
+            if (issue.code == "parameter-range" && issue.normalizedValue)
+            {
+                ++sourceReport.normalizationsApplied;
+                if (issue.voiceIndex)
+                    normalizedVoices.emplace(issue.messageIndex, *issue.voiceIndex);
+            }
+
+            if (!sourceIsDirectory || issue.severity == dxsyx::IssueSeverity::error)
+                result.diagnostics.push_back(issueDiagnostic(syxFile, issue));
+        }
+        reportPending();
+        sourceReport.voicesNormalized = normalizedVoices.size();
+        sourceReport.issues = parsed.issues;
+        result.messagesSkipped += static_cast<int>(parsed.messagesSkipped);
+        result.fragmentsSkipped += static_cast<int>(parsed.fragmentsSkipped);
+        result.normalizationsApplied += static_cast<int>(sourceReport.normalizationsApplied);
+        result.voicesNormalized += static_cast<int>(sourceReport.voicesNormalized);
+        if (sourceReport.normalizationsApplied > 0)
+            ++normalizationFiles;
+
+        if (!parsed.succeeded())
+        {
+            parseFailed = true;
+            ++result.syxFilesSkipped;
+            sourceReports.push_back(std::move(sourceReport));
+            continue;
+        }
+
+        if (parsed.messages.empty())
+        {
+            ++result.syxFilesSkipped;
+            sourceReports.push_back(std::move(sourceReport));
+            continue;
+        }
+
+        sourceReport.messagesConverted = parsed.messages.size();
+        sourceReport.bankMessagesConverted = static_cast<std::size_t>(std::ranges::count_if(
+            parsed.messages, [](const dxsyx::Message& message) { return std::holds_alternative<dxsyx::BankMessage>(message.data); }));
+        sourceReport.singleMessagesConverted = sourceReport.messagesConverted - sourceReport.bankMessagesConverted;
+        sourceReport.voicesConverted =
+            std::accumulate(parsed.messages.begin(), parsed.messages.end(), std::size_t{0},
+                            [](const std::size_t count, const dxsyx::Message& message) { return count + voiceCount(message); });
+        const auto isPartial = sourceReport.messagesSkipped > 0 || sourceReport.fragmentsSkipped > 0;
+        sourceReport.outcome = isPartial ? SourceOutcome::partial : SourceOutcome::converted;
+        if (isPartial)
+            ++result.syxFilesPartial;
+
+        const auto messageCount = parsed.messages.size();
         auto source = ParsedSource{syxFile, {}, safePathComponent(syxFile.stem().string(), "unnamed"), std::move(parsed.messages)};
         if (sourceIsDirectory)
             source.relativeParent = safeRelativeParent(syxFile.parent_path().lexically_relative(sourcePath));
         parsedSources.push_back(std::move(source));
+        sourceReports.push_back(std::move(sourceReport));
         ++result.syxFilesConverted;
         result.messagesConverted += static_cast<int>(messageCount);
+        result.bankMessagesConverted += static_cast<int>(sourceReports.back().bankMessagesConverted);
+        result.singleMessagesConverted += static_cast<int>(sourceReports.back().singleMessagesConverted);
+    }
+
+    if (result.normalizationsApplied > 0)
+    {
+        addDiagnostic(makeWarning(sourcePath, "normalization-summary",
+                                  "Normalized " + std::to_string(result.normalizationsApplied) +
+                                      " out-of-range DX7 parameter value(s) in " + std::to_string(result.voicesNormalized) +
+                                      " voice(s) across " + std::to_string(normalizationFiles) + " file(s)."));
+    }
+
+    if (options.continueOnError && (result.messagesSkipped > 0 || result.fragmentsSkipped > 0 || result.syxFilesSkipped > 0))
+    {
+        addDiagnostic(makeWarning(sourcePath, "recovery-summary",
+                                  "Recovery retained independently validated DX7 messages and skipped " +
+                                      std::to_string(result.messagesSkipped) + " message(s), " + std::to_string(result.fragmentsSkipped) +
+                                      " byte fragment(s), and " + std::to_string(result.syxFilesSkipped) +
+                                      " file(s) with no usable voices. Successful conversion output records the details in " +
+                                      std::string(kConversionReportFileName) + "."));
     }
 
     if (parseFailed)
@@ -859,6 +1147,8 @@ ConversionResult convertSource(const ConversionOptions& options)
 
     auto generatedFiles = std::move(embedded->templates);
     generatedFiles.push_back(GeneratedBuildFile{std::filesystem::path(kManifestFileName), textBytes(buildManifest(jobs))});
+    generatedFiles.push_back(GeneratedBuildFile{std::filesystem::path(kConversionReportFileName),
+                                                textBytes(buildConversionReport(options, result, sourceReports))});
     if (shouldStop(options.context))
     {
         addDiagnostic(makeError(outputDirectory, "stopped", "DX7 conversion stopped before writing generated files."));

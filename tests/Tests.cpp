@@ -1349,6 +1349,12 @@ class BridgeTests : public juce::UnitTest
                 expect(dx7Converter->validateArguments != nullptr);
                 expect(dx7Converter->visibility == halionbridge::converters::ConverterVisibility::listed);
                 expect(dx7Converter->sourcePathKind == halionbridge::converters::ConverterSourcePathKind::fileOrDirectory);
+                expect(dx7Converter->helpText != nullptr && dx7Converter->helpText().find("--continue-on-error") != std::string::npos);
+                const auto recoveryArgs = std::vector<std::string>{juce::File::getCurrentWorkingDirectory().getFullPathName().toStdString(),
+                                                                   "--continue-on-error"};
+                const auto recoveryValidation = dx7Converter->validateArguments(recoveryArgs);
+                expectEquals(recoveryValidation.exitCode, 0);
+                expect(recoveryValidation.errorKind == halionbridge::converters::ConverterArgumentErrorKind::none);
             }
 #endif
             expect(registry.find("missing") == nullptr);

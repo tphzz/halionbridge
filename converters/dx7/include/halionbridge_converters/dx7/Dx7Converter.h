@@ -16,6 +16,7 @@ struct ConversionOptions
     bool recursive = false;
     bool overwrite = false;
     bool strictParameters = false;
+    bool continueOnError = false;
 };
 
 struct ConversionResult
@@ -25,9 +26,18 @@ struct ConversionResult
     std::vector<std::filesystem::path> generatedLuaFiles;
     std::vector<std::filesystem::path> generatedFiles;
     std::vector<Diagnostic> diagnostics;
+    int syxFilesScanned = 0;
     int syxFilesConverted = 0;
+    int syxFilesPartial = 0;
+    int syxFilesSkipped = 0;
     int messagesConverted = 0;
+    int bankMessagesConverted = 0;
+    int singleMessagesConverted = 0;
+    int messagesSkipped = 0;
+    int fragmentsSkipped = 0;
     int voicesConverted = 0;
+    int normalizationsApplied = 0;
+    int voicesNormalized = 0;
 };
 
 ConversionResult convertSource(const ConversionOptions& options);

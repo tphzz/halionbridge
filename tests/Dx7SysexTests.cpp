@@ -139,6 +139,96 @@ class Dx7SysexTests final : public juce::UnitTest
             expect(getBank(result, 1) != nullptr);
         }
 
+        beginTest("Recovery keeps validated messages around unsupported frames and preserves source ordinals");
+        {
+            auto first = frameMessage(0x00, makeSingleVoice());
+            const auto unsupported = frameMessage(0x7e, std::array<std::uint8_t, 3>{1, 2, 3});
+            const auto second = frameMessage(0x00, makeSingleVoice());
+            first.insert(first.end(), unsupported.begin(), unsupported.end());
+            first.insert(first.end(), second.begin(), second.end());
+
+            const auto strictResult = dxsyx::parse(first);
+            expect(!strictResult.succeeded());
+            expectEquals(static_cast<int>(strictResult.messages.size()), 1);
+
+            const auto recovered = dxsyx::parse(first, dxsyx::ParseOptions{.continueOnError = true});
+            expect(recovered.succeeded());
+            expectEquals(static_cast<int>(recovered.messages.size()), 2);
+            expectEquals(static_cast<int>(recovered.messages[0].sourceMessageIndex), 0);
+            expectEquals(static_cast<int>(recovered.messages[1].sourceMessageIndex), 2);
+            expectEquals(static_cast<int>(recovered.messagesSeen), 3);
+            expectEquals(static_cast<int>(recovered.messagesSkipped), 1);
+            expectEquals(static_cast<int>(recovered.fragmentsSkipped), 0);
+            expect(std::ranges::any_of(recovered.issues, [](const auto& issue)
+                                       { return issue.code == "unsupported-format" && issue.severity == dxsyx::IssueSeverity::warning; }));
+        }
+
+        beginTest("Recovery resynchronizes after corrupt messages and stray fragments");
+        {
+            auto bytes = Bytes{0x01, 0x02, 0x03};
+            auto corrupt = frameMessage(0x00, makeSingleVoice());
+            corrupt[corrupt.size() - 2] ^= 1;
+            auto highBit = frameMessage(0x00, makeSingleVoice());
+            highBit[6] = 0x80;
+            auto otherManufacturer = frameMessage(0x00, makeSingleVoice());
+            otherManufacturer[1] = 0x7d;
+            const auto valid = frameMessage(0x00, makeSingleVoice());
+            bytes.insert(bytes.end(), corrupt.begin(), corrupt.end());
+            bytes.insert(bytes.end(), highBit.begin(), highBit.end());
+            bytes.insert(bytes.end(), otherManufacturer.begin(), otherManufacturer.end());
+            bytes.insert(bytes.end(), valid.begin(), valid.end());
+
+            const auto result = dxsyx::parse(bytes, dxsyx::ParseOptions{.continueOnError = true});
+            expect(result.succeeded());
+            expectEquals(static_cast<int>(result.messages.size()), 1);
+            expectEquals(static_cast<int>(result.messages[0].sourceMessageIndex), 3);
+            expectEquals(static_cast<int>(result.messagesSeen), 4);
+            expectEquals(static_cast<int>(result.messagesSkipped), 3);
+            expectEquals(static_cast<int>(result.fragmentsSkipped), 1);
+            expect(std::ranges::any_of(result.issues, [](const auto& issue) { return issue.code == "checksum"; }));
+            expect(std::ranges::any_of(result.issues, [](const auto& issue) { return issue.code == "non-seven-bit"; }));
+            expect(std::ranges::any_of(result.issues, [](const auto& issue) { return issue.code == "manufacturer"; }));
+            expect(std::ranges::any_of(result.issues, [](const auto& issue) { return issue.code == "unsupported-data"; }));
+        }
+
+        beginTest("Recovery reports truncated framed and invalid raw inputs without inventing voices");
+        {
+            const auto truncated = Bytes{0xf0, 0x43, 0x00, 0x09, 0x20};
+            auto result = dxsyx::parse(truncated, dxsyx::ParseOptions{.continueOnError = true});
+            expect(result.succeeded());
+            expect(result.messages.empty());
+            expectEquals(static_cast<int>(result.messagesSeen), 1);
+            expectEquals(static_cast<int>(result.messagesSkipped), 1);
+            expect(std::ranges::any_of(result.issues, [](const auto& issue) { return issue.code == "truncated-message"; }));
+
+            auto invalidRaw = makeRawBank();
+            invalidRaw[0] = 0x80;
+            result = dxsyx::parse(invalidRaw, dxsyx::ParseOptions{.continueOnError = true});
+            expect(result.succeeded());
+            expect(result.messages.empty());
+            expectEquals(static_cast<int>(result.messagesSeen), 1);
+            expectEquals(static_cast<int>(result.messagesSkipped), 1);
+            expect(std::ranges::all_of(result.issues, [](const auto& issue) { return issue.severity == dxsyx::IssueSeverity::warning; }));
+        }
+
+        beginTest("Strict parameter recovery rejects only the affected message");
+        {
+            auto invalidPayload = makeSingleVoice();
+            invalidPayload[142] = 7;
+            auto bytes = frameMessage(0x00, invalidPayload);
+            const auto valid = frameMessage(0x00, makeSingleVoice());
+            bytes.insert(bytes.end(), valid.begin(), valid.end());
+
+            const auto result = dxsyx::parse(bytes, dxsyx::ParseOptions{.strictParameters = true, .continueOnError = true});
+            expect(result.succeeded());
+            expectEquals(static_cast<int>(result.messages.size()), 1);
+            expectEquals(static_cast<int>(result.messages[0].sourceMessageIndex), 1);
+            expectEquals(static_cast<int>(result.messagesSkipped), 1);
+            expect(std::ranges::any_of(
+                result.issues, [](const auto& issue)
+                { return issue.code == "parameter-range" && !issue.normalizedValue && issue.severity == dxsyx::IssueSeverity::warning; }));
+        }
+
         beginTest("Recognizes an exact whole-file raw bank");
         {
             const auto result = dxsyx::parse(makeRawBank());

@@ -208,6 +208,34 @@ std::vector<std::uint8_t> framedSingle(const std::string_view name, const std::u
     return bytes;
 }
 
+std::vector<std::uint8_t> rawBank(const std::string_view namePrefix)
+{
+    constexpr auto packedVoiceSize = std::size_t{128};
+    constexpr auto bankVoiceCount = std::size_t{32};
+    auto bytes = std::vector<std::uint8_t>(packedVoiceSize * bankVoiceCount, 0);
+    for (auto voiceIndex = std::size_t{0}; voiceIndex < bankVoiceCount; ++voiceIndex)
+    {
+        const auto name = std::string{namePrefix} + "_" + (voiceIndex < 9 ? "0" : "") + std::to_string(voiceIndex + 1);
+        const auto nameOffset = (voiceIndex * packedVoiceSize) + 118;
+        std::fill_n(bytes.begin() + static_cast<std::ptrdiff_t>(nameOffset), 10, static_cast<std::uint8_t>(' '));
+        std::copy_n(name.begin(), std::min(name.size(), std::size_t{10}), bytes.begin() + static_cast<std::ptrdiff_t>(nameOffset));
+    }
+    return bytes;
+}
+
+std::vector<std::uint8_t> framedBank(const std::string_view namePrefix)
+{
+    const auto payload = rawBank(namePrefix);
+    auto bytes = std::vector<std::uint8_t>{0xf0, 0x43, 0x00, 0x09, 0x20, 0x00};
+    bytes.insert(bytes.end(), payload.begin(), payload.end());
+    auto sum = std::uint32_t{0};
+    for (const auto value : payload)
+        sum += value;
+    bytes.push_back(static_cast<std::uint8_t>((128U - (sum & 0x7fU)) & 0x7fU));
+    bytes.push_back(0xf7);
+    return bytes;
+}
+
 bool writeBytes(const juce::File& file, const std::span<const std::uint8_t> bytes)
 {
     return file.replaceWithData(bytes.data(), bytes.size());
@@ -216,6 +244,19 @@ bool writeBytes(const juce::File& file, const std::span<const std::uint8_t> byte
 bool hasDiagnostic(const halionbridge::converters::dx7::ConversionResult& result, const std::string_view code)
 {
     return std::ranges::any_of(result.diagnostics, [code](const auto& diagnostic) { return diagnostic.code == code; });
+}
+
+std::vector<std::uint8_t> framedUnsupportedMessage()
+{
+    constexpr auto payload = std::array<std::uint8_t, 3>{1, 2, 3};
+    auto bytes = std::vector<std::uint8_t>{0xf0, 0x43, 0x00, 0x7e, 0x00, static_cast<std::uint8_t>(payload.size())};
+    bytes.insert(bytes.end(), payload.begin(), payload.end());
+    auto sum = 0U;
+    for (const auto value : payload)
+        sum += value;
+    bytes.push_back(static_cast<std::uint8_t>((128U - (sum & 0x7fU)) & 0x7fU));
+    bytes.push_back(0xf7);
+    return bytes;
 }
 
 class Dx7ConverterTests final : public juce::UnitTest
@@ -242,7 +283,7 @@ class Dx7ConverterTests final : public juce::UnitTest
             expectEquals(result.messagesConverted, 1);
             expectEquals(result.voicesConverted, 1);
             expectEquals(static_cast<int>(result.generatedLuaFiles.size()), 2);
-            expectEquals(static_cast<int>(result.generatedFiles.size()), 35);
+            expectEquals(static_cast<int>(result.generatedFiles.size()), 36);
 
             auto luaFiles = juce::Array<juce::File>{};
             output.directory.findChildFiles(luaFiles, juce::File::findFiles, false, "*.lua");
@@ -270,6 +311,12 @@ class Dx7ConverterTests final : public juce::UnitTest
             expect(sourceTemplate.loadFileAsData(sourceBytes));
             expect(emittedBytes == sourceBytes);
             expect(output.directory.getChildFile("halionbridge_build_manifest.json").loadFileAsString().contains("voice"));
+            const auto report = output.directory.getChildFile("halionbridge_dx7_conversion_report.json");
+            expect(report.existsAsFile());
+            expect(report.loadFileAsString().contains("\"schema_version\": 1"));
+            auto reportRoot = juce::var{};
+            expect(juce::JSON::parse(report.loadFileAsString(), reportRoot).wasOk());
+            expect(reportRoot.isObject());
             const auto helper = output.directory.getChildFile("halionbridge-dx7.lua").loadFileAsString();
             expect(helper.contains("Required HALion \" .. element_label .. \" name assignment is unavailable"));
             expect(helper.contains("FM-Oscillator.EmulationMode"));
@@ -306,7 +353,9 @@ class Dx7ConverterTests final : public juce::UnitTest
             expect(helper.contains("local neutral_durations = { 0, 0.1, 0.25, 0.2 }"));
             expect(helper.contains("set_required(zone, \"Pitch Env.SustainIndex\", 3)"),
                    "Neutral DX7 pitch envelopes must preserve FMLab's four-point default form");
-            expect(helper.contains("math.abs(target_offset - start_offset) * 0.0075 * 2 ^ ((99 - clamp(rate, 0, 99)) / 18)"));
+            expect(helper.contains(
+                       "return math.min(30, math.abs(target_offset - start_offset) * 0.0075 * 2 ^ ((99 - clamp(rate, 0, 99)) / 18))"),
+                   "DX7 pitch-envelope segments must stay within HALion's 30-second point-duration ceiling");
             expect(helper.contains("set_required(zone, \"Pitch.EnvAmount\", amount)"),
                    "Non-neutral DX7 pitch envelopes must use the native maximum absolute offset");
             expect(helper.contains("set_required(zone, \"Pitch Env.SustainIndex\", 4)"));
@@ -352,6 +401,51 @@ class Dx7ConverterTests final : public juce::UnitTest
             expect(helper.contains("ModulationDestination.fmOp6Pitch"));
         }
 
+        beginTest("A single bank omits the redundant bank directory");
+        {
+            auto source = ScopedTestDirectory("dx7_one_bank_source");
+            auto output = ScopedTestDirectory("dx7_one_bank_output");
+            const auto sourceFile = source.directory.getChildFile("one.syx");
+            const auto bytes = rawBank("ONE");
+            expect(writeBytes(sourceFile, bytes));
+
+            auto options = halionbridge::converters::dx7::ConversionOptions{};
+            options.sourcePath = sourceFile.getFullPathName().toStdString();
+            options.outputDirectory = output.path();
+            const auto result = halionbridge::converters::dx7::convertSource(options);
+
+            expect(result.succeeded);
+            expectEquals(result.bankMessagesConverted, 1);
+            expectEquals(result.voicesConverted, 32);
+            const auto firstLua = output.directory.getChildFile("000001_ONE_01.lua").loadFileAsString();
+            expect(firstLua.contains("output_file = \"one/01_ONE_01.vstpreset\""));
+            expect(!firstLua.contains("/bank_001/"));
+        }
+
+        beginTest("Multiple banks retain message directories");
+        {
+            auto source = ScopedTestDirectory("dx7_multiple_banks_source");
+            auto output = ScopedTestDirectory("dx7_multiple_banks_output");
+            const auto sourceFile = source.directory.getChildFile("multiple.syx");
+            auto bytes = framedBank("FIRST");
+            const auto secondBank = framedBank("SECOND");
+            bytes.insert(bytes.end(), secondBank.begin(), secondBank.end());
+            expect(writeBytes(sourceFile, bytes));
+
+            auto options = halionbridge::converters::dx7::ConversionOptions{};
+            options.sourcePath = sourceFile.getFullPathName().toStdString();
+            options.outputDirectory = output.path();
+            const auto result = halionbridge::converters::dx7::convertSource(options);
+
+            expect(result.succeeded);
+            expectEquals(result.bankMessagesConverted, 2);
+            expectEquals(result.voicesConverted, 64);
+            const auto firstLua = output.directory.getChildFile("000001_FIRST_01.lua").loadFileAsString();
+            const auto secondBankLua = output.directory.getChildFile("000033_SECOND_01.lua").loadFileAsString();
+            expect(firstLua.contains("output_file = \"multiple/bank_001/01_FIRST_01.vstpreset\""));
+            expect(secondBankLua.contains("output_file = \"multiple/bank_002/01_SECOND_01.vstpreset\""));
+        }
+
         beginTest("Blank names and portable path collisions are deterministic");
         {
             auto source = ScopedTestDirectory("dx7_name_source");
@@ -388,6 +482,74 @@ class Dx7ConverterTests final : public juce::UnitTest
             const auto result = halionbridge::converters::dx7::convertSource(options);
             expect(!result.succeeded);
             expect(hasDiagnostic(result, "checksum"));
+            expect(!output.directory.getChildFile("halionbridge_build.lua").exists());
+        }
+
+        beginTest("Recovery converts validated messages and records skipped input without absolute paths");
+        {
+            auto source = ScopedTestDirectory("dx7_recovery_source");
+            auto output = ScopedTestDirectory("dx7_recovery_output");
+
+            auto mixed = framedSingle("FIRST", 0);
+            const auto unsupported = framedUnsupportedMessage();
+            const auto last = framedSingle("LAST", 1);
+            mixed.insert(mixed.end(), unsupported.begin(), unsupported.end());
+            mixed.insert(mixed.end(), last.begin(), last.end());
+            expect(writeBytes(source.directory.getChildFile("mixed.syx"), mixed));
+
+            auto corrupt = framedSingle("BAD", 0);
+            corrupt[corrupt.size() - 2] ^= 1;
+            expect(writeBytes(source.directory.getChildFile("corrupt.syx"), corrupt));
+
+            auto options = halionbridge::converters::dx7::ConversionOptions{};
+            options.sourcePath = source.path();
+            options.outputDirectory = output.path();
+            options.continueOnError = true;
+            const auto result = halionbridge::converters::dx7::convertSource(options);
+
+            expect(result.succeeded);
+            expectEquals(result.syxFilesScanned, 2);
+            expectEquals(result.syxFilesConverted, 1);
+            expectEquals(result.syxFilesPartial, 1);
+            expectEquals(result.syxFilesSkipped, 1);
+            expectEquals(result.messagesConverted, 2);
+            expectEquals(result.bankMessagesConverted, 0);
+            expectEquals(result.singleMessagesConverted, 2);
+            expectEquals(result.messagesSkipped, 2);
+            expectEquals(result.voicesConverted, 2);
+            expect(hasDiagnostic(result, "recovery-summary"));
+
+            const auto firstLua = output.directory.getChildFile("000001_FIRST.lua").loadFileAsString();
+            const auto lastLua = output.directory.getChildFile("000002_LAST.lua").loadFileAsString();
+            expect(firstLua.contains("output_file = \"mixed/single_001_FIRST.vstpreset\""));
+            expect(lastLua.contains("output_file = \"mixed/single_003_LAST.vstpreset\""));
+
+            const auto report = output.directory.getChildFile("halionbridge_dx7_conversion_report.json").loadFileAsString();
+            expect(report.contains("\"format\": \"halionbridge-dx7-conversion-report\""));
+            expect(report.contains("\"outcome\": \"partial\""));
+            expect(report.contains("\"outcome\": \"skipped\""));
+            expect(report.contains("\"source\": \"mixed.syx\""));
+            expect(!report.contains(source.directory.getFullPathName()));
+        }
+
+        beginTest("Recovery fails without writing when no valid DX7 voice remains");
+        {
+            auto source = ScopedTestDirectory("dx7_recovery_empty_source");
+            auto output = ScopedTestDirectory("dx7_recovery_empty_output");
+            auto corrupt = framedSingle("BAD", 0);
+            corrupt[corrupt.size() - 2] ^= 1;
+            expect(writeBytes(source.directory.getChildFile("corrupt.syx"), corrupt));
+
+            auto options = halionbridge::converters::dx7::ConversionOptions{};
+            options.sourcePath = source.path();
+            options.outputDirectory = output.path();
+            options.continueOnError = true;
+            const auto result = halionbridge::converters::dx7::convertSource(options);
+
+            expect(!result.succeeded);
+            expectEquals(result.syxFilesSkipped, 1);
+            expectEquals(result.voicesConverted, 0);
+            expect(hasDiagnostic(result, "no-voices"));
             expect(!output.directory.getChildFile("halionbridge_build.lua").exists());
         }
 

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <string_view>
@@ -101,6 +102,47 @@ class BuildDirectoryEmitterAssetTests final : public juce::UnitTest
             const auto result = halionbridge::converters::writeBuildDirectory(request);
             expect(!result.succeeded);
             expect(hasDiagnostic(result, "duplicate-generated-path"));
+            expect(!temp.directory.getChildFile("halionbridge_build.lua").existsAsFile());
+        }
+
+        beginTest("Rejects file and directory prefix collisions in either insertion order");
+        {
+            for (const auto parentFirst : {true, false})
+            {
+                auto temp = ScopedTestDirectory(parentFirst ? "emitter_parent_first" : "emitter_child_first");
+                auto request = BuildDirectoryRequest{temp.path(), false, {GeneratedLuaScript{"voice.lua", "voice.lua", "return {}\n"}}};
+                const auto parent = GeneratedBuildFile{"nested", bytes({1})};
+                const auto child = GeneratedBuildFile{"nested/file.bin", bytes({2})};
+                request.files.push_back(parentFirst ? parent : child);
+                request.files.push_back(parentFirst ? child : parent);
+
+                const auto result = halionbridge::converters::writeBuildDirectory(request);
+                expect(!result.succeeded);
+                expect(hasDiagnostic(result, "duplicate-generated-path"));
+                expect(!temp.directory.getChildFile("halionbridge_build.lua").existsAsFile());
+            }
+        }
+
+        beginTest("Preflights large generated path sets within the scale budget");
+        {
+            auto temp = ScopedTestDirectory("emitter_large_preflight");
+            auto scripts = std::vector<GeneratedLuaScript>{};
+            scripts.reserve(20'000);
+            for (auto index = std::size_t{0}; index < 20'000; ++index)
+            {
+                auto fileName = "voice_" + std::to_string(index) + ".lua";
+                scripts.push_back(GeneratedLuaScript{fileName, fileName, "return {}\n"});
+            }
+            auto request = BuildDirectoryRequest{temp.path(), false, std::move(scripts)};
+            request.files.push_back(GeneratedBuildFile{"VOICE_0.LUA", bytes({1})});
+
+            const auto started = std::chrono::steady_clock::now();
+            const auto result = halionbridge::converters::writeBuildDirectory(request);
+            const auto elapsed = std::chrono::steady_clock::now() - started;
+
+            expect(!result.succeeded);
+            expect(hasDiagnostic(result, "duplicate-generated-path"));
+            expect(elapsed < std::chrono::seconds{5});
             expect(!temp.directory.getChildFile("halionbridge_build.lua").existsAsFile());
         }
     }

@@ -181,7 +181,9 @@ local function apply_operator(zone, number, operator, oscillator_sync)
 end
 
 local function pitch_envelope_duration(start_offset, target_offset, rate)
-    return math.abs(target_offset - start_offset) * 0.0075 * 2 ^ ((99 - clamp(rate, 0, 99)) / 18)
+    -- HALion rejects the complete envelope-point table when any duration is
+    -- above 30 seconds instead of clamping the offending point itself.
+    return math.min(30, math.abs(target_offset - start_offset) * 0.0075 * 2 ^ ((99 - clamp(rate, 0, 99)) / 18))
 end
 
 local function set_pitch_envelope(zone, rates, levels)

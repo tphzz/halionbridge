@@ -116,17 +116,24 @@ struct Message
 {
     std::size_t byteOffset = 0;
     MessageData data;
+    // Zero-based position of the physical SysEx message in the source stream.
+    // Recovery mode preserves gaps left by skipped messages.
+    std::size_t sourceMessageIndex = 0;
 };
 
 struct ParseOptions
 {
     bool strictParameters = false;
+    bool continueOnError = false;
 };
 
 struct ParseResult
 {
     std::vector<Message> messages;
     std::vector<ParseIssue> issues;
+    std::size_t messagesSeen = 0;
+    std::size_t messagesSkipped = 0;
+    std::size_t fragmentsSkipped = 0;
 
     [[nodiscard]] bool succeeded() const noexcept;
 };

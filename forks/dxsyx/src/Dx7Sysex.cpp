@@ -59,12 +59,19 @@ std::uint8_t normalizeParameter(DecodeContext& context, const std::uint8_t value
     if (value <= maximum)
         return value;
 
-    const auto severity = context.options.strictParameters ? IssueSeverity::error : IssueSeverity::warning;
     auto message = std::ostringstream{};
-    message << field << " value " << static_cast<int>(value) << " exceeds " << static_cast<int>(maximum) << " and was normalized to "
-            << static_cast<int>(maximum) << ".";
-    context.result.issues.push_back(ParseIssue{severity, "parameter-range", byteOffset, context.messageIndex, voiceIndex, std::move(field),
-                                               value, maximum, message.str()});
+    message << field << " value " << static_cast<int>(value) << " exceeds " << static_cast<int>(maximum);
+    if (context.options.strictParameters)
+    {
+        message << "; the containing DX7 message was rejected because strict parameter validation is enabled.";
+        context.result.issues.push_back(ParseIssue{IssueSeverity::error, "parameter-range", byteOffset, context.messageIndex, voiceIndex,
+                                                   std::move(field), value, std::nullopt, message.str()});
+        return maximum;
+    }
+
+    message << " and was normalized to " << static_cast<int>(maximum) << ".";
+    context.result.issues.push_back(ParseIssue{IssueSeverity::warning, "parameter-range", byteOffset, context.messageIndex, voiceIndex,
+                                               std::move(field), value, maximum, message.str()});
     return maximum;
 }
 
@@ -297,7 +304,7 @@ void decodeBank(const std::span<const std::uint8_t, packedBankSize> payload, Dec
             decodePackedVoice(std::span<const std::uint8_t, packedVoiceSize>{payload.subspan(voiceOffset, packedVoiceSize)}, context,
                               voiceIndex, context.payloadOffset + voiceOffset);
     }
-    context.result.messages.push_back(Message{messageOffset, std::move(bank)});
+    context.result.messages.push_back(Message{messageOffset, std::move(bank), context.messageIndex});
 }
 
 bool parseFramedMessage(const std::span<const std::uint8_t> bytes, std::size_t& offset, const std::size_t messageIndex,
@@ -381,11 +388,80 @@ bool parseFramedMessage(const std::span<const std::uint8_t> bytes, std::size_t& 
     {
         auto single = SingleVoiceMessage{
             bytes[offset + 2], decodeSingleVoice(std::span<const std::uint8_t, singleVoiceSize>{payload}, context, payloadOffset)};
-        result.messages.push_back(Message{offset, std::move(single)});
+        result.messages.push_back(Message{offset, std::move(single), messageIndex});
     }
 
     offset += totalSize;
     return true;
+}
+
+void appendRecoveredIssues(ParseResult& destination, std::vector<ParseIssue> issues)
+{
+    for (auto& issue : issues)
+    {
+        issue.severity = IssueSeverity::warning;
+        destination.issues.push_back(std::move(issue));
+    }
+}
+
+std::size_t findByte(const std::span<const std::uint8_t> bytes, const std::size_t start, const std::uint8_t value)
+{
+    for (auto index = start; index < bytes.size(); ++index)
+    {
+        if (bytes[index] == value)
+            return index;
+    }
+    return bytes.size();
+}
+
+std::size_t recoveryOffsetAfterMessage(const std::span<const std::uint8_t> bytes, const std::size_t offset)
+{
+    const auto nextMessage = findByte(bytes, offset + 1, 0xf0U);
+    const auto terminator = findByte(bytes, offset + 1, 0xf7U);
+    if (terminator < nextMessage)
+        return terminator + 1;
+    return nextMessage;
+}
+
+ParseResult parseRecovering(const std::span<const std::uint8_t> bytes, const ParseOptions options)
+{
+    auto result = ParseResult{};
+    auto offset = std::size_t{0};
+    auto messageIndex = std::size_t{0};
+    while (offset < bytes.size())
+    {
+        if (bytes[offset] != 0xf0U)
+        {
+            const auto nextMessage = findByte(bytes, offset + 1, 0xf0U);
+            addStructuralIssue(result, "unsupported-data", offset, messageIndex,
+                               "Skipped bytes that do not belong to a framed Yamaha DX7 SysEx message.");
+            result.issues.back().severity = IssueSeverity::warning;
+            ++result.fragmentsSkipped;
+            offset = nextMessage;
+            continue;
+        }
+
+        ++result.messagesSeen;
+        auto candidate = ParseResult{};
+        auto candidateOffset = offset;
+        const auto structurallyParsed = parseFramedMessage(bytes, candidateOffset, messageIndex, options, candidate);
+        if (structurallyParsed && candidate.succeeded())
+        {
+            result.messages.insert(result.messages.end(), std::make_move_iterator(candidate.messages.begin()),
+                                   std::make_move_iterator(candidate.messages.end()));
+            result.issues.insert(result.issues.end(), std::make_move_iterator(candidate.issues.begin()),
+                                 std::make_move_iterator(candidate.issues.end()));
+            offset = candidateOffset;
+        }
+        else
+        {
+            appendRecoveredIssues(result, std::move(candidate.issues));
+            ++result.messagesSkipped;
+            offset = recoveryOffsetAfterMessage(bytes, offset);
+        }
+        ++messageIndex;
+    }
+    return result;
 }
 
 } // namespace
@@ -407,12 +483,34 @@ ParseResult parse(const std::span<const std::uint8_t> bytes, const ParseOptions 
     if (bytes.size() == packedBankSize)
     {
         if (!hasSevenBitData(bytes, result, 0, 0))
+        {
+            if (options.continueOnError)
+            {
+                auto issues = std::move(result.issues);
+                result.issues.clear();
+                appendRecoveredIssues(result, std::move(issues));
+                result.messagesSeen = 1;
+                result.messagesSkipped = 1;
+            }
             return result;
+        }
 
         auto context = DecodeContext{result, options, 0, 0};
         decodeBank(std::span<const std::uint8_t, packedBankSize>{bytes}, context, 0, true, 0);
+        result.messagesSeen = 1;
+        if (options.continueOnError && !result.succeeded())
+        {
+            result.messages.clear();
+            auto issues = std::move(result.issues);
+            result.issues.clear();
+            appendRecoveredIssues(result, std::move(issues));
+            result.messagesSkipped = 1;
+        }
         return result;
     }
+
+    if (options.continueOnError)
+        return parseRecovering(bytes, options);
 
     auto offset = std::size_t{0};
     auto messageIndex = std::size_t{0};
@@ -422,6 +520,8 @@ ParseResult parse(const std::span<const std::uint8_t> bytes, const ParseOptions 
             break;
         ++messageIndex;
     }
+
+    result.messagesSeen = messageIndex + (offset < bytes.size() && bytes[offset] == 0xf0U ? 1U : 0U);
 
     return result;
 }

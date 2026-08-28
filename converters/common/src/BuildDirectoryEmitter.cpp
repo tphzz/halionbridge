@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cctype>
 #include <fstream>
+#include <iterator>
 #include <set>
 #include <span>
 #include <sstream>
@@ -129,11 +130,14 @@ bool generatedPathsConflict(const std::string_view first, const std::string_view
 
 bool addGeneratedPath(const std::filesystem::path& path, std::set<std::string>& seenPaths)
 {
-    const auto key = normalizedKey(path.generic_string());
-    if (std::ranges::any_of(seenPaths, [&key](const auto& existing) { return generatedPathsConflict(existing, key); }))
+    auto key = normalizedKey(path.generic_string());
+    const auto next = seenPaths.lower_bound(key);
+    if (next != seenPaths.end() && generatedPathsConflict(*next, key))
+        return false;
+    if (next != seenPaths.begin() && generatedPathsConflict(*std::prev(next), key))
         return false;
 
-    seenPaths.insert(key);
+    seenPaths.emplace_hint(next, std::move(key));
     return true;
 }
 
