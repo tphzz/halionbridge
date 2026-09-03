@@ -7,6 +7,7 @@
 #include <juce_core/juce_core.h>
 
 #include <array>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -236,6 +237,60 @@ class MacroPageInjectionTests final : public juce::UnitTest
             root.deleteRecursively();
         }
 
+#if JUCE_WINDOWS
+        beginTest("Info transplant supports a temporary sidecar beyond MAX_PATH");
+        {
+            auto root = makeTempRoot("long_info");
+            const auto source = root.getChildFile("source.vstpreset");
+            constexpr auto destinationLength = 248;
+            constexpr auto presetName = std::string_view("voice.vstpreset");
+            const auto rootLength = static_cast<std::size_t>(root.getFullPathName().length());
+            const auto directoryNameLength = destinationLength - rootLength - 1U - presetName.size() - 1U;
+            const auto longDirectory = root.getChildFile(juce::String::repeatedString("x", static_cast<int>(directoryNameLength)));
+            const auto transformed = longDirectory.getChildFile("voice.vstpreset");
+            const auto transformedPath = halionbridge::detail::toStdPath(transformed);
+            const auto sidecar = halionbridge::detail::makeVstPresetInfoReplacementTemporaryPath(transformedPath);
+
+            expect(longDirectory.createDirectory());
+            expect(transformedPath.native().size() < 260U);
+            expect(sidecar.native().size() >= 260U);
+            expect(writePreset(source, "source-state", "<MetaInfo data=\"source\"/>"));
+            expect(writePreset(transformed, "transformed-state", "<MetaInfo data=\"generated\"/>"));
+
+            auto error = std::string{};
+            expect(halionbridge::detail::restoreVstPresetInfoChunk(halionbridge::detail::toStdPath(source), transformedPath, error), error);
+
+            root.deleteRecursively();
+        }
+
+        beginTest("Info transplant supports a transformed preset beyond MAX_PATH");
+        {
+            auto root = makeTempRoot("long_preset");
+            const auto source = root.getChildFile("source.vstpreset");
+            constexpr auto destinationLength = 270;
+            constexpr auto presetName = std::string_view("voice_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.vstpreset");
+            const auto rootLength = static_cast<std::size_t>(root.getFullPathName().length());
+            const auto directoryNameLength = destinationLength - rootLength - 1U - presetName.size() - 1U;
+            const auto longDirectory = root.getChildFile(juce::String::repeatedString("x", static_cast<int>(directoryNameLength)));
+            const auto transformed = longDirectory.getChildFile(halionbridge::detail::toJuceString(presetName));
+            const auto transformedPath = halionbridge::detail::toStdPath(transformed);
+
+            expect(longDirectory.createDirectory());
+            expect(transformedPath.native().size() >= 260U);
+            expect(writePreset(source, "source-state", "<MetaInfo data=\"source\"/>"));
+            expect(writePreset(transformed, "transformed-state", "<MetaInfo data=\"generated\"/>"));
+
+            auto error = std::string{};
+            expect(halionbridge::detail::restoreVstPresetInfoChunk(halionbridge::detail::toStdPath(source), transformedPath, error), error);
+            expect(halionbridge::detail::sha256MacroPageInjectionFile(transformedPath, error).has_value(), error);
+
+            auto filesystemError = std::error_code{};
+            std::filesystem::remove(halionbridge::detail::toFilesystemAccessPath(transformedPath), filesystemError);
+            expect(!filesystemError, filesystemError.message());
+            root.deleteRecursively();
+        }
+#endif
+
         beginTest("Manifest and completion journal enforce resumable identity");
         {
             auto root = makeTempRoot("resume");
@@ -419,10 +474,12 @@ class MacroPageInjectionTests final : public juce::UnitTest
         for (auto index = 0U; index < 8U; ++index)
             bytes[40 + index] = static_cast<unsigned char>((static_cast<std::uint64_t>(listOffset) >> (index * 8U)) & 0xffU);
 
-        auto stream = file.createOutputStream();
+        auto stream = std::ofstream(halionbridge::detail::toFilesystemAccessPath(halionbridge::detail::toStdPath(file)),
+                                    std::ios::binary | std::ios::trunc);
         if (!stream)
             return false;
-        return stream->write(bytes.data(), bytes.size());
+        stream.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        return stream.good();
     }
 
     static bool writePresetWithoutInfo(const juce::File& file, const std::string_view state)
@@ -443,10 +500,12 @@ class MacroPageInjectionTests final : public juce::UnitTest
         for (auto index = 0U; index < 8U; ++index)
             bytes[40 + index] = static_cast<unsigned char>((static_cast<std::uint64_t>(listOffset) >> (index * 8U)) & 0xffU);
 
-        auto stream = file.createOutputStream();
+        auto stream = std::ofstream(halionbridge::detail::toFilesystemAccessPath(halionbridge::detail::toStdPath(file)),
+                                    std::ios::binary | std::ios::trunc);
         if (!stream)
             return false;
-        return stream->write(bytes.data(), bytes.size());
+        stream.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        return stream.good();
     }
 };
 

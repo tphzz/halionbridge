@@ -1194,11 +1194,7 @@ bool validateVstPresetFile(const std::filesystem::path& path, std::string& error
 {
     error.clear();
     auto data = juce::MemoryBlock{};
-#if JUCE_WINDOWS
-    const auto file = juce::File(juce::String(path.c_str()));
-#else
-    const auto file = juce::File(juce::String::fromUTF8(path.c_str()));
-#endif
+    const auto file = detail::toJuceFile(detail::toFilesystemAccessPath(path));
     if (!file.loadFileAsData(data))
     {
         error = "Could not read VSTPreset file: " + path.string();

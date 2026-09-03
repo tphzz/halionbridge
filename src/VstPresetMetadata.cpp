@@ -359,7 +359,7 @@ bool rangeFits(const std::size_t totalSize, const std::uint64_t offset, const st
 
 bool readBinaryFile(const std::filesystem::path& path, std::vector<std::byte>& bytes, std::string& error)
 {
-    std::ifstream stream(path, std::ios::binary);
+    std::ifstream stream(toFilesystemAccessPath(path), std::ios::binary);
     if (!stream)
     {
         error = "Could not open preset file: " + path.string();
@@ -648,7 +648,12 @@ bool writeBinaryFileAtomically(const std::filesystem::path& destination, const s
 bool replaceBinaryFileAtomically(const std::filesystem::path& destination, const std::vector<std::byte>& bytes, std::string& error)
 {
     auto filesystemError = std::error_code{};
-    const auto destinationStatus = std::filesystem::symlink_status(destination, filesystemError);
+#if JUCE_WINDOWS
+    const auto filesystemDestination = toFilesystemAccessPath(destination);
+#else
+    const auto& filesystemDestination = destination;
+#endif
+    const auto destinationStatus = std::filesystem::symlink_status(filesystemDestination, filesystemError);
     if (filesystemError || std::filesystem::is_symlink(destinationStatus) || !std::filesystem::is_regular_file(destinationStatus))
     {
         error = "Transformed preset is missing, not regular, or symlinked: " + destination.string();
@@ -656,11 +661,16 @@ bool replaceBinaryFileAtomically(const std::filesystem::path& destination, const
     }
 
     const auto temporary = makeVstPresetInfoReplacementTemporaryPath(destination);
-    const auto temporaryStatus = std::filesystem::symlink_status(temporary, filesystemError);
+#if JUCE_WINDOWS
+    const auto filesystemTemporary = toFilesystemAccessPath(temporary);
+#else
+    const auto& filesystemTemporary = temporary;
+#endif
+    const auto temporaryStatus = std::filesystem::symlink_status(filesystemTemporary, filesystemError);
     if (temporaryStatus.type() != std::filesystem::file_type::not_found)
     {
         if (filesystemError || std::filesystem::is_symlink(temporaryStatus) || !std::filesystem::is_regular_file(temporaryStatus) ||
-            !std::filesystem::remove(temporary, filesystemError) || filesystemError)
+            !std::filesystem::remove(filesystemTemporary, filesystemError) || filesystemError)
         {
             error = "Metadata replacement sidecar is not a removable regular file: " + temporary.string();
             return false;
@@ -668,7 +678,7 @@ bool replaceBinaryFileAtomically(const std::filesystem::path& destination, const
     }
     filesystemError.clear();
     {
-        auto stream = std::ofstream(temporary, std::ios::binary | std::ios::trunc);
+        auto stream = std::ofstream(filesystemTemporary, std::ios::binary | std::ios::trunc);
         if (!stream)
         {
             error = "Could not create temporary preset: " + temporary.string();
@@ -681,13 +691,14 @@ bool replaceBinaryFileAtomically(const std::filesystem::path& destination, const
         {
             error = "Could not write temporary preset: " + temporary.string();
             stream.close();
-            std::filesystem::remove(temporary, filesystemError);
+            std::filesystem::remove(filesystemTemporary, filesystemError);
             return false;
         }
     }
 
 #if JUCE_WINDOWS
-    const auto replaced = ReplaceFileW(destination.c_str(), temporary.c_str(), nullptr, REPLACEFILE_WRITE_THROUGH, nullptr, nullptr);
+    const auto replaced =
+        ReplaceFileW(filesystemDestination.c_str(), filesystemTemporary.c_str(), nullptr, REPLACEFILE_WRITE_THROUGH, nullptr, nullptr);
     if (!replaced)
         filesystemError = std::error_code(static_cast<int>(GetLastError()), std::system_category());
 #else
@@ -697,7 +708,7 @@ bool replaceBinaryFileAtomically(const std::filesystem::path& destination, const
     {
         error = "Could not replace transformed preset " + destination.string() + ": " + filesystemError.message();
         auto cleanupError = std::error_code{};
-        std::filesystem::remove(temporary, cleanupError);
+        std::filesystem::remove(filesystemTemporary, cleanupError);
         return false;
     }
     return true;

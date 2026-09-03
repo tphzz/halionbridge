@@ -1,6 +1,8 @@
 #include "MacroPageInjection.h"
 #include "VstPresetMetadata.h"
 
+#include "PathUtils.h"
+
 #include <juce_core/juce_core.h>
 #include <juce_cryptography/juce_cryptography.h>
 
@@ -666,18 +668,15 @@ std::optional<std::string> sha256MacroPageInjectionFile(const std::filesystem::p
 {
     error.clear();
     auto filesystemError = std::error_code{};
-    const auto status = std::filesystem::symlink_status(path, filesystemError);
+    const auto filesystemPath = toFilesystemAccessPath(path);
+    const auto status = std::filesystem::symlink_status(filesystemPath, filesystemError);
     if (filesystemError || std::filesystem::is_symlink(status) || !std::filesystem::is_regular_file(status))
     {
         error = "Cannot hash a missing, non-regular, or symlinked file: " + path.string();
         return std::nullopt;
     }
 
-#if JUCE_WINDOWS
-    auto stream = juce::File(juce::String(path.c_str())).createInputStream();
-#else
-    auto stream = juce::File(juce::String::fromUTF8(path.c_str())).createInputStream();
-#endif
+    auto stream = toJuceFile(filesystemPath).createInputStream();
     if (stream == nullptr || !stream->openedOk())
     {
         error = "Could not open file for SHA-256 hashing: " + path.string();
@@ -729,11 +728,12 @@ bool removeMacroPageInjectionStagedPreset(const MacroPageInjectionWorkPaths& pat
 
     auto filesystemError = std::error_code{};
     const auto metadataTemporary = makeVstPresetInfoReplacementTemporaryPath(target);
-    const auto temporaryStatus = std::filesystem::symlink_status(metadataTemporary, filesystemError);
+    const auto filesystemMetadataTemporary = toFilesystemAccessPath(metadataTemporary);
+    const auto temporaryStatus = std::filesystem::symlink_status(filesystemMetadataTemporary, filesystemError);
     if (temporaryStatus.type() != std::filesystem::file_type::not_found)
     {
         if (filesystemError || std::filesystem::is_symlink(temporaryStatus) || !std::filesystem::is_regular_file(temporaryStatus) ||
-            !std::filesystem::remove(metadataTemporary, filesystemError) || filesystemError)
+            !std::filesystem::remove(filesystemMetadataTemporary, filesystemError) || filesystemError)
         {
             error = "Refusing to remove an unexpected macro-page metadata sidecar: " + metadataTemporary.string();
             return false;
@@ -741,7 +741,8 @@ bool removeMacroPageInjectionStagedPreset(const MacroPageInjectionWorkPaths& pat
     }
     filesystemError.clear();
 
-    const auto status = std::filesystem::symlink_status(target, filesystemError);
+    const auto filesystemTarget = toFilesystemAccessPath(target);
+    const auto status = std::filesystem::symlink_status(filesystemTarget, filesystemError);
     if (status.type() == std::filesystem::file_type::not_found ||
         filesystemError == std::make_error_code(std::errc::no_such_file_or_directory))
         return true;
@@ -750,7 +751,7 @@ bool removeMacroPageInjectionStagedPreset(const MacroPageInjectionWorkPaths& pat
         error = "Refusing to remove an unexpected macro-page staging entry: " + target.string();
         return false;
     }
-    if (!std::filesystem::remove(target, filesystemError) || filesystemError)
+    if (!std::filesystem::remove(filesystemTarget, filesystemError) || filesystemError)
     {
         error = "Could not remove incomplete macro-page staging preset " + target.string() + ": " + filesystemError.message();
         return false;

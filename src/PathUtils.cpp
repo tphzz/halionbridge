@@ -1,5 +1,8 @@
 #include "PathUtils.h"
 
+#include <algorithm>
+#include <utility>
+
 namespace halionbridge::detail
 {
 
@@ -20,6 +23,24 @@ juce::String toJuceString(std::string_view text)
 juce::File toJuceFile(const std::filesystem::path& path)
 {
     return juce::File(toJuceString(path));
+}
+
+std::filesystem::path toFilesystemAccessPath(const std::filesystem::path& path)
+{
+#if JUCE_WINDOWS
+    if (!path.is_absolute())
+        return path;
+
+    auto text = path.native();
+    std::replace(text.begin(), text.end(), L'/', L'\\');
+    if (text.starts_with(L"\\\\?\\") || text.starts_with(L"\\\\.\\"))
+        return std::filesystem::path(std::move(text));
+    if (text.starts_with(L"\\\\"))
+        return std::filesystem::path(L"\\\\?\\UNC\\" + text.substr(2));
+    return std::filesystem::path(L"\\\\?\\" + text);
+#else
+    return path;
+#endif
 }
 
 std::filesystem::path toStdPath(const juce::File& file)
