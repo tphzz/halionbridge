@@ -423,7 +423,7 @@ void appendNumberArray(std::ostringstream& lua, const std::string_view name, con
     lua << " },\n";
 }
 
-std::string buildLuaSource(const VoiceJob& job)
+std::string buildLuaSource(const VoiceJob& job, const PresetOutputType presetOutputType, const PresetTarget presetTarget)
 {
     const auto& voice = job.voice;
     const auto algorithm = static_cast<std::size_t>(voice.algorithm) + 1;
@@ -438,6 +438,8 @@ std::string buildLuaSource(const VoiceJob& job)
         << "        template_file = " << luaQuotedString(".halionbridge/dx7/templates/dx7_" + zeroPadded(algorithm, 2) + ".vstpreset")
         << ",\n"
         << "        output_file = " << luaQuotedString(job.outputFile.generic_string()) << ",\n"
+        << "        preset_type = " << luaQuotedString(presetOutputTypeName(presetOutputType)) << ",\n"
+        << "        preset_target = " << luaQuotedString(presetTargetName(presetTarget)) << ",\n"
         << "        feedback = " << static_cast<int>(voice.feedback) << ",\n"
         << "        oscillator_sync = " << (voice.oscillatorSync ? "true" : "false") << ",\n"
         << "        transpose = " << static_cast<int>(voice.transpose) << ",\n";
@@ -494,27 +496,45 @@ std::vector<std::byte> byteVector(const char* data, const int size)
     return result;
 }
 
-std::optional<EmbeddedAssets> loadEmbeddedAssets(std::vector<Diagnostic>& diagnostics)
+std::optional<std::string> loadEmbeddedHelper(std::vector<Diagnostic>& diagnostics)
 {
-    auto result = EmbeddedAssets{};
+    for (auto index = 0; index < halionbridge_dx7_assets::namedResourceListSize; ++index)
+    {
+        const auto original = std::filesystem::path(halionbridge_dx7_assets::originalFilenames[index]).filename().string();
+        if (original != kHelperFileName)
+            continue;
+
+        auto size = 0;
+        const auto* data = halionbridge_dx7_assets::getNamedResource(halionbridge_dx7_assets::namedResourceList[index], size);
+        if (data == nullptr || size <= 0)
+        {
+            diagnostics.push_back(makeError({}, "embedded-resource", "Embedded DX7 converter helper is empty."));
+            return std::nullopt;
+        }
+        return std::string{data, static_cast<std::size_t>(size)};
+    }
+
+    diagnostics.push_back(makeError({}, "embedded-resource", "Embedded DX7 converter helper is missing."));
+    return std::nullopt;
+}
+
+std::optional<std::vector<GeneratedBuildFile>> loadEmbeddedTemplates(std::vector<Diagnostic>& diagnostics)
+{
+    auto templates = std::vector<GeneratedBuildFile>{};
     auto templateNames = std::set<std::string>{};
     for (auto index = 0; index < halionbridge_dx7_assets::namedResourceListSize; ++index)
     {
+        const auto original = std::filesystem::path(halionbridge_dx7_assets::originalFilenames[index]).filename().string();
+        if (original == kHelperFileName)
+            continue;
+
         auto size = 0;
         const auto* data = halionbridge_dx7_assets::getNamedResource(halionbridge_dx7_assets::namedResourceList[index], size);
-        const auto original = std::filesystem::path(halionbridge_dx7_assets::originalFilenames[index]).filename().string();
         if (data == nullptr || size <= 0)
         {
             diagnostics.push_back(makeError({}, "embedded-resource", "Embedded DX7 converter resource is empty: " + original));
             return std::nullopt;
         }
-
-        if (original == kHelperFileName)
-        {
-            result.helperLua.assign(data, static_cast<std::size_t>(size));
-            continue;
-        }
-
         if (hasSyxExtension(original) || lowerCase(std::filesystem::path(original).extension().string()) != ".vstpreset" ||
             !std::string_view(original).starts_with("dx7_"))
         {
@@ -526,26 +546,39 @@ std::optional<EmbeddedAssets> loadEmbeddedAssets(std::vector<Diagnostic>& diagno
             diagnostics.push_back(makeError({}, "embedded-resource", "Duplicate embedded DX7 algorithm template: " + original));
             return std::nullopt;
         }
-        result.templates.push_back(
-            GeneratedBuildFile{std::filesystem::path(".halionbridge/dx7/templates") / original, byteVector(data, size)});
+        templates.push_back(GeneratedBuildFile{std::filesystem::path(".halionbridge/dx7/templates") / original, byteVector(data, size)});
     }
 
-    if (result.helperLua.empty() || result.templates.size() != 32)
+    if (templates.size() != 32)
     {
-        diagnostics.push_back(makeError({}, "embedded-resource", "DX7 converter must contain one Lua helper and 32 algorithm templates."));
+        diagnostics.push_back(makeError({}, "embedded-resource", "DX7 converter target must contain exactly 32 algorithm templates."));
         return std::nullopt;
     }
 
-    std::ranges::sort(result.templates, {}, [](const auto& file) { return file.relativePath.generic_string(); });
+    std::ranges::sort(templates, {}, [](const auto& file) { return file.relativePath.generic_string(); });
     for (auto algorithm = std::size_t{1}; algorithm <= 32; ++algorithm)
     {
         const auto expected = ".halionbridge/dx7/templates/dx7_" + zeroPadded(algorithm, 2) + ".vstpreset";
-        if (result.templates[algorithm - 1].relativePath.generic_string() != expected)
+        if (templates[algorithm - 1].relativePath.generic_string() != expected)
         {
             diagnostics.push_back(makeError({}, "embedded-resource", "Missing embedded DX7 algorithm template: " + expected));
             return std::nullopt;
         }
     }
+    return templates;
+}
+
+std::optional<EmbeddedAssets> loadEmbeddedAssets(std::vector<Diagnostic>& diagnostics)
+{
+    auto helper = loadEmbeddedHelper(diagnostics);
+    if (!helper)
+        return std::nullopt;
+
+    auto templates = loadEmbeddedTemplates(diagnostics);
+    if (!templates)
+        return std::nullopt;
+
+    auto result = EmbeddedAssets{std::move(*helper), std::move(*templates)};
     return result;
 }
 
@@ -644,6 +677,8 @@ std::string buildConversionReport(const ConversionOptions& options, const Conver
          << "  \"schema_version\": 1,\n"
          << "  \"mode\": " << jsonQuoted(options.continueOnError ? "continue-on-error" : "fail-closed") << ",\n"
          << "  \"strict_parameters\": " << (options.strictParameters ? "true" : "false") << ",\n"
+         << "  \"preset_type\": " << jsonQuoted(presetOutputTypeName(options.presetOutputType)) << ",\n"
+         << "  \"preset_target\": " << jsonQuoted(presetTargetName(options.presetTarget)) << ",\n"
          << "  \"summary\": {\n"
          << "    \"files_scanned\": " << result.syxFilesScanned << ",\n"
          << "    \"files_converted\": " << result.syxFilesConverted << ",\n"
@@ -751,23 +786,29 @@ std::vector<std::byte> textBytes(const std::string_view text)
 
 std::string helpText()
 {
-    return "Usage:\n"
-           "  halionbridge convert dx7 <source-path> [options]\n"
-           "  halionbridge convert dx7 <source-path> <output-directory> [options]\n\n"
-           "<source-path> may be a Yamaha DX7 .syx file or a directory containing .syx files. Each DX7 voice becomes one HALion "
-           ".vstpreset.\n"
-           "When output-directory is omitted, generated Lua/build files are written beside the source file or into the source "
-           "directory.\n\n"
-           "Options:\n"
-           "  --recursive             Include .syx files below a source directory recursively.\n"
-           "  --overwrite             Replace existing generated build files.\n"
-           "  --continue-on-error     Skip invalid or unsupported SysEx messages and convert independently validated DX7 voices.\n"
-           "  --strict-parameters     Reject out-of-range DX7 parameter values instead of normalizing them.\n"
-           "  --help, -h              Show this help and exit.\n";
+    auto help = std::string{"Usage:\n"
+                            "  halionbridge convert dx7 <source-path> [options]\n"
+                            "  halionbridge convert dx7 <source-path> <output-directory> [options]\n\n"
+                            "<source-path> may be a Yamaha DX7 .syx file or a directory containing .syx files. Each DX7 voice becomes "
+                            "one HALion .vstpreset.\n"
+                            "When output-directory is omitted, generated Lua/build files are written beside the source file or into the "
+                            "source directory.\n\n"
+                            "Options:\n"};
+    help += commonConverterOptionsHelpText();
+    help += "  --recursive             Include .syx files below a source directory recursively.\n"
+            "  --overwrite             Replace existing generated build files.\n"
+            "  --continue-on-error     Skip invalid or unsupported SysEx messages and convert independently validated DX7 voices.\n"
+            "  --strict-parameters     Reject out-of-range DX7 parameter values instead of normalizing them.\n"
+            "  --help, -h              Show this help and exit.\n";
+    return help;
 }
 
 ConverterArgumentParseResult validateArguments(const std::span<const std::string> args)
 {
+    const auto common = parseCommonConverterArguments(args);
+    if (common.result.exitCode != 0)
+        return common.result;
+
     auto result = ConverterArgumentParseResult{};
     auto positional = std::vector<std::string>{};
     auto recursive = false;
@@ -778,7 +819,7 @@ ConverterArgumentParseResult validateArguments(const std::span<const std::string
         result.diagnostics.push_back(std::move(diagnostic));
     };
 
-    for (const auto& argument : args)
+    for (const auto& argument : common.remainingArguments)
     {
         if (argument == "--help" || argument == "-h")
             return result;
@@ -845,10 +886,22 @@ ConverterArgumentParseResult validateArguments(const std::span<const std::string
 ConverterResult runConverterWithContext(const std::span<const std::string> args, const ConverterRunContext& context)
 {
     auto result = ConverterResult{};
+    const auto common = parseCommonConverterArguments(args);
+    if (common.result.exitCode != 0)
+    {
+        result.exitCode = common.result.exitCode;
+        result.diagnostics = common.result.diagnostics;
+        for (const auto& diagnostic : result.diagnostics)
+            context.report(diagnostic);
+        return result;
+    }
+
     auto options = ConversionOptions{};
     options.context = &context;
+    options.presetOutputType = common.presetOutputType;
+    options.presetTarget = common.presetTarget;
     auto positional = std::vector<std::string>{};
-    for (const auto& argument : args)
+    for (const auto& argument : common.remainingArguments)
     {
         if (argument == "--help" || argument == "-h")
         {
@@ -927,6 +980,12 @@ ConversionResult convertSource(const ConversionOptions& options)
         result.diagnostics.push_back(std::move(diagnostic));
         reportPending();
     };
+
+    if (options.presetTarget == PresetTarget::halionSonic && options.presetOutputType == PresetOutputType::layer)
+    {
+        addDiagnostic(makeError({}, "preset-target-type", "HALion Sonic output requires program presets."));
+        return result;
+    }
 
     if (options.sourcePath.empty())
     {
@@ -1142,7 +1201,8 @@ ConversionResult convertSource(const ConversionOptions& options)
     for (auto index = std::size_t{0}; index < jobs.size(); ++index)
     {
         const auto moduleName = zeroPadded(index + 1, 6) + "_" + safePathComponent(jobs[index].displayName, "Unnamed") + ".lua";
-        scripts.push_back(GeneratedLuaScript{moduleName, moduleName, buildLuaSource(jobs[index])});
+        scripts.push_back(
+            GeneratedLuaScript{moduleName, moduleName, buildLuaSource(jobs[index], options.presetOutputType, options.presetTarget)});
     }
 
     auto generatedFiles = std::move(embedded->templates);

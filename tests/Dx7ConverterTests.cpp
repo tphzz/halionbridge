@@ -301,10 +301,13 @@ class Dx7ConverterTests final : public juce::UnitTest
             expect(lua.contains("algorithm = 5"));
             expect(lua.contains("template_file = \".halionbridge/dx7/templates/dx7_05.vstpreset\""));
             expect(lua.contains("output_file = \"voice/single_001_BASS_1.vstpreset\""));
+            expect(lua.contains("preset_type = \"program\""));
+            expect(lua.contains("preset_target = \"halion\""));
             expect(lua.contains("amplitude_modulation_sensitivity = 2"));
 
             const auto templateFile = output.directory.getChildFile(".halionbridge/dx7/templates/dx7_05.vstpreset");
-            const auto sourceTemplate = juce::File::getCurrentWorkingDirectory().getChildFile("resources/dx7/dx7_05.vstpreset");
+            const auto sourceTemplate =
+                juce::File::getCurrentWorkingDirectory().getChildFile("resources/dx7/halion-sonic/dx7_05.vstpreset");
             auto emittedBytes = juce::MemoryBlock{};
             auto sourceBytes = juce::MemoryBlock{};
             expect(templateFile.loadFileAsData(emittedBytes));
@@ -314,6 +317,8 @@ class Dx7ConverterTests final : public juce::UnitTest
             const auto report = output.directory.getChildFile("halionbridge_dx7_conversion_report.json");
             expect(report.existsAsFile());
             expect(report.loadFileAsString().contains("\"schema_version\": 1"));
+            expect(report.loadFileAsString().contains("\"preset_type\": \"program\""));
+            expect(report.loadFileAsString().contains("\"preset_target\": \"halion\""));
             auto reportRoot = juce::var{};
             expect(juce::JSON::parse(report.loadFileAsString(), reportRoot).wasOk());
             expect(reportRoot.isObject());
@@ -326,6 +331,8 @@ class Dx7ConverterTests final : public juce::UnitTest
                    "Generated DX7 presets must select HALion's Squared Inverse Main velocity curve");
             expect(helper.contains("Could not set required HALion \" .. element_label .. \" parameter"),
                    "Required Program/Layer assignment failures must identify the target element");
+            expect(helper.contains("local preset_plugin_code = { halion = \"H7\", [\"halion-sonic\"] = \"HS\" }"));
+            expect(helper.contains("ctx.save_preset(outputPath, preset, pluginCode, attributes)"));
             const auto pitchTableMarker = juce::String{"local pitch_envelope_level_offset = {"};
             const auto pitchTableStart = helper.indexOf(pitchTableMarker);
             expect(pitchTableStart >= 0, "Generated DX7 Lua must contain the native 100-entry pitch-envelope level table");
@@ -399,6 +406,76 @@ class Dx7ConverterTests final : public juce::UnitTest
             expect(!helper.contains("ModulationDestination.pitch"));
             expect(helper.contains("ModulationDestination.fmOp6Level"));
             expect(helper.contains("ModulationDestination.fmOp6Pitch"));
+        }
+
+        beginTest("Generates explicit layer preset build entries");
+        {
+            auto source = ScopedTestDirectory("dx7_layer_source");
+            auto output = ScopedTestDirectory("dx7_layer_output");
+            const auto sourceFile = source.directory.getChildFile("voice.syx");
+            expect(writeBytes(sourceFile, framedSingle("LAYER", 0)));
+
+            auto options = halionbridge::converters::dx7::ConversionOptions{};
+            options.sourcePath = sourceFile.getFullPathName().toStdString();
+            options.outputDirectory = output.path();
+            options.presetOutputType = halionbridge::converters::PresetOutputType::layer;
+            const auto result = halionbridge::converters::dx7::convertSource(options);
+
+            expect(result.succeeded);
+            const auto lua = output.directory.getChildFile("000001_LAYER.lua").loadFileAsString();
+            expect(lua.contains("preset_type = \"layer\""));
+            expect(lua.contains("preset_target = \"halion\""));
+        }
+
+        beginTest("Generates HALion Sonic program entries and templates");
+        {
+            auto source = ScopedTestDirectory("dx7_sonic_source");
+            auto output = ScopedTestDirectory("dx7_sonic_output");
+            const auto sourceFile = source.directory.getChildFile("voice.syx");
+            expect(writeBytes(sourceFile, framedSingle("SONIC", 4)));
+
+            auto options = halionbridge::converters::dx7::ConversionOptions{};
+            options.sourcePath = sourceFile.getFullPathName().toStdString();
+            options.outputDirectory = output.path();
+            options.presetTarget = halionbridge::converters::PresetTarget::halionSonic;
+            const auto result = halionbridge::converters::dx7::convertSource(options);
+
+            expect(result.succeeded);
+            const auto lua = output.directory.getChildFile("000001_SONIC.lua").loadFileAsString();
+            expect(lua.contains("preset_type = \"program\""));
+            expect(lua.contains("preset_target = \"halion-sonic\""));
+
+            const auto templateFile = output.directory.getChildFile(".halionbridge/dx7/templates/dx7_05.vstpreset");
+            const auto sourceTemplate =
+                juce::File::getCurrentWorkingDirectory().getChildFile("resources/dx7/halion-sonic/dx7_05.vstpreset");
+            auto emittedBytes = juce::MemoryBlock{};
+            auto sourceBytes = juce::MemoryBlock{};
+            expect(templateFile.loadFileAsData(emittedBytes));
+            expect(sourceTemplate.loadFileAsData(sourceBytes));
+            expect(emittedBytes == sourceBytes);
+
+            const auto report = output.directory.getChildFile("halionbridge_dx7_conversion_report.json").loadFileAsString();
+            expect(report.contains("\"preset_type\": \"program\""));
+            expect(report.contains("\"preset_target\": \"halion-sonic\""));
+        }
+
+        beginTest("Rejects HALion Sonic layer output before writing");
+        {
+            auto source = ScopedTestDirectory("dx7_sonic_layer_source");
+            auto output = ScopedTestDirectory("dx7_sonic_layer_output");
+            const auto sourceFile = source.directory.getChildFile("voice.syx");
+            expect(writeBytes(sourceFile, framedSingle("INVALID", 0)));
+
+            auto options = halionbridge::converters::dx7::ConversionOptions{};
+            options.sourcePath = sourceFile.getFullPathName().toStdString();
+            options.outputDirectory = output.path();
+            options.presetOutputType = halionbridge::converters::PresetOutputType::layer;
+            options.presetTarget = halionbridge::converters::PresetTarget::halionSonic;
+            const auto result = halionbridge::converters::dx7::convertSource(options);
+
+            expect(!result.succeeded);
+            expect(!output.directory.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(std::ranges::any_of(result.diagnostics, [](const auto& diagnostic) { return diagnostic.code == "preset-target-type"; }));
         }
 
         beginTest("A single bank omits the redundant bank directory");

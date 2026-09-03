@@ -8,11 +8,13 @@
 #include "ChildProcessOutput.h"
 #include "CliCommand.h"
 #include "Log.h"
+#include "MacroPageInjection.h"
 #include "PathUtils.h"
 #include "PluginScan.h"
 #include "PresetInspection.h"
 #include "PresetRemap.h"
 #include "ProgressMarkers.h"
+#include "VstPresetMetadata.h"
 #include <juce_core/juce_core.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_processors_headless/format_types/VST3_SDK/pluginterfaces/base/funknown.h>
@@ -63,6 +65,9 @@ constexpr const char* kRuntimeModuleFileName = "halionbridge_runtime.lua";
 constexpr const char* kBuilderModuleFileName = "halionbridge_builder.lua";
 constexpr const char* kPresetRemapModuleFileName = "halionbridge_preset_remap.lua";
 constexpr const char* kPresetInspectionModuleFileName = "halionbridge_preset_inspect.lua";
+constexpr const char* kMacroPageInjectionJobFileName = "macro_page_job.lua";
+constexpr const char* kMacroPageInjectionHelperFileName = "halionbridge_macro_page_inject.lua";
+constexpr const char* kMacroPageInjectionReceiptPrefix = "halionbridge-macro-page-receipt-";
 constexpr const char* kPresetRemapTemporaryDirectoryPrefix = "halionbridge-remap-";
 constexpr const char* kPresetInspectionTemporaryDirectoryPrefix = "halionbridge-inspect-";
 constexpr const char* kBuildFileName = "halionbridge_build.lua";
@@ -386,6 +391,11 @@ juce::String getEmbeddedPresetRemapModuleText()
 juce::String getEmbeddedPresetInspectionModuleText()
 {
     return juce::String::fromUTF8(halionbridge_assets::preset_inspect_lua, halionbridge_assets::preset_inspect_luaSize);
+}
+
+std::string getEmbeddedMacroPageInjectionModuleText()
+{
+    return juce::String::fromUTF8(halionbridge_assets::macro_page_inject_lua, halionbridge_assets::macro_page_inject_luaSize).toStdString();
 }
 
 class ScopedTemporaryTextFile
@@ -1086,6 +1096,227 @@ AppOptions toRuntimeOptions(const VstPresetInspectionOptions& options)
     return runtimeOptions;
 }
 
+AppOptions toRuntimeOptions(const VstPresetMacroPageInjectionOptions& options, const detail::MacroPageInjectionWorkPaths& paths)
+{
+    AppOptions runtimeOptions;
+    runtimeOptions.buildDirectory = paths.runtime;
+    runtimeOptions.outputDirectory = paths.presets;
+    runtimeOptions.pluginPathOverride = options.pluginPathOverride;
+    runtimeOptions.executableFile = options.executableFile;
+    runtimeOptions.timeoutSeconds = options.timeoutSeconds;
+    runtimeOptions.buildChunkSize = 1;
+    runtimeOptions.showGui = options.showGui;
+    runtimeOptions.forceScan = options.forceScan;
+    runtimeOptions.failFast = true;
+    return runtimeOptions;
+}
+
+bool pathExistsNoFollow(const std::filesystem::path& path, std::error_code& error)
+{
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (status.type() == std::filesystem::file_type::not_found || error == std::make_error_code(std::errc::no_such_file_or_directory))
+    {
+        error.clear();
+        return false;
+    }
+    return !error;
+}
+
+std::string comparablePathComponent(const std::filesystem::path& component)
+{
+    auto text = component.generic_u8string();
+    auto result = std::string(reinterpret_cast<const char*>(text.data()), text.size());
+#if JUCE_WINDOWS
+    std::ranges::transform(result, result.begin(),
+                           [](const unsigned char character) { return static_cast<char>(std::tolower(character)); });
+#endif
+    return result;
+}
+
+bool hasVstPresetExtension(const std::filesystem::path& path)
+{
+    auto extension = path.extension().string();
+    std::ranges::transform(extension, extension.begin(),
+                           [](const unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    return extension == ".vstpreset";
+}
+
+bool pathIsSameOrDescendant(const std::filesystem::path& candidate, const std::filesystem::path& root)
+{
+    const auto normalizedCandidate = candidate.lexically_normal();
+    const auto normalizedRoot = root.lexically_normal();
+    auto candidatePart = normalizedCandidate.begin();
+    for (auto rootPart = normalizedRoot.begin(); rootPart != normalizedRoot.end(); ++rootPart, ++candidatePart)
+    {
+        if (candidatePart == normalizedCandidate.end() || comparablePathComponent(*candidatePart) != comparablePathComponent(*rootPart))
+            return false;
+    }
+    return true;
+}
+
+std::optional<std::filesystem::path> canonicalExistingPath(const std::filesystem::path& path, const bool requireDirectory,
+                                                           const std::string_view description, std::string& error)
+{
+    auto filesystemError = std::error_code{};
+    const auto status = std::filesystem::symlink_status(path, filesystemError);
+    const auto correctType = requireDirectory ? std::filesystem::is_directory(status) : std::filesystem::is_regular_file(status);
+    if (filesystemError || std::filesystem::is_symlink(status) || !correctType)
+    {
+        error =
+            std::string(description) + " must be an existing non-symlink " + (requireDirectory ? "directory: " : "file: ") + path.string();
+        return std::nullopt;
+    }
+    auto result = std::filesystem::canonical(path, filesystemError);
+    if (filesystemError)
+    {
+        error = "Could not resolve " + std::string(description) + " " + path.string() + ": " + filesystemError.message();
+        return std::nullopt;
+    }
+    return result;
+}
+
+std::optional<std::filesystem::path> canonicalOutputPath(const std::filesystem::path& path, std::string& error)
+{
+    auto filesystemError = std::error_code{};
+    auto absolute = std::filesystem::absolute(path, filesystemError).lexically_normal();
+    if (filesystemError || absolute.filename().empty())
+    {
+        error = "Could not resolve macro-page output directory: " + path.string();
+        return std::nullopt;
+    }
+    const auto parent = canonicalExistingPath(absolute.parent_path(), true, "Macro-page output parent", error);
+    if (!parent)
+        return std::nullopt;
+    return (*parent / absolute.filename()).lexically_normal();
+}
+
+bool validateVstPresetFile(const std::filesystem::path& path, std::string& error)
+{
+    error.clear();
+    auto data = juce::MemoryBlock{};
+#if JUCE_WINDOWS
+    const auto file = juce::File(juce::String(path.c_str()));
+#else
+    const auto file = juce::File(juce::String::fromUTF8(path.c_str()));
+#endif
+    if (!file.loadFileAsData(data))
+    {
+        error = "Could not read VSTPreset file: " + path.string();
+        return false;
+    }
+    if (!inspectVstPresetContainerData(data))
+    {
+        error = "File is not a valid VST3 preset container: " + path.string();
+        return false;
+    }
+    return true;
+}
+
+bool requireNonSymlinkDirectory(const std::filesystem::path& path, const std::string_view description, std::string& error)
+{
+    auto filesystemError = std::error_code{};
+    const auto status = std::filesystem::symlink_status(path, filesystemError);
+    if (filesystemError || std::filesystem::is_symlink(status) || !std::filesystem::is_directory(status))
+    {
+        error = std::string(description) + " is missing, not a directory, or symlinked: " + path.string();
+        return false;
+    }
+    return true;
+}
+
+bool ensureSafeRelativeDirectory(const std::filesystem::path& root, const std::filesystem::path& relative, std::string& error)
+{
+    if (!requireNonSymlinkDirectory(root, "Macro-page staging root", error))
+        return false;
+
+    auto current = root;
+    for (const auto& component : relative)
+    {
+        if (component.empty() || component == "." || component == "..")
+        {
+            error = "Refusing unsafe macro-page staging directory: " + relative.string();
+            return false;
+        }
+        current /= component;
+        auto filesystemError = std::error_code{};
+        if (!pathExistsNoFollow(current, filesystemError))
+        {
+            if (filesystemError || !std::filesystem::create_directory(current, filesystemError) || filesystemError)
+            {
+                error = "Could not create macro-page staging directory " + current.string() + ": " + filesystemError.message();
+                return false;
+            }
+            continue;
+        }
+        const auto status = std::filesystem::symlink_status(current, filesystemError);
+        if (filesystemError || std::filesystem::is_symlink(status) || !std::filesystem::is_directory(status))
+        {
+            error = "Macro-page staging path is not a usable directory: " + current.string();
+            return false;
+        }
+    }
+    return true;
+}
+
+bool removeRegularFileIfPresent(const std::filesystem::path& path, const std::string_view description, std::string& error)
+{
+    auto filesystemError = std::error_code{};
+    if (!pathExistsNoFollow(path, filesystemError))
+    {
+        if (filesystemError)
+        {
+            error = "Could not inspect " + std::string(description) + " " + path.string() + ": " + filesystemError.message();
+            return false;
+        }
+        return true;
+    }
+    const auto status = std::filesystem::symlink_status(path, filesystemError);
+    if (filesystemError || std::filesystem::is_symlink(status) || !std::filesystem::is_regular_file(status) ||
+        !std::filesystem::remove(path, filesystemError) || filesystemError)
+    {
+        error = "Could not safely remove " + std::string(description) + ": " + path.string();
+        return false;
+    }
+    return true;
+}
+
+bool writeMacroPageRuntime(const detail::MacroPageInjectionRuntimeConfig& config, const detail::MacroPageInjectionWorkPaths& paths,
+                           std::string& error)
+{
+    constexpr auto buildFile = "return { \"macro_page_job.lua\" }\n";
+    return detail::writeMacroPageInjectionRuntimeFile(paths.runtime / kBuildFileName, buildFile, error) &&
+           detail::writeMacroPageInjectionRuntimeFile(paths.runtime / kMacroPageInjectionJobFileName,
+                                                      detail::createMacroPageInjectionRuntimeModuleText(config), error) &&
+           detail::writeMacroPageInjectionRuntimeFile(paths.runtime / kMacroPageInjectionHelperFileName,
+                                                      getEmbeddedMacroPageInjectionModuleText(), error);
+}
+
+class ScopedMacroPageReceiptFile
+{
+  public:
+    explicit ScopedMacroPageReceiptFile(std::filesystem::path pathIn) : path(std::move(pathIn)) {}
+
+    ~ScopedMacroPageReceiptFile()
+    {
+        auto error = std::error_code{};
+        const auto exists = pathExistsNoFollow(path, error);
+        if (error)
+        {
+            log::warn("Could not inspect temporary macro-page receipt during cleanup: {}", path.string());
+            return;
+        }
+        if (!exists)
+            return;
+        const auto status = std::filesystem::symlink_status(path, error);
+        if (error || std::filesystem::is_symlink(status) || !std::filesystem::is_regular_file(status) ||
+            !std::filesystem::remove(path, error) || error)
+            log::warn("Could not clean temporary macro-page receipt: {}", path.string());
+    }
+
+  private:
+    std::filesystem::path path;
+};
+
 std::optional<int> readBuildWorkerResultFile(const juce::File& resultFile)
 {
     if (!resultFile.existsAsFile())
@@ -1134,6 +1365,7 @@ struct Bridge::Impl
     RunResult inspectVstPresetsDetailed(const VstPresetInspectionOptions& options);
     RunResult runPresetInspectionInvocation(const VstPresetInspectionOptions& options,
                                             const detail::VstPresetInspectionRuntimeConfig& config);
+    RunResult injectMacroPageDetailed(const VstPresetMacroPageInjectionOptions& options);
     bool loadPlugin(const juce::File& pluginFile, const AppOptions& options);
     bool loadPlugin(const juce::File& pluginFile, const VstPresetRemapOptions& options);
     bool applyVstPresetData(const juce::MemoryBlock& presetData);
@@ -1165,6 +1397,11 @@ std::optional<VstPresetRemapOptions> Bridge::parseVstPresetRemapArguments(const 
 std::optional<VstPresetInspectionOptions> Bridge::parseVstPresetInspectionArguments(const std::vector<std::string>& args)
 {
     return detail::parseVstPresetInspectionOptions(args);
+}
+
+std::optional<VstPresetMacroPageInjectionOptions> Bridge::parseVstPresetMacroPageInjectionArguments(const std::vector<std::string>& args)
+{
+    return detail::parseVstPresetMacroPageInjectionOptions(args);
 }
 
 std::optional<std::filesystem::path> Bridge::findHalionPlugin(const std::optional<std::filesystem::path>& pluginPathOverride)
@@ -1684,6 +1921,14 @@ RunResult Bridge::inspectVstPresetsDetailed(const VstPresetInspectionOptions& op
     return impl->inspectVstPresetsDetailed(options);
 }
 
+RunResult Bridge::injectMacroPageDetailed(const VstPresetMacroPageInjectionOptions& options)
+{
+    if (impl == nullptr)
+        return RunResult::invalidBridge;
+
+    return impl->injectMacroPageDetailed(options);
+}
+
 RunResult Bridge::Impl::remapVstPresetsDetailed(const VstPresetRemapOptions& options)
 {
     setCrashDiagnosticPhase("halionbridge::remapVstPresets startup");
@@ -1872,6 +2117,390 @@ RunResult Bridge::Impl::inspectVstPresetsDetailed(const VstPresetInspectionOptio
         return RunResult::inspectionFailed;
     if (invocationResult != RunResult::success)
         return invocationResult;
+    return RunResult::success;
+}
+
+RunResult Bridge::Impl::injectMacroPageDetailed(const VstPresetMacroPageInjectionOptions& originalOptions)
+{
+    setCrashDiagnosticPhase("halionbridge::injectMacroPage startup");
+    log::info("Starting halionbridge macro-page injection {}...", getBuildInfo().versionString);
+
+    if (originalOptions.inputDirectory.empty() || originalOptions.outputDirectory.empty() || originalOptions.donorPreset.empty() ||
+        originalOptions.chunkSize <= 0 || originalOptions.timeoutSeconds < 0)
+    {
+        log::error("Macro-page injection requires input, output, and donor paths, a positive chunk size, and a non-negative timeout.");
+        return RunResult::invalidOptions;
+    }
+
+    auto error = std::string{};
+    const auto inputDirectory = canonicalExistingPath(originalOptions.inputDirectory, true, "Macro-page input directory", error);
+    if (!inputDirectory)
+    {
+        log::error("{}", error);
+        return RunResult::invalidOptions;
+    }
+    const auto donorPreset = canonicalExistingPath(originalOptions.donorPreset, false, "Macro-page donor preset", error);
+    if (!donorPreset || !hasVstPresetExtension(*donorPreset))
+    {
+        log::error("{}", error.empty() ? "Macro-page donor path is invalid." : error);
+        return RunResult::invalidOptions;
+    }
+    const auto outputDirectory = canonicalOutputPath(originalOptions.outputDirectory, error);
+    if (!outputDirectory)
+    {
+        log::error("{}", error);
+        return RunResult::invalidOptions;
+    }
+
+    auto filesystemError = std::error_code{};
+    if (pathExistsNoFollow(*outputDirectory, filesystemError) || filesystemError)
+    {
+        log::error("Macro-page output directory must not already exist: {}", outputDirectory->string());
+        return RunResult::invalidOptions;
+    }
+
+    const auto paths = detail::makeMacroPageInjectionWorkPaths(*outputDirectory);
+    if (pathIsSameOrDescendant(*outputDirectory, *inputDirectory) || pathIsSameOrDescendant(*inputDirectory, *outputDirectory) ||
+        pathIsSameOrDescendant(paths.root, *inputDirectory) || pathIsSameOrDescendant(*inputDirectory, paths.root))
+    {
+        log::error("Macro-page input, output, and deterministic work directories must not overlap.");
+        return RunResult::invalidOptions;
+    }
+
+    auto collection = detail::collectMacroPageInjectionFiles(*inputDirectory, originalOptions.recursive);
+    if (!collection.errors.empty())
+    {
+        for (const auto& message : collection.errors)
+            log::error("{}", message);
+        return RunResult::invalidOptions;
+    }
+
+    if (!validateVstPresetFile(*donorPreset, error))
+    {
+        log::error("{}", error);
+        return RunResult::invalidOptions;
+    }
+    const auto donorHash = detail::sha256MacroPageInjectionFile(*donorPreset, error);
+    if (!donorHash)
+    {
+        log::error("{}", error);
+        return RunResult::invalidOptions;
+    }
+
+    auto manifest =
+        detail::MacroPageInjectionManifest{*inputDirectory, *outputDirectory, *donorPreset, *donorHash, originalOptions.recursive, {}};
+    manifest.files.reserve(collection.files.size());
+    for (const auto& file : collection.files)
+    {
+        const auto canonicalSource = canonicalExistingPath(file.sourcePath, false, "Macro-page source preset", error);
+        if (!canonicalSource ||
+            (pathIsSameOrDescendant(*canonicalSource, *donorPreset) && pathIsSameOrDescendant(*donorPreset, *canonicalSource)))
+        {
+            log::error("{}", canonicalSource ? "The macro-page donor must not also be an input preset." : error);
+            return RunResult::invalidOptions;
+        }
+        if (!validateVstPresetFile(*canonicalSource, error))
+        {
+            log::error("{}", error);
+            return RunResult::invalidOptions;
+        }
+        const auto hash = detail::sha256MacroPageInjectionFile(*canonicalSource, error);
+        if (!hash)
+        {
+            log::error("{}", error);
+            return RunResult::invalidOptions;
+        }
+        manifest.files.push_back({file.relativePath, *hash});
+    }
+
+    const auto workExists = pathExistsNoFollow(paths.root, filesystemError);
+    if (filesystemError || (originalOptions.resume && !workExists) || (!originalOptions.resume && workExists))
+    {
+        if (filesystemError)
+            log::error("Could not inspect macro-page work directory {}: {}", paths.root.string(), filesystemError.message());
+        else if (originalOptions.resume)
+            log::error("No resumable macro-page work directory exists at {}.", paths.root.string());
+        else
+            log::error("Macro-page work directory already exists at {}. Use --resume only for the matching interrupted run.",
+                       paths.root.string());
+        return RunResult::invalidOptions;
+    }
+
+    if (originalOptions.resume)
+    {
+        if (!requireNonSymlinkDirectory(paths.root, "Macro-page work root", error) ||
+            !requireNonSymlinkDirectory(paths.runtime, "Macro-page runtime directory", error) ||
+            !requireNonSymlinkDirectory(paths.presets, "Macro-page staging directory", error))
+        {
+            log::error("{}", error);
+            return RunResult::invalidOptions;
+        }
+        auto previousManifest = detail::MacroPageInjectionManifest{};
+        if (!detail::readMacroPageInjectionManifest(paths.manifest, previousManifest, error) ||
+            !detail::macroPageInjectionManifestsMatch(manifest, previousManifest, error))
+        {
+            log::error("Cannot resume macro-page injection: {}", error);
+            return RunResult::invalidOptions;
+        }
+    }
+    else
+    {
+        std::filesystem::create_directories(paths.runtime, filesystemError);
+        if (!filesystemError)
+            std::filesystem::create_directories(paths.presets, filesystemError);
+        if (filesystemError || !detail::writeMacroPageInjectionManifest(paths.manifest, manifest, error))
+        {
+            log::error("Could not initialize macro-page work directory: {}", filesystemError ? filesystemError.message() : error);
+            auto cleanupError = std::string{};
+            detail::cleanupMacroPageInjectionWorkDirectory(paths, *outputDirectory, cleanupError);
+            return RunResult::runtimeSetupFailed;
+        }
+    }
+
+    const auto resumeCommand = [&]
+    {
+        auto command = fmt::format("halionbridge inject-macro-page --input-directory \"{}\" --output-directory \"{}\" "
+                                   "--donor-preset \"{}\" --chunk-size {}",
+                                   inputDirectory->string(), outputDirectory->string(), donorPreset->string(), originalOptions.chunkSize);
+        command += originalOptions.recursive ? " --recursive" : "";
+        command += originalOptions.failFast ? " --fail-fast" : "";
+        command +=
+            originalOptions.timeoutSeconds == 0 ? " --no-timeout" : fmt::format(" --timeout-seconds {}", originalOptions.timeoutSeconds);
+        command += originalOptions.showGui ? " --gui" : "";
+        command += originalOptions.forceScan ? " --force-scan" : "";
+        if (originalOptions.pluginPathOverride)
+            command += fmt::format(" --plugin \"{}\"", originalOptions.pluginPathOverride->string());
+        command += " --resume";
+        return command;
+    };
+    const auto retainWorkAndReturn = [&](const RunResult result)
+    {
+        log::warn("Macro-page work was retained at {}.", paths.root.string());
+        log::warn("Resume with: {}", resumeCommand());
+        return result;
+    };
+
+    auto completed = detail::readMacroPageInjectionCompletions(paths.completionJournal, manifest.files.size());
+    if (!completed.errors.empty())
+    {
+        for (const auto& message : completed.errors)
+            log::error("{}", message);
+        return retainWorkAndReturn(RunResult::invalidOptions);
+    }
+    for (const auto& [index, record] : completed.records)
+    {
+        const auto& source = manifest.files[index];
+        const auto stagedPreset = paths.presets / source.relativePath;
+        if (record.sourceSha256 != source.sourceSha256 || !validateVstPresetFile(stagedPreset, error))
+        {
+            log::error("Resumable macro-page output {} is inconsistent: {}", stagedPreset.string(), error);
+            return retainWorkAndReturn(RunResult::invalidOptions);
+        }
+        const auto outputHash = detail::sha256MacroPageInjectionFile(stagedPreset, error);
+        if (!outputHash || *outputHash != record.outputSha256)
+        {
+            log::error("Resumable macro-page output hash does not match its completion record: {}", stagedPreset.string());
+            return retainWorkAndReturn(RunResult::invalidOptions);
+        }
+    }
+
+    auto pending = std::vector<std::size_t>{};
+    pending.reserve(manifest.files.size() - completed.records.size());
+    for (std::size_t index = 0; index < manifest.files.size(); ++index)
+        if (!completed.records.contains(index))
+            pending.push_back(index);
+
+    auto runtimeOptions = toRuntimeOptions(originalOptions, paths);
+    const auto receiptPath = toStdPath(getHalionUserScriptDirectory()) /
+                             (std::string{kMacroPageInjectionReceiptPrefix} + juce::Uuid().toString().toStdString() + ".log");
+    ScopedMacroPageReceiptFile receiptFile{receiptPath};
+    if (!removeRegularFileIfPresent(receiptPath, "macro-page receipt", error))
+    {
+        log::error("{}", error);
+        return retainWorkAndReturn(RunResult::runtimeSetupFailed);
+    }
+    auto preflight = detail::MacroPageInjectionRuntimeConfig{
+        *donorPreset, paths.presets, receiptPath, juce::Uuid().toString().toStdString(), true, false, true, {}};
+    if (!writeMacroPageRuntime(preflight, paths, error))
+    {
+        log::error("{}", error);
+        return retainWorkAndReturn(RunResult::runtimeSetupFailed);
+    }
+    log::info("Validating macro donor in HALion before processing {} pending preset(s).", pending.size());
+    const auto preflightResult = runDetailed(runtimeOptions);
+    if (preflightResult != RunResult::success)
+    {
+        log::error("Macro donor preflight failed in HALion.");
+        return retainWorkAndReturn(isInfrastructureChunkFailure(preflightResult) ? preflightResult : RunResult::macroPageInjectionFailed);
+    }
+
+    auto hadProcessingFailure = false;
+    const auto chunkCount = pending.empty() ? std::size_t{}
+                                            : (pending.size() + static_cast<std::size_t>(originalOptions.chunkSize) - 1) /
+                                                  static_cast<std::size_t>(originalOptions.chunkSize);
+    for (std::size_t chunk = 0; chunk < chunkCount; ++chunk)
+    {
+        if (isStopRequested())
+            return retainWorkAndReturn(RunResult::stopped);
+
+        const auto begin = chunk * static_cast<std::size_t>(originalOptions.chunkSize);
+        const auto end = std::min(pending.size(), begin + static_cast<std::size_t>(originalOptions.chunkSize));
+        auto config = detail::MacroPageInjectionRuntimeConfig{
+            *donorPreset, paths.presets, receiptPath, juce::Uuid().toString().toStdString(), false, false, originalOptions.failFast, {}};
+        auto expectedIndices = std::vector<std::size_t>{};
+        expectedIndices.reserve(end - begin);
+        config.entries.reserve(end - begin);
+        for (auto position = begin; position < end; ++position)
+        {
+            const auto index = pending[position];
+            const auto& source = collection.files[index];
+            if (!ensureSafeRelativeDirectory(paths.presets, source.relativePath.parent_path(), error) ||
+                !detail::removeMacroPageInjectionStagedPreset(paths, source.relativePath, error))
+            {
+                log::error("{}", error);
+                return retainWorkAndReturn(RunResult::runtimeSetupFailed);
+            }
+            expectedIndices.push_back(index);
+            config.entries.push_back({index, source.sourcePath, source.relativePath});
+        }
+
+        if (!removeRegularFileIfPresent(receiptPath, "macro-page receipt", error) || !writeMacroPageRuntime(config, paths, error))
+        {
+            log::error("{}", error);
+            return retainWorkAndReturn(RunResult::runtimeSetupFailed);
+        }
+
+        log::info("Starting macro-page save phase {}/{} with {} preset(s).", chunk + 1, chunkCount, expectedIndices.size());
+        const auto saveResult = runDetailed(runtimeOptions);
+        auto saveReceiptText = std::string{};
+        if (!detail::readMacroPageInjectionReceiptFile(receiptPath, saveReceiptText, error))
+        {
+            log::error("{}", error);
+            return retainWorkAndReturn(RunResult::runtimeSetupFailed);
+        }
+        const auto saveReceipt = detail::parseMacroPageInjectionReceipt(saveReceiptText, config.token, expectedIndices);
+        for (const auto& [index, message] : saveReceipt.reportedFailures)
+            log::error("HALion could not save macro-page input {} ({}): {}", index, manifest.files[index].relativePath.string(), message);
+        if (!saveReceipt.reportedFailures.empty())
+            hadProcessingFailure = true;
+        if (!saveReceipt.errors.empty())
+        {
+            for (const auto& message : saveReceipt.errors)
+                log::error("{}", message);
+            hadProcessingFailure = true;
+        }
+        if (saveResult == RunResult::stopped || saveResult == RunResult::startupStopped)
+            return retainWorkAndReturn(RunResult::stopped);
+        if (isInfrastructureChunkFailure(saveResult))
+            return retainWorkAndReturn(saveResult);
+
+        config.validateOnly = true;
+        if (!removeRegularFileIfPresent(receiptPath, "macro-page receipt", error) || !writeMacroPageRuntime(config, paths, error))
+        {
+            log::error("{}", error);
+            return retainWorkAndReturn(RunResult::runtimeSetupFailed);
+        }
+        log::info("Starting macro-page validation phase {}/{}.", chunk + 1, chunkCount);
+        const auto validationResult = runDetailed(runtimeOptions);
+        auto validationReceiptText = std::string{};
+        if (!detail::readMacroPageInjectionReceiptFile(receiptPath, validationReceiptText, error))
+        {
+            log::error("{}", error);
+            return retainWorkAndReturn(RunResult::runtimeSetupFailed);
+        }
+        const auto receipt = detail::parseMacroPageInjectionReceipt(validationReceiptText, config.token, expectedIndices);
+        auto accepted = std::set<std::size_t>{};
+        for (const auto& [index, message] : receipt.reportedFailures)
+            log::error("HALion rejected macro-page input {} ({}): {}", index, manifest.files[index].relativePath.string(), message);
+        if (!receipt.reportedFailures.empty())
+            hadProcessingFailure = true;
+        if (!receipt.errors.empty())
+        {
+            for (const auto& message : receipt.errors)
+                log::error("{}", message);
+            hadProcessingFailure = true;
+        }
+        else
+        {
+            for (const auto index : receipt.completedIndices)
+            {
+                const auto& manifestFile = manifest.files[index];
+                const auto stagedPreset = paths.presets / manifestFile.relativePath;
+                if (!validateVstPresetFile(stagedPreset, error) ||
+                    !detail::restoreVstPresetInfoChunk(collection.files[index].sourcePath, stagedPreset, error) ||
+                    !validateVstPresetFile(stagedPreset, error))
+                {
+                    log::error("Macro-page post-processing failed for {}: {}", manifestFile.relativePath.string(), error);
+                    hadProcessingFailure = true;
+                    continue;
+                }
+                const auto outputHash = detail::sha256MacroPageInjectionFile(stagedPreset, error);
+                if (!outputHash || !detail::appendMacroPageInjectionCompletion(
+                                       paths.completionJournal, {index, manifestFile.sourceSha256, outputHash.value_or("")}, error))
+                {
+                    log::error("Could not commit macro-page completion for {}: {}", manifestFile.relativePath.string(), error);
+                    return retainWorkAndReturn(RunResult::runtimeSetupFailed);
+                }
+                completed.records.emplace(index, detail::MacroPageInjectionCompletion{index, manifestFile.sourceSha256, *outputHash});
+                accepted.insert(index);
+                log::info("Completed macro-page injection {}/{}: {}", completed.records.size(), manifest.files.size(),
+                          manifestFile.relativePath.string());
+            }
+        }
+
+        for (const auto index : expectedIndices)
+        {
+            if (accepted.contains(index))
+                continue;
+            if (!detail::removeMacroPageInjectionStagedPreset(paths, manifest.files[index].relativePath, error))
+            {
+                log::error("{}", error);
+                return retainWorkAndReturn(RunResult::cleanupFailed);
+            }
+        }
+
+        if (saveResult != RunResult::success || validationResult != RunResult::success || accepted.size() != expectedIndices.size())
+        {
+            hadProcessingFailure = true;
+            log::error("Macro-page chunk {}/{} completed with {} of {} presets accepted.", chunk + 1, chunkCount, accepted.size(),
+                       expectedIndices.size());
+            if (validationResult == RunResult::stopped || validationResult == RunResult::startupStopped)
+                return retainWorkAndReturn(RunResult::stopped);
+            if (isInfrastructureChunkFailure(validationResult))
+                return retainWorkAndReturn(validationResult);
+            if (originalOptions.failFast)
+                break;
+        }
+    }
+
+    if (hadProcessingFailure || completed.records.size() != manifest.files.size())
+    {
+        log::error("Macro-page injection is incomplete: {} of {} presets are durably staged.", completed.records.size(),
+                   manifest.files.size());
+        return retainWorkAndReturn(RunResult::macroPageInjectionFailed);
+    }
+
+    for (const auto& [index, record] : completed.records)
+    {
+        const auto stagedPreset = paths.presets / manifest.files[index].relativePath;
+        const auto outputHash = detail::sha256MacroPageInjectionFile(stagedPreset, error);
+        if (!outputHash || *outputHash != record.outputSha256 || !validateVstPresetFile(stagedPreset, error))
+        {
+            log::error("Final macro-page staging validation failed for {}: {}", stagedPreset.string(), error);
+            return retainWorkAndReturn(RunResult::macroPageInjectionFailed);
+        }
+    }
+
+    if (!detail::publishMacroPageInjectionPresets(paths, *outputDirectory, error))
+    {
+        log::error("{}", error);
+        return retainWorkAndReturn(RunResult::cleanupFailed);
+    }
+    log::info("Published {} HALion Sonic Program preset(s) to {}.", manifest.files.size(), outputDirectory->string());
+
+    if (!detail::cleanupMacroPageInjectionWorkDirectory(paths, *outputDirectory, error))
+        log::warn("Macro-page presets were published successfully, but work-directory cleanup failed: {}", error);
+
     return RunResult::success;
 }
 

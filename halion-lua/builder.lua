@@ -395,13 +395,15 @@ local function makeContext(moduleName)
         return pathJoin(root, rel)
     end
 
-    function context.save_preset(path, object, presetType)
+    function context.save_preset(path, object, plugin, attributes)
         -- Thin wrapper over HALion savePreset(). Build scripts choose what object to
-        -- save and which preset type to request. "H7" is the current default for
-        -- HALion 7 layer/program preset output. When --output-directory is set,
-        -- ordinary build-directory-relative preset saves are redirected there while
-        -- status/progress markers written by the runner remain in ctx.script_dir.
-        return savePreset(outputPresetPath(path), object, presetType or "H7")
+        -- save, which plug-in code to use, and optional MediaBay attributes. Passing
+        -- "program" as the fourth argument requests a program preset; omitting it
+        -- preserves HALion's layer-preset default. "H7" is the default HALion 7
+        -- plug-in code. When --output-directory is set, ordinary build-directory-
+        -- relative preset saves are redirected there while status/progress markers
+        -- written by the runner remain in ctx.script_dir.
+        return savePreset(outputPresetPath(path), object, plugin or "H7", attributes)
     end
 
     function context.log(message)

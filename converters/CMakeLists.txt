@@ -51,13 +51,13 @@ if(HALIONBRIDGE_ENABLE_CONVERTER_DX7)
     )
 
     file(GLOB HALIONBRIDGE_DX7_TEMPLATE_FILES CONFIGURE_DEPENDS
-        "${CMAKE_SOURCE_DIR}/resources/dx7/dx7_*.vstpreset"
+        "${CMAKE_SOURCE_DIR}/resources/dx7/halion-sonic/dx7_*.vstpreset"
     )
     list(SORT HALIONBRIDGE_DX7_TEMPLATE_FILES)
     list(LENGTH HALIONBRIDGE_DX7_TEMPLATE_FILES HALIONBRIDGE_DX7_TEMPLATE_COUNT)
     if(NOT HALIONBRIDGE_DX7_TEMPLATE_COUNT EQUAL 32)
         message(FATAL_ERROR
-            "The DX7 converter requires exactly 32 algorithm templates under resources/dx7; found ${HALIONBRIDGE_DX7_TEMPLATE_COUNT}."
+            "The DX7 converter requires exactly 32 HALion Sonic-compatible algorithm templates under resources/dx7/halion-sonic; found ${HALIONBRIDGE_DX7_TEMPLATE_COUNT}."
         )
     endif()
 

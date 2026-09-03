@@ -236,6 +236,49 @@ bool applyTimeoutOption(VstPresetInspectionOptions& options, const std::vector<s
     return true;
 }
 
+bool applyTimeoutOption(VstPresetMacroPageInjectionOptions& options, const std::vector<std::string>& values, const bool noTimeoutRequested,
+                        std::vector<CliDiagnostic>& diagnostics)
+{
+    auto noTimeoutSeen = noTimeoutRequested;
+    auto positiveTimeoutSeen = false;
+
+    if (noTimeoutSeen)
+        options.timeoutSeconds = 0;
+
+    for (const auto& value : values)
+    {
+        const auto parsed = parseNonNegativeInt(value);
+        if (!parsed)
+        {
+            addError(diagnostics, "--timeout-seconds must be a non-negative integer.");
+            return false;
+        }
+
+        if (*parsed == 0)
+        {
+            if (positiveTimeoutSeen)
+            {
+                addError(diagnostics, "--timeout-seconds 0 cannot be combined with a positive --timeout-seconds value.");
+                return false;
+            }
+            noTimeoutSeen = true;
+        }
+        else
+        {
+            if (noTimeoutSeen)
+            {
+                addError(diagnostics, "--timeout-seconds cannot be combined with --no-timeout or --timeout-seconds 0.");
+                return false;
+            }
+            positiveTimeoutSeen = true;
+        }
+
+        options.timeoutSeconds = *parsed;
+    }
+
+    return true;
+}
+
 bool parseCli11App(CLI::App& app, std::span<const std::string> args, std::vector<CliDiagnostic>& diagnostics)
 {
     auto mutableArgs = toMutableArgs(args);
@@ -278,6 +321,8 @@ CliCommandKind classifyCliCommand(std::span<const std::string> args) noexcept
         return CliCommandKind::remapVstPresets;
     if (command == "inspect-vstpresets")
         return CliCommandKind::inspectVstPresets;
+    if (command == "inject-macro-page")
+        return CliCommandKind::injectMacroPage;
     if (command == "vstpreset-metadata")
         return CliCommandKind::vstPresetMetadata;
 
@@ -594,6 +639,112 @@ VstPresetInspectionOptionsParseResult parseVstPresetInspectionOptionsDetailed(st
 std::optional<VstPresetInspectionOptions> parseVstPresetInspectionOptions(std::span<const std::string> args)
 {
     return parseVstPresetInspectionOptionsDetailed(args).options;
+}
+
+VstPresetMacroPageInjectionOptionsParseResult parseVstPresetMacroPageInjectionOptionsDetailed(std::span<const std::string> args)
+{
+    auto result = VstPresetMacroPageInjectionOptionsParseResult{};
+    auto options = VstPresetMacroPageInjectionOptions{};
+    auto inputText = std::string{};
+    auto outputText = std::string{};
+    auto donorText = std::string{};
+    auto pluginText = std::string{};
+    auto chunkSizeText = std::string{};
+    auto timeoutValues = std::vector<std::string>{};
+    auto noTimeoutRequested = false;
+
+    CLI::App app{"halionbridge inject-macro-page"};
+    app.set_help_flag();
+    app.add_option("--input-directory", inputText);
+    app.add_option("--output-directory", outputText);
+    app.add_option("--donor-preset", donorText);
+    app.add_option("--plugin", pluginText);
+    app.add_option("--chunk-size", chunkSizeText);
+    app.add_option("--timeout-seconds", timeoutValues)->expected(1);
+    app.add_flag("--recursive", options.recursive);
+    app.add_flag("--resume", options.resume);
+    app.add_flag("--fail-fast", options.failFast);
+    app.add_flag("--no-timeout", noTimeoutRequested);
+    app.add_flag("--gui", options.showGui);
+    app.add_flag("--force-scan", options.forceScan);
+
+    if (!parseCli11App(app, args, result.diagnostics))
+    {
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+
+    if (app.remaining_size() > 0)
+    {
+        const auto unexpected = app.remaining().empty() ? std::string{} : app.remaining().front();
+        addError(result.diagnostics, "inject-macro-page uses named options. Unexpected positional argument: " + unexpected);
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+
+    if (inputText.empty() || outputText.empty() || donorText.empty())
+    {
+        addError(result.diagnostics, "inject-macro-page requires --input-directory, --output-directory, and --donor-preset.");
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+
+    const auto input = normalizeCliPath(toJuceString(std::string_view(inputText)));
+    if (!input.isDirectory())
+    {
+        addError(result.diagnostics, "Input directory does not exist at " + input.getFullPathName().toStdString());
+        result.errorKind = CliParseErrorKind::validation;
+        return result;
+    }
+    options.inputDirectory = toStdPath(input);
+    options.outputDirectory = toStdPath(normalizeCliPath(toJuceString(std::string_view(outputText))));
+
+    const auto donor = normalizeCliPath(toJuceString(std::string_view(donorText)));
+    if (!donor.existsAsFile() || donor.getFileExtension().toLowerCase() != ".vstpreset")
+    {
+        addError(result.diagnostics, "Macro donor must be an existing .vstpreset file: " + donor.getFullPathName().toStdString());
+        result.errorKind = CliParseErrorKind::validation;
+        return result;
+    }
+    options.donorPreset = toStdPath(donor);
+
+    if (!pluginText.empty())
+    {
+        const auto plugin = normalizeCliPath(toJuceString(std::string_view(pluginText)));
+        if (!plugin.existsAsFile() && !plugin.isDirectory())
+        {
+            addError(result.diagnostics, "Override plugin path does not exist at " + plugin.getFullPathName().toStdString());
+            result.errorKind = CliParseErrorKind::validation;
+            return result;
+        }
+        options.pluginPathOverride = toStdPath(plugin);
+    }
+
+    if (!chunkSizeText.empty())
+    {
+        const auto chunkSize = parsePositiveInt(chunkSizeText);
+        if (!chunkSize)
+        {
+            addError(result.diagnostics, "--chunk-size must be a positive integer.");
+            result.errorKind = CliParseErrorKind::syntax;
+            return result;
+        }
+        options.chunkSize = *chunkSize;
+    }
+
+    if (!applyTimeoutOption(options, timeoutValues, noTimeoutRequested, result.diagnostics))
+    {
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+
+    result.options = std::move(options);
+    return result;
+}
+
+std::optional<VstPresetMacroPageInjectionOptions> parseVstPresetMacroPageInjectionOptions(std::span<const std::string> args)
+{
+    return parseVstPresetMacroPageInjectionOptionsDetailed(args).options;
 }
 
 std::optional<AppOptions> parseBuildWorkerOptions(std::span<const std::string> args)

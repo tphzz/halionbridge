@@ -28,6 +28,7 @@ int halionbridge_public_headers_compile_without_juce()
 
     const auto buildInfo = halionbridge::getBuildInfo();
     const auto result = halionbridge::RunResult::success;
+    const auto macroPageOptions = halionbridge::VstPresetMacroPageInjectionOptions{};
 
 #if HALIONBRIDGE_ENABLE_CONVERTERS
     auto registry = halionbridge::converters::ConverterRegistry{};
@@ -40,7 +41,8 @@ int halionbridge_public_headers_compile_without_juce()
 
     return static_cast<int>(options.has_value()) + static_cast<int>(!markers.okFile.empty()) +
            static_cast<int>(buildInfo.versionString != nullptr) + static_cast<int>(directOptions.forceScan) +
-           static_cast<int>(inspectionOptions.recursive) + static_cast<int>(result == halionbridge::RunResult::success)
+           static_cast<int>(inspectionOptions.recursive) + static_cast<int>(macroPageOptions.recursive) +
+           static_cast<int>(result == halionbridge::RunResult::success)
 #if HALIONBRIDGE_ENABLE_CONVERTERS
            + static_cast<int>(registry.list().empty()) + static_cast<int>(buildDirectoryRequest.scripts.empty()) +
 #if HALIONBRIDGE_ENABLE_CONVERTER_DX7

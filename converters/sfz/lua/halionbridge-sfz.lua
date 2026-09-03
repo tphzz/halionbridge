@@ -6,6 +6,7 @@
 -- generated entrypoint source compact and inspectable.
 
 local hb = {}
+local preset_plugin_code = { halion = "H7", ["halion-sonic"] = "HS" }
 
 hb.version = 1
 
@@ -604,18 +605,37 @@ function hb.append_sample_zone(ctx, layer, region)
     return zone
 end
 
-function hb.save_layer_preset(ctx, layer, output_file)
+function hb.save_preset(ctx, object, output_file, preset_type, preset_target)
     if not ctx or type(ctx.save_preset) ~= "function" then
         return false, "Build context cannot save presets"
     end
+    if preset_type ~= nil and preset_type ~= "program" and preset_type ~= "layer" then
+        return false, "Preset type must be program or layer"
+    end
+
+    preset_target = preset_target or "halion"
+    local plugin_code = preset_plugin_code[preset_target]
+    if plugin_code == nil then
+        return false, "Preset target must be halion or halion-sonic"
+    end
+    if preset_target == "halion-sonic" and preset_type ~= "program" then
+        return false, "HALion Sonic output requires a program preset"
+    end
 
     local output_path = hb.path_join(ctx, ctx.output_dir or ctx.script_dir, output_file)
-    local saved = ctx.save_preset(output_path, layer, "H7")
+    local attributes = preset_type == "program" and "program" or nil
+    local saved = ctx.save_preset(output_path, object, plugin_code, attributes)
     if not saved then
         return false, "Failed to save " .. output_path
     end
 
     return true, output_path
+end
+
+-- Compatibility entry point for existing generated scripts. HALion saves a
+-- layer preset when the fourth savePreset argument is omitted.
+function hb.save_layer_preset(ctx, layer, output_file)
+    return hb.save_preset(ctx, layer, output_file, "layer")
 end
 
 function hb.apply_selection(ctx)

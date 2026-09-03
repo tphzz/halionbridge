@@ -77,6 +77,7 @@ juce_add_binary_data(halionbridge_assets
     SOURCES
         halion-lua/builder_bootstrap.vstpreset
         halion-lua/builder.lua
+        halion-lua/macro_page_inject.lua
         halion-lua/preset_inspect.lua
         halion-lua/preset_remap.lua
 )
@@ -105,6 +106,7 @@ set(HALIONBRIDGE_LIBRARY_SOURCES
     src/CliCommand.cpp
     src/CrashDiagnostics.cpp
     src/Log.cpp
+    src/MacroPageInjection.cpp
     src/BuildFile.cpp
     src/PathUtils.cpp
     src/PluginScan.cpp
@@ -176,6 +178,7 @@ function(configure_halionbridge_library target_name)
         CLI11::CLI11
         juce::juce_audio_processors
         juce::juce_core
+        juce::juce_cryptography
         spdlog::spdlog_header_only
     )
 
@@ -284,11 +287,13 @@ if(HALIONBRIDGE_BUILD_TESTS)
 
     target_sources(halionbridge_tests PRIVATE
         tests/BuildManifestTests.cpp
+        tests/MacroPageInjectionTests.cpp
         tests/Tests.cpp
         tests/VstPresetInspectionTests.cpp
     )
     enable_halionbridge_strict_warnings(
         tests/BuildManifestTests.cpp
+        tests/MacroPageInjectionTests.cpp
         tests/Tests.cpp
         tests/VstPresetInspectionTests.cpp
     )
@@ -402,6 +407,22 @@ if(HALIONBRIDGE_BUILD_TESTS)
                 "\\[[0-9][0-9][0-9][0-9]-"
                 inspect-vstpresets
             )
+            add_halionbridge_cli_expect(halionbridge_cli_inject_macro_page_help 0
+                "halionbridge inject-macro-page --input-directory"
+                inject-macro-page --help
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_inject_macro_page_missing_required_header 1
+                "^halionbridge [^\r\n]+"
+                inject-macro-page
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_inject_macro_page_missing_required_help 1
+                "halionbridge inject-macro-page --input-directory"
+                inject-macro-page
+            )
+            add_halionbridge_cli_reject(halionbridge_cli_inject_macro_page_missing_required_no_log_prefix 1
+                "\\[[0-9][0-9][0-9][0-9]-"
+                inject-macro-page
+            )
             add_halionbridge_cli_expect(halionbridge_cli_vstpreset_metadata_help 0
                 "halionbridge vstpreset-metadata export"
                 vstpreset-metadata --help
@@ -437,6 +458,9 @@ if(HALIONBRIDGE_BUILD_TESTS)
                 add_halionbridge_cli_expect(halionbridge_cli_convert_help 0 "halionbridge convert <converter-id>" convert --help)
                 add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_help 0 "halionbridge convert sfz <source-path>" convert sfz --help)
                 add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_help_version 0 "halionbridge [^\r\n]+" convert sfz --help)
+                add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_help_preset_target 0 "--preset-target <halion\|halion-sonic>" convert sfz --help)
+                add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_invalid_preset_target 1 "expected halion or halion-sonic" convert sfz --preset-target invalid)
+                add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_rejects_sonic_layer 1 "halion-sonic requires --preset-type program" convert sfz --preset-target halion-sonic --preset-type layer)
                 add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_missing_source_header 1 "^halionbridge [^\r\n]+" convert sfz)
                 add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_missing_source_error 1 "requires a source path" convert sfz)
                 add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_missing_source_help 1 "halionbridge convert sfz <source-path>" convert sfz)
@@ -447,6 +471,9 @@ if(HALIONBRIDGE_BUILD_TESTS)
                 add_halionbridge_cli_expect(halionbridge_cli_convert_sfz_rejects_non_sfz_file 1 "SFZ source file must have a \\.sfz extension" convert sfz "${CMAKE_SOURCE_DIR}/README.md")
                 if(HALIONBRIDGE_ENABLE_CONVERTER_DX7)
                     add_halionbridge_cli_expect(halionbridge_cli_convert_dx7_help 0 "halionbridge convert dx7 <source-path>" convert dx7 --help)
+                    add_halionbridge_cli_expect(halionbridge_cli_convert_dx7_help_preset_target 0 "--preset-target <halion\|halion-sonic>" convert dx7 --help)
+                    add_halionbridge_cli_expect(halionbridge_cli_convert_dx7_invalid_preset_target 1 "expected halion or halion-sonic" convert dx7 --preset-target invalid)
+                    add_halionbridge_cli_expect(halionbridge_cli_convert_dx7_rejects_sonic_layer 1 "halion-sonic requires --preset-type program" convert dx7 --preset-target halion-sonic --preset-type layer)
                     add_halionbridge_cli_expect(halionbridge_cli_convert_dx7_missing_source_error 1 "requires a source path" convert dx7)
                     add_halionbridge_cli_expect(halionbridge_cli_convert_dx7_rejects_non_syx_file 1 "DX7 source file must have a \\.syx extension" convert dx7 "${CMAKE_SOURCE_DIR}/README.md")
                 endif()

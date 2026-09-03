@@ -109,8 +109,11 @@ class BuildManifestTests final : public juce::UnitTest
             options.outputDirectory = output.path();
             options.pluginPathOverride = build.path() / "tripwire.vst3";
             auto bridge = halionbridge::Bridge{};
-            expect(bridge.runDetailed(options) == halionbridge::RunResult::pluginLoadFailed);
-            expect(output.directory.getChildFile("nested/voice").isDirectory());
+            const auto runResult = bridge.runDetailed(options);
+            expectEquals(static_cast<int>(runResult), static_cast<int>(halionbridge::RunResult::pluginLoadFailed),
+                         "The CI tripwire should stop the run only after manifest preparation.");
+            expect(output.directory.getChildFile("nested/voice").isDirectory(),
+                   "Manifest output directories should exist before the plugin tripwire runs.");
         }
     }
 };

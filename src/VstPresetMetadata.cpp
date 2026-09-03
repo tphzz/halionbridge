@@ -645,10 +645,68 @@ bool writeBinaryFileAtomically(const std::filesystem::path& destination, const s
     return true;
 }
 
-std::vector<std::byte> rebuildPresetWithInfoChunk(const VstPresetContainer& container, const std::string& infoXml)
+bool replaceBinaryFileAtomically(const std::filesystem::path& destination, const std::vector<std::byte>& bytes, std::string& error)
+{
+    auto filesystemError = std::error_code{};
+    const auto destinationStatus = std::filesystem::symlink_status(destination, filesystemError);
+    if (filesystemError || std::filesystem::is_symlink(destinationStatus) || !std::filesystem::is_regular_file(destinationStatus))
+    {
+        error = "Transformed preset is missing, not regular, or symlinked: " + destination.string();
+        return false;
+    }
+
+    const auto temporary = makeVstPresetInfoReplacementTemporaryPath(destination);
+    const auto temporaryStatus = std::filesystem::symlink_status(temporary, filesystemError);
+    if (temporaryStatus.type() != std::filesystem::file_type::not_found)
+    {
+        if (filesystemError || std::filesystem::is_symlink(temporaryStatus) || !std::filesystem::is_regular_file(temporaryStatus) ||
+            !std::filesystem::remove(temporary, filesystemError) || filesystemError)
+        {
+            error = "Metadata replacement sidecar is not a removable regular file: " + temporary.string();
+            return false;
+        }
+    }
+    filesystemError.clear();
+    {
+        auto stream = std::ofstream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream)
+        {
+            error = "Could not create temporary preset: " + temporary.string();
+            return false;
+        }
+        if (!bytes.empty())
+            stream.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        stream.flush();
+        if (!stream)
+        {
+            error = "Could not write temporary preset: " + temporary.string();
+            stream.close();
+            std::filesystem::remove(temporary, filesystemError);
+            return false;
+        }
+    }
+
+#if JUCE_WINDOWS
+    const auto replaced = ReplaceFileW(destination.c_str(), temporary.c_str(), nullptr, REPLACEFILE_WRITE_THROUGH, nullptr, nullptr);
+    if (!replaced)
+        filesystemError = std::error_code(static_cast<int>(GetLastError()), std::system_category());
+#else
+    std::filesystem::rename(temporary, destination, filesystemError);
+#endif
+    if (filesystemError)
+    {
+        error = "Could not replace transformed preset " + destination.string() + ": " + filesystemError.message();
+        auto cleanupError = std::error_code{};
+        std::filesystem::remove(temporary, cleanupError);
+        return false;
+    }
+    return true;
+}
+
+std::vector<std::byte> rebuildPresetWithInfoChunk(const VstPresetContainer& container, const std::optional<std::string>& infoXml)
 {
     std::vector<std::byte> output;
-    output.reserve(container.bytes.size() + infoXml.size() + 128);
+    output.reserve(container.bytes.size() + (infoXml ? infoXml->size() : 0) + 128);
     appendText(output, "VST3");
     appendU32(output, kVstPresetFormatVersion);
     appendText(output, std::string_view(container.classId.data(), container.classId.size()));
@@ -670,13 +728,13 @@ std::vector<std::byte> rebuildPresetWithInfoChunk(const VstPresetContainer& cont
         outputEntries.push_back(rewritten);
     }
 
-    if (!infoXml.empty())
+    if (infoXml)
     {
         ChunkEntry infoEntry;
         infoEntry.id = "Info";
         infoEntry.offset = output.size();
-        infoEntry.size = infoXml.size();
-        appendText(output, infoXml);
+        infoEntry.size = infoXml->size();
+        appendText(output, *infoXml);
         outputEntries.push_back(infoEntry);
     }
 
@@ -710,7 +768,7 @@ bool rewritePresetMetadata(const std::filesystem::path& source, const std::files
         return false;
     }
 
-    const auto outputBytes = rebuildPresetWithInfoChunk(container, updatedXml);
+    const auto outputBytes = rebuildPresetWithInfoChunk(container, std::optional<std::string>{std::move(updatedXml)});
     return writeBinaryFileAtomically(destination, outputBytes, error);
 }
 
@@ -1163,6 +1221,48 @@ int runApplyCommand(const VstPresetMetadataOptions& options, std::vector<CliDiag
 }
 
 } // namespace
+
+std::filesystem::path makeVstPresetInfoReplacementTemporaryPath(const std::filesystem::path& destination)
+{
+    auto result = destination;
+    result += ".halionbridge-info.tmp";
+    return result;
+}
+
+bool readVstPresetInfoChunk(const std::filesystem::path& preset, std::optional<std::string>& info, std::string& error)
+{
+    auto container = VstPresetContainer{};
+    if (!parseVstPresetContainer(preset, container, error))
+        return false;
+    info = std::move(container.infoXml);
+    return true;
+}
+
+bool restoreVstPresetInfoChunk(const std::filesystem::path& sourcePreset, const std::filesystem::path& transformedPreset,
+                               std::string& error)
+{
+    auto source = VstPresetContainer{};
+    if (!parseVstPresetContainer(sourcePreset, source, error))
+        return false;
+
+    auto transformed = VstPresetContainer{};
+    if (!parseVstPresetContainer(transformedPreset, transformed, error))
+        return false;
+
+    const auto bytes = rebuildPresetWithInfoChunk(transformed, source.infoXml);
+    if (!replaceBinaryFileAtomically(transformedPreset, bytes, error))
+        return false;
+
+    auto verification = VstPresetContainer{};
+    if (!parseVstPresetContainer(transformedPreset, verification, error))
+        return false;
+    if (verification.infoXml != source.infoXml)
+    {
+        error = "Transformed preset metadata verification failed: " + transformedPreset.string();
+        return false;
+    }
+    return true;
+}
 
 std::vector<std::string> vstPresetMetadataFieldNames()
 {

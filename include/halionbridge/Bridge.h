@@ -72,6 +72,22 @@ struct VstPresetInspectionOptions
     bool forceScan = false;
 };
 
+struct VstPresetMacroPageInjectionOptions
+{
+    std::filesystem::path inputDirectory;
+    std::filesystem::path outputDirectory;
+    std::filesystem::path donorPreset;
+    std::optional<std::filesystem::path> pluginPathOverride;
+    std::optional<std::filesystem::path> executableFile;
+    int timeoutSeconds = 3600;
+    int chunkSize = 1000;
+    bool recursive = false;
+    bool resume = false;
+    bool failFast = false;
+    bool showGui = false;
+    bool forceScan = false;
+};
+
 namespace detail
 {
 
@@ -145,7 +161,8 @@ enum class RunResult
     stopped,
     timedOut,
     cleanupFailed,
-    inspectionFailed
+    inspectionFailed,
+    macroPageInjectionFailed
 };
 
 HALIONBRIDGE_EXPORT void requestStop() noexcept;
@@ -173,6 +190,8 @@ class HALIONBRIDGE_EXPORT Bridge
     static std::optional<AppOptions> parseArguments(const std::vector<std::string>& args);
     static std::optional<VstPresetRemapOptions> parseVstPresetRemapArguments(const std::vector<std::string>& args);
     static std::optional<VstPresetInspectionOptions> parseVstPresetInspectionArguments(const std::vector<std::string>& args);
+    static std::optional<VstPresetMacroPageInjectionOptions> parseVstPresetMacroPageInjectionArguments(
+        const std::vector<std::string>& args);
 
     // Resolves the path to the HALion 7 VST3 plugin.
     // Falls back to standard OS locations if pluginPathOverride is empty.
@@ -197,6 +216,7 @@ class HALIONBRIDGE_EXPORT Bridge
     RunResult runDetailed(const AppOptions& options);
     RunResult remapVstPresetsDetailed(const VstPresetRemapOptions& options);
     RunResult inspectVstPresetsDetailed(const VstPresetInspectionOptions& options);
+    RunResult injectMacroPageDetailed(const VstPresetMacroPageInjectionOptions& options);
 
   private:
     struct Impl;

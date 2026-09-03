@@ -1068,7 +1068,7 @@ class BridgeTests : public juce::UnitTest
                   halionbridge::RunResult::pluginNotFound, halionbridge::RunResult::pluginLoadFailed,
                   halionbridge::RunResult::startupStopped, halionbridge::RunResult::presetApplyFailed, halionbridge::RunResult::buildFailed,
                   halionbridge::RunResult::stopped, halionbridge::RunResult::timedOut, halionbridge::RunResult::cleanupFailed,
-                  halionbridge::RunResult::inspectionFailed})
+                  halionbridge::RunResult::inspectionFailed, halionbridge::RunResult::macroPageInjectionFailed})
             {
                 const auto exitCode = halionbridge::detail::runResultToBuildWorkerExitCode(result);
                 const auto mapped = halionbridge::detail::buildWorkerExitCodeToRunResult(exitCode);
@@ -1332,6 +1332,74 @@ class BridgeTests : public juce::UnitTest
         }
 
 #if HALIONBRIDGE_ENABLE_CONVERTERS
+        beginTest("Converter Options - preset output type and target are shared and defensive");
+        {
+            const auto defaults =
+                halionbridge::converters::parseCommonConverterArguments(std::vector<std::string>{"source", "output", "--recursive"});
+            expectEquals(defaults.result.exitCode, 0);
+            expect(defaults.presetOutputType == halionbridge::converters::PresetOutputType::program);
+            expect(defaults.presetTarget == halionbridge::converters::PresetTarget::halion);
+            expectEquals(static_cast<int>(defaults.remainingArguments.size()), 3);
+
+            const auto explicitProgram =
+                halionbridge::converters::parseCommonConverterArguments(std::vector<std::string>{"source", "--preset-type", "program"});
+            expectEquals(explicitProgram.result.exitCode, 0);
+            expect(explicitProgram.presetOutputType == halionbridge::converters::PresetOutputType::program);
+            expectEquals(static_cast<int>(explicitProgram.remainingArguments.size()), 1);
+
+            const auto layer = halionbridge::converters::parseCommonConverterArguments(
+                std::vector<std::string>{"source", "--preset-type", "layer", "--overwrite"});
+            expectEquals(layer.result.exitCode, 0);
+            expect(layer.presetOutputType == halionbridge::converters::PresetOutputType::layer);
+            expectEquals(static_cast<int>(layer.remainingArguments.size()), 2);
+            expectEquals(layer.remainingArguments[0], std::string{"source"});
+            expectEquals(layer.remainingArguments[1], std::string{"--overwrite"});
+
+            const auto sonic = halionbridge::converters::parseCommonConverterArguments(
+                std::vector<std::string>{"source", "--preset-target", "halion-sonic", "--overwrite"});
+            expectEquals(sonic.result.exitCode, 0);
+            expect(sonic.presetOutputType == halionbridge::converters::PresetOutputType::program);
+            expect(sonic.presetTarget == halionbridge::converters::PresetTarget::halionSonic);
+            expectEquals(static_cast<int>(sonic.remainingArguments.size()), 2);
+            expectEquals(sonic.remainingArguments[0], std::string{"source"});
+            expectEquals(sonic.remainingArguments[1], std::string{"--overwrite"});
+
+            const auto missing =
+                halionbridge::converters::parseCommonConverterArguments(std::vector<std::string>{"source", "--preset-type"});
+            expectEquals(missing.result.exitCode, 1);
+            expect(missing.result.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax);
+
+            const auto invalid =
+                halionbridge::converters::parseCommonConverterArguments(std::vector<std::string>{"source", "--preset-type", "Program"});
+            expectEquals(invalid.result.exitCode, 1);
+            expect(invalid.result.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax);
+
+            const auto duplicate = halionbridge::converters::parseCommonConverterArguments(
+                std::vector<std::string>{"source", "--preset-type", "program", "--preset-type", "layer"});
+            expectEquals(duplicate.result.exitCode, 1);
+            expect(duplicate.result.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax);
+
+            const auto missingTarget =
+                halionbridge::converters::parseCommonConverterArguments(std::vector<std::string>{"source", "--preset-target"});
+            expectEquals(missingTarget.result.exitCode, 1);
+            expect(missingTarget.result.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax);
+
+            const auto invalidTarget = halionbridge::converters::parseCommonConverterArguments(
+                std::vector<std::string>{"source", "--preset-target", "HALion-Sonic"});
+            expectEquals(invalidTarget.result.exitCode, 1);
+            expect(invalidTarget.result.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax);
+
+            const auto duplicateTarget = halionbridge::converters::parseCommonConverterArguments(
+                std::vector<std::string>{"source", "--preset-target", "halion", "--preset-target", "halion-sonic"});
+            expectEquals(duplicateTarget.result.exitCode, 1);
+            expect(duplicateTarget.result.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax);
+
+            const auto sonicLayer = halionbridge::converters::parseCommonConverterArguments(
+                std::vector<std::string>{"source", "--preset-type", "layer", "--preset-target", "halion-sonic"});
+            expectEquals(sonicLayer.result.exitCode, 1);
+            expect(sonicLayer.result.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax);
+        }
+
         beginTest("Converter Registry - compiled converters are listed");
         {
             halionbridge::converters::ConverterRegistry registry;
@@ -1350,11 +1418,24 @@ class BridgeTests : public juce::UnitTest
                 expect(dx7Converter->visibility == halionbridge::converters::ConverterVisibility::listed);
                 expect(dx7Converter->sourcePathKind == halionbridge::converters::ConverterSourcePathKind::fileOrDirectory);
                 expect(dx7Converter->helpText != nullptr && dx7Converter->helpText().find("--continue-on-error") != std::string::npos);
+                expect(dx7Converter->helpText != nullptr &&
+                       dx7Converter->helpText().find("--preset-type <program|layer>") != std::string::npos);
+                expect(dx7Converter->helpText != nullptr &&
+                       dx7Converter->helpText().find("--preset-target <halion|halion-sonic>") != std::string::npos);
                 const auto recoveryArgs = std::vector<std::string>{juce::File::getCurrentWorkingDirectory().getFullPathName().toStdString(),
                                                                    "--continue-on-error"};
                 const auto recoveryValidation = dx7Converter->validateArguments(recoveryArgs);
                 expectEquals(recoveryValidation.exitCode, 0);
                 expect(recoveryValidation.errorKind == halionbridge::converters::ConverterArgumentErrorKind::none);
+
+                const auto invalidPresetType = dx7Converter->validateArguments(std::vector<std::string>{"--preset-type", "invalid"});
+                expectEquals(invalidPresetType.exitCode, 1);
+                expect(invalidPresetType.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax);
+
+                const auto duplicatePresetType =
+                    dx7Converter->validateArguments(std::vector<std::string>{"--preset-type", "program", "--preset-type", "layer"});
+                expectEquals(duplicatePresetType.exitCode, 1);
+                expect(duplicatePresetType.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax);
             }
 #endif
             expect(registry.find("missing") == nullptr);
@@ -1363,6 +1444,10 @@ class BridgeTests : public juce::UnitTest
                 expect(sfzConverter->validateArguments != nullptr);
                 expect(sfzConverter->visibility == halionbridge::converters::ConverterVisibility::listed);
                 expect(sfzConverter->sourcePathKind == halionbridge::converters::ConverterSourcePathKind::fileOrDirectory);
+                expect(sfzConverter->helpText != nullptr &&
+                       sfzConverter->helpText().find("--preset-type <program|layer>") != std::string::npos);
+                expect(sfzConverter->helpText != nullptr &&
+                       sfzConverter->helpText().find("--preset-target <halion|halion-sonic>") != std::string::npos);
                 const auto emptyArgs = std::vector<std::string>{};
                 const auto missingRequired = sfzConverter->validateArguments(emptyArgs);
                 expectEquals(missingRequired.exitCode, 1);
@@ -1376,6 +1461,10 @@ class BridgeTests : public juce::UnitTest
                 expectEquals(missingSource.exitCode, 1);
                 expect(missingSource.errorKind == halionbridge::converters::ConverterArgumentErrorKind::validation);
                 expect(!missingSource.diagnostics.empty());
+
+                const auto missingPresetType = sfzConverter->validateArguments(std::vector<std::string>{"--preset-type"});
+                expectEquals(missingPresetType.exitCode, 1);
+                expect(missingPresetType.errorKind == halionbridge::converters::ConverterArgumentErrorKind::syntax);
             }
 
             auto duplicate = halionbridge::converters::ConverterDefinition{
@@ -1453,7 +1542,9 @@ class BridgeTests : public juce::UnitTest
             expect(source.contains("return sample_index + 1"));
             expect(source.contains("function hb.set_amp_envelope_required"));
             expect(source.contains("function hb.append_sample_zone"));
+            expect(source.contains("function hb.save_preset"));
             expect(source.contains("function hb.save_layer_preset"));
+            expect(source.contains("local preset_plugin_code = { halion = \"H7\", [\"halion-sonic\"] = \"HS\" }"));
 
             juce::MemoryBlock data;
             expect(helperFile.loadFileAsData(data));
@@ -2629,6 +2720,9 @@ class BridgeTests : public juce::UnitTest
 
             auto firstOutput = cleanTempDirectory("halionbridge_sfz_fixture_one");
             auto secondOutput = cleanTempDirectory("halionbridge_sfz_fixture_two");
+            auto layerOutput = cleanTempDirectory("halionbridge_sfz_fixture_layer");
+            auto sonicOutput = cleanTempDirectory("halionbridge_sfz_fixture_sonic");
+            auto invalidSonicLayerOutput = cleanTempDirectory("halionbridge_sfz_fixture_invalid_sonic_layer");
 
             auto options = halionbridge::converters::sfz::ConversionOptions{};
             options.sourceDirectory = halionbridge::detail::toStdPath(fixtureDirectory);
@@ -2686,7 +2780,9 @@ class BridgeTests : public juce::UnitTest
             expect(firstLua.contains("cutoff = 4978"));
             expect(firstLua.contains("hb.create_layer(ctx, layerName)"));
             expect(firstLua.contains("hb.append_sample_zone(ctx, layer, region)"));
-            expect(firstLua.contains("hb.save_layer_preset(ctx, layer, outputFile)"));
+            expect(firstLua.contains("local presetType = \"program\""));
+            expect(firstLua.contains("local presetTarget = \"halion\""));
+            expect(firstLua.contains("hb.save_preset(ctx, layer, outputFile, presetType, presetTarget)"));
             expect(firstLua.contains("local progressInterval = 5"));
             expect(firstLua.contains("if i == 1 then"));
             expect(!firstLua.contains("((i - 1) % progressInterval)"));
@@ -2706,8 +2802,38 @@ class BridgeTests : public juce::UnitTest
             expect(velocityLua.contains("velocity_high = 63"));
             expect(velocityLua.contains("velocity_high = 127"));
 
+            options.outputDirectory = halionbridge::detail::toStdPath(layerOutput);
+            options.presetOutputType = halionbridge::converters::PresetOutputType::layer;
+            const auto layerResult = halionbridge::converters::sfz::convertDirectory(options);
+            expect(layerResult.succeeded);
+            const auto layerLua = layerOutput.getChildFile("000_000_synth_single_cycle_six_regions.lua").loadFileAsString();
+            expect(layerLua.contains("local presetType = \"layer\""));
+            expect(layerLua.contains("local presetTarget = \"halion\""));
+            expect(layerLua.contains("hb.save_preset(ctx, layer, outputFile, presetType, presetTarget)"));
+
+            options.outputDirectory = halionbridge::detail::toStdPath(sonicOutput);
+            options.presetOutputType = halionbridge::converters::PresetOutputType::program;
+            options.presetTarget = halionbridge::converters::PresetTarget::halionSonic;
+            const auto sonicResult = halionbridge::converters::sfz::convertDirectory(options);
+            expect(sonicResult.succeeded);
+            const auto sonicLua = sonicOutput.getChildFile("000_000_synth_single_cycle_six_regions.lua").loadFileAsString();
+            expect(sonicLua.contains("local presetType = \"program\""));
+            expect(sonicLua.contains("local presetTarget = \"halion-sonic\""));
+            expect(sonicLua.contains("hb.save_preset(ctx, layer, outputFile, presetType, presetTarget)"));
+
+            options.outputDirectory = halionbridge::detail::toStdPath(invalidSonicLayerOutput);
+            options.presetOutputType = halionbridge::converters::PresetOutputType::layer;
+            const auto invalidSonicLayerResult = halionbridge::converters::sfz::convertDirectory(options);
+            expect(!invalidSonicLayerResult.succeeded);
+            expect(!invalidSonicLayerOutput.getChildFile("halionbridge_build.lua").existsAsFile());
+            expect(std::ranges::any_of(invalidSonicLayerResult.diagnostics,
+                                       [](const auto& diagnostic) { return diagnostic.code == "preset-target-type"; }));
+
             firstOutput.deleteRecursively();
             secondOutput.deleteRecursively();
+            layerOutput.deleteRecursively();
+            sonicOutput.deleteRecursively();
+            invalidSonicLayerOutput.deleteRecursively();
         }
 #endif
 
@@ -2891,6 +3017,8 @@ class BridgeTests : public juce::UnitTest
             expect(builderLua.contains("ctx.output_dir"));
             expect(builderLua.contains("HALIONBRIDGE_OUTPUT_ROOT"));
             expect(builderLua.contains("outputPresetPath(path)"));
+            expect(builderLua.contains("function context.save_preset(path, object, plugin, attributes)"));
+            expect(builderLua.contains("savePreset(outputPresetPath(path), object, plugin or \"H7\", attributes)"));
             expect(builderLua.contains("setScriptExecTimeOut"));
             expect(builderLua.contains("Completed %d/%d files"));
             expect(builderLua.contains("Processing %d/%d: %s"));

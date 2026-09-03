@@ -99,7 +99,7 @@ ctx.sample_root
 ctx.output_dir
 ctx.module_name
 ctx.path_join(root, rel)
-ctx.save_preset(path, object, preset_type)
+ctx.save_preset(path, object, plugin, attributes)
 ctx.log(message)
 ctx.progress(done, total, message)
 ```
@@ -109,7 +109,7 @@ ctx.progress(done, total, message)
 - `ctx.output_dir`: output root for generated presets. It equals `ctx.script_dir` unless the user passed `--output-directory`.
 - `ctx.module_name`: normalized module name without `.lua`.
 - `ctx.path_join(root, rel)`: joins paths using forward slashes.
-- `ctx.save_preset(path, object, preset_type)`: wraps HALion `savePreset`; defaults `preset_type` to `"H7"`. When `--output-directory` is set, paths inside `ctx.script_dir` and relative paths are redirected to `ctx.output_dir` before calling HALion.
+- `ctx.save_preset(path, object, plugin, attributes)`: wraps HALion `savePreset`; defaults `plugin` to `"H7"` and forwards the optional fourth argument. Use `"H7"` for HALion and `"HS"` for HALion Sonic. Pass `"program"` as `attributes` to save a program preset, or pass HALion's supported MediaBay attribute table when custom metadata is required. Omit `attributes` to preserve HALion's layer-preset default. When `--output-directory` is set, paths inside `ctx.script_dir` and relative paths are redirected to `ctx.output_dir` before calling HALion.
 - `ctx.log(message)`: prints a build script log line and writes a host-readable progress marker. halionbridge treats build script log and progress lines as `info` output, so they remain visible at the default `HALIONBRIDGE_LOGLEVEL=info`. Very long messages are shortened in the marker filename; keep essential context near the start of the message.
 - `ctx.progress(done, total, message)`: writes the message text through the host-readable progress marker channel. The `done` and `total` fields are currently accepted for compatibility but not printed by the builder because synchronous HALion global/module execution makes numeric progress bursts misleading. Very long messages are shortened in the marker filename; keep essential context near the start of the message.
 

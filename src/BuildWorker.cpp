@@ -25,6 +25,7 @@ constexpr auto kRunResultValues = std::array{
     RunResult::timedOut,
     RunResult::cleanupFailed,
     RunResult::inspectionFailed,
+    RunResult::macroPageInjectionFailed,
 };
 
 } // namespace

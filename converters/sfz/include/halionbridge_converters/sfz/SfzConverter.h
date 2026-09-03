@@ -14,6 +14,8 @@ struct ConversionOptions
     std::filesystem::path sourceDirectory;
     std::filesystem::path outputDirectory;
     std::optional<std::string> name;
+    PresetOutputType presetOutputType = PresetOutputType::program;
+    PresetTarget presetTarget = PresetTarget::halion;
     const ConverterRunContext* context = nullptr;
     bool recursive = false;
     bool overwrite = false;

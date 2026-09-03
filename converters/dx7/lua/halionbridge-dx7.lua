@@ -6,6 +6,7 @@
 -- avoids regenerating or reparsing the source SysEx corpus.
 
 local dx7 = {}
+local preset_plugin_code = { halion = "H7", ["halion-sonic"] = "HS" }
 
 -- HALion's native DX7 importer rounds the low LFO range to hundredths of a
 -- hertz before storing it. Higher values use two simple linear branches.
@@ -408,6 +409,25 @@ local function load_template(ctx, voice)
 end
 
 function dx7.build_voice(ctx, voice)
+    local attributes = nil
+    if voice and voice.preset_type == "program" then
+        attributes = "program"
+    elseif voice and voice.preset_type ~= nil and voice.preset_type ~= "layer" then
+        return { ok = false, saved = 0, failed = 1, message = "DX7 preset type must be program or layer" }
+    end
+
+    -- Generated scripts store the public semantic target rather than HALion's
+    -- short savePreset code. Keeping the mapping here makes custom scripts
+    -- inspectable and prevents converter internals from leaking into the CLI.
+    local presetTarget = voice and voice.preset_target or "halion"
+    local pluginCode = preset_plugin_code[presetTarget]
+    if pluginCode == nil then
+        return { ok = false, saved = 0, failed = 1, message = "DX7 preset target must be halion or halion-sonic" }
+    end
+    if presetTarget == "halion-sonic" and attributes ~= "program" then
+        return { ok = false, saved = 0, failed = 1, message = "HALion Sonic output requires a program preset" }
+    end
+
     local preset, zone, loadError = load_template(ctx, voice)
     if not preset then return { ok = false, saved = 0, failed = 1, message = loadError } end
 
@@ -459,7 +479,7 @@ function dx7.build_voice(ctx, voice)
     if not ok then return { ok = false, saved = 0, failed = 1, message = err } end
 
     local outputPath = path_join(ctx, ctx.output_dir or ctx.script_dir, voice.output_file)
-    local okSave, saved = pcall(function() return ctx.save_preset(outputPath, preset, "H7") end)
+    local okSave, saved = pcall(function() return ctx.save_preset(outputPath, preset, pluginCode, attributes) end)
     if not okSave or not saved then
         return { ok = false, saved = 0, failed = 1, message = "Could not save " .. outputPath .. ": " .. tostring(saved) }
     end

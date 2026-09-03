@@ -51,12 +51,37 @@ enum class ConverterSourcePathKind
     fileOrDirectory,
 };
 
+enum class PresetOutputType
+{
+    program,
+    layer,
+};
+
+enum class PresetTarget
+{
+    halion,
+    halionSonic,
+};
+
 struct ConverterArgumentParseResult
 {
     int exitCode = 0;
     ConverterArgumentErrorKind errorKind = ConverterArgumentErrorKind::none;
     std::vector<Diagnostic> diagnostics;
 };
+
+struct CommonConverterArgumentParseResult
+{
+    PresetOutputType presetOutputType = PresetOutputType::program;
+    PresetTarget presetTarget = PresetTarget::halion;
+    std::vector<std::string> remainingArguments;
+    ConverterArgumentParseResult result;
+};
+
+CommonConverterArgumentParseResult parseCommonConverterArguments(std::span<const std::string> args);
+std::string commonConverterOptionsHelpText();
+std::string_view presetOutputTypeName(PresetOutputType type) noexcept;
+std::string_view presetTargetName(PresetTarget target) noexcept;
 
 struct ConverterRunContext
 {

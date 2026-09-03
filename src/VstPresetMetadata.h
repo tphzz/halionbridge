@@ -54,5 +54,9 @@ VstPresetMetadataResult runVstPresetMetadataCommand(const VstPresetMetadataOptio
 std::vector<std::string> vstPresetMetadataFieldNames();
 std::vector<VstPresetMetadataRecord> parseVstPresetMetadataCsv(std::string_view text, std::vector<std::string>& errors);
 std::string writeVstPresetMetadataCsv(std::span<const VstPresetMetadataRecord> records);
+std::filesystem::path makeVstPresetInfoReplacementTemporaryPath(const std::filesystem::path& destination);
+bool readVstPresetInfoChunk(const std::filesystem::path& preset, std::optional<std::string>& info, std::string& error);
+bool restoreVstPresetInfoChunk(const std::filesystem::path& sourcePreset, const std::filesystem::path& transformedPreset,
+                               std::string& error);
 
 } // namespace halionbridge::detail
