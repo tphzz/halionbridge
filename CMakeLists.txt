@@ -114,6 +114,7 @@ set(HALIONBRIDGE_LIBRARY_SOURCES
     src/PresetInspection.cpp
     src/PresetRemap.cpp
     src/VstPresetMetadata.cpp
+    src/VstPresetRender.cpp
     "${HALIONBRIDGE_BUILD_INFO_CPP}"
 )
 
@@ -177,6 +178,7 @@ function(configure_halionbridge_library target_name)
     target_link_libraries(${target_name} PRIVATE
         CLI11::CLI11
         juce::juce_audio_processors
+        juce::juce_audio_formats
         juce::juce_core
         juce::juce_cryptography
         spdlog::spdlog_header_only
@@ -290,12 +292,14 @@ if(HALIONBRIDGE_BUILD_TESTS)
         tests/MacroPageInjectionTests.cpp
         tests/Tests.cpp
         tests/VstPresetInspectionTests.cpp
+        tests/VstPresetRenderTests.cpp
     )
     enable_halionbridge_strict_warnings(
         tests/BuildManifestTests.cpp
         tests/MacroPageInjectionTests.cpp
         tests/Tests.cpp
         tests/VstPresetInspectionTests.cpp
+        tests/VstPresetRenderTests.cpp
     )
 
     if(HALIONBRIDGE_ENABLE_CONVERTER_DX7)
@@ -406,6 +410,22 @@ if(HALIONBRIDGE_BUILD_TESTS)
             add_halionbridge_cli_reject(halionbridge_cli_inspect_missing_required_no_log_prefix 1
                 "\\[[0-9][0-9][0-9][0-9]-"
                 inspect-vstpresets
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_render_help 0
+                "halionbridge render-vstpresets --input"
+                render-vstpresets --help
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_render_missing_required_header 1
+                "^halionbridge [^\r\n]+"
+                render-vstpresets
+            )
+            add_halionbridge_cli_expect(halionbridge_cli_render_missing_required_help 1
+                "halionbridge render-vstpresets --input"
+                render-vstpresets
+            )
+            add_halionbridge_cli_reject(halionbridge_cli_render_missing_required_no_log_prefix 1
+                "\\[[0-9][0-9][0-9][0-9]-"
+                render-vstpresets
             )
             add_halionbridge_cli_expect(halionbridge_cli_inject_macro_page_help 0
                 "halionbridge inject-macro-page --input-directory"

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -20,6 +21,7 @@ namespace
 
 constexpr const char* kBuildFileName = "halionbridge_build.lua";
 constexpr const char* kBuildWorkerArgument = "--halionbridge-build-worker";
+constexpr const char* kRenderWorkerArgument = "--halionbridge-render-worker";
 
 std::vector<std::string> toMutableArgs(std::span<const std::string> args)
 {
@@ -73,6 +75,26 @@ std::optional<int> parsePositiveInt(std::string_view text)
         return std::nullopt;
 
     return parsed;
+}
+
+std::optional<double> parseNonNegativeDouble(std::string_view text)
+{
+    const auto raw = trim(std::string(text));
+    if (raw.empty())
+        return std::nullopt;
+
+    try
+    {
+        std::size_t consumed = 0;
+        const auto value = std::stod(raw, &consumed);
+        if (consumed != raw.size() || !std::isfinite(value) || value < 0.0)
+            return std::nullopt;
+        return value;
+    }
+    catch (...)
+    {
+        return std::nullopt;
+    }
 }
 
 void addDiagnostic(std::vector<CliDiagnostic>& diagnostics, const CliDiagnosticLevel level, std::string message)
@@ -279,6 +301,49 @@ bool applyTimeoutOption(VstPresetMacroPageInjectionOptions& options, const std::
     return true;
 }
 
+bool applyTimeoutOption(VstPresetRenderOptions& options, const std::vector<std::string>& values, const bool noTimeoutRequested,
+                        std::vector<CliDiagnostic>& diagnostics)
+{
+    auto noTimeoutSeen = noTimeoutRequested;
+    auto positiveTimeoutSeen = false;
+
+    if (noTimeoutSeen)
+        options.timeoutSeconds = 0;
+
+    for (const auto& value : values)
+    {
+        const auto parsed = parseNonNegativeInt(value);
+        if (!parsed)
+        {
+            addError(diagnostics, "--timeout-seconds must be a non-negative integer.");
+            return false;
+        }
+
+        if (*parsed == 0)
+        {
+            if (positiveTimeoutSeen)
+            {
+                addError(diagnostics, "--timeout-seconds 0 cannot be combined with a positive --timeout-seconds value.");
+                return false;
+            }
+            noTimeoutSeen = true;
+        }
+        else
+        {
+            if (noTimeoutSeen)
+            {
+                addError(diagnostics, "--timeout-seconds cannot be combined with --no-timeout or --timeout-seconds 0.");
+                return false;
+            }
+            positiveTimeoutSeen = true;
+        }
+
+        options.timeoutSeconds = *parsed;
+    }
+
+    return true;
+}
+
 bool parseCli11App(CLI::App& app, std::span<const std::string> args, std::vector<CliDiagnostic>& diagnostics)
 {
     auto mutableArgs = toMutableArgs(args);
@@ -305,6 +370,8 @@ CliCommandKind classifyCliCommand(std::span<const std::string> args) noexcept
     const auto& command = args.front();
     if (command == "--halionbridge-build-worker")
         return CliCommandKind::buildWorker;
+    if (command == kRenderWorkerArgument)
+        return CliCommandKind::renderVstPresetsWorker;
     if (command == "--halionbridge-scan-plugin")
         return CliCommandKind::scanPluginWorker;
     if (command == "--help" || command == "-h")
@@ -323,6 +390,8 @@ CliCommandKind classifyCliCommand(std::span<const std::string> args) noexcept
         return CliCommandKind::inspectVstPresets;
     if (command == "inject-macro-page")
         return CliCommandKind::injectMacroPage;
+    if (command == "render-vstpresets")
+        return CliCommandKind::renderVstPresets;
     if (command == "vstpreset-metadata")
         return CliCommandKind::vstPresetMetadata;
 
@@ -745,6 +814,253 @@ VstPresetMacroPageInjectionOptionsParseResult parseVstPresetMacroPageInjectionOp
 std::optional<VstPresetMacroPageInjectionOptions> parseVstPresetMacroPageInjectionOptions(std::span<const std::string> args)
 {
     return parseVstPresetMacroPageInjectionOptionsDetailed(args).options;
+}
+
+VstPresetRenderOptionsParseResult parseVstPresetRenderOptionsDetailed(std::span<const std::string> args)
+{
+    auto result = VstPresetRenderOptionsParseResult{};
+    auto options = VstPresetRenderOptions{};
+    auto inputText = std::string{};
+    auto midiTexts = std::vector<std::string>{};
+    auto reportText = std::string{};
+    auto pluginText = std::string{};
+    auto sampleRateText = std::string{};
+    auto bitDepthText = std::string{};
+    auto tailSecondsText = std::string{};
+    auto settleText = std::string{};
+    auto chunkSizeText = std::string{};
+    auto jobsText = std::string{};
+    auto timeoutValues = std::vector<std::string>{};
+    auto noTimeoutRequested = false;
+
+    CLI::App app{"halionbridge render-vstpresets"};
+    app.set_help_flag();
+    app.add_option("--input", inputText);
+    app.add_option("--midi", midiTexts);
+    app.add_option("--report-jsonl", reportText);
+    app.add_option("--plugin", pluginText);
+    app.add_option("--sample-rate", sampleRateText);
+    app.add_option("--bit-depth", bitDepthText);
+    app.add_option("--tail-seconds", tailSecondsText);
+    app.add_option("--preset-settle-ms", settleText);
+    app.add_option("--chunk-size", chunkSizeText);
+    app.add_option("--jobs", jobsText);
+    app.add_option("--timeout-seconds", timeoutValues)->expected(1);
+    app.add_flag("--recursive", options.recursive);
+    app.add_flag("--resume", options.resume);
+    app.add_flag("--overwrite", options.overwrite);
+    app.add_flag("--fail-fast", options.failFast);
+    app.add_flag("--skip-disk-space-check", options.skipDiskSpaceCheck);
+    app.add_flag("--no-timeout", noTimeoutRequested);
+    app.add_flag("--gui", options.showGui);
+    app.add_flag("--force-scan", options.forceScan);
+
+    if (!parseCli11App(app, args, result.diagnostics))
+    {
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+    if (app.remaining_size() > 0)
+    {
+        addError(result.diagnostics, "render-vstpresets uses named options. Unexpected positional argument: " + app.remaining().front());
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+    if (inputText.empty() || midiTexts.empty())
+    {
+        addError(result.diagnostics, "render-vstpresets requires --input and at least one --midi path.");
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+    if (options.resume && options.overwrite)
+    {
+        addError(result.diagnostics, "--resume and --overwrite cannot be combined.");
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+
+    const auto input = normalizeCliPath(toJuceString(std::string_view(inputText)));
+    if (!input.existsAsFile() && !input.isDirectory())
+    {
+        addError(result.diagnostics, "Render input path does not exist at " + input.getFullPathName().toStdString());
+        result.errorKind = CliParseErrorKind::validation;
+        return result;
+    }
+    if (input.existsAsFile() && input.getFileExtension().toLowerCase() != ".vstpreset")
+    {
+        addError(result.diagnostics, "Render input file must have a .vstpreset extension: " + input.getFullPathName().toStdString());
+        result.errorKind = CliParseErrorKind::validation;
+        return result;
+    }
+    options.inputPath = toStdPath(input);
+
+    for (const auto& midiText : midiTexts)
+    {
+        const auto midiInput = normalizeCliPath(toJuceString(std::string_view(midiText)));
+        if (!midiInput.existsAsFile() && !midiInput.isDirectory())
+        {
+            addError(result.diagnostics, "MIDI input path does not exist at " + midiInput.getFullPathName().toStdString());
+            result.errorKind = CliParseErrorKind::validation;
+            return result;
+        }
+        if (midiInput.existsAsFile())
+        {
+            const auto extension = midiInput.getFileExtension().toLowerCase();
+            if (extension != ".mid" && extension != ".midi")
+            {
+                addError(result.diagnostics,
+                         "MIDI input file must have a .mid or .midi extension: " + midiInput.getFullPathName().toStdString());
+                result.errorKind = CliParseErrorKind::validation;
+                return result;
+            }
+        }
+        options.midiInputs.push_back(toStdPath(midiInput));
+    }
+
+    if (!reportText.empty())
+    {
+        const auto report = normalizeCliPath(toJuceString(std::string_view(reportText)));
+        if (report.getFileExtension().toLowerCase() != ".jsonl")
+        {
+            addError(result.diagnostics, "--report-jsonl must name a .jsonl file.");
+            result.errorKind = CliParseErrorKind::validation;
+            return result;
+        }
+        options.reportJsonl = toStdPath(report);
+    }
+
+    if (!pluginText.empty())
+    {
+        const auto plugin = normalizeCliPath(toJuceString(std::string_view(pluginText)));
+        if (!plugin.existsAsFile() && !plugin.isDirectory())
+        {
+            addError(result.diagnostics, "Override plugin path does not exist at " + plugin.getFullPathName().toStdString());
+            result.errorKind = CliParseErrorKind::validation;
+            return result;
+        }
+        options.pluginPathOverride = toStdPath(plugin);
+    }
+
+    const auto parsePositive = [&](const std::string& text, const char* flag, int& destination)
+    {
+        if (text.empty())
+            return true;
+        const auto value = parsePositiveInt(text);
+        if (!value)
+        {
+            addError(result.diagnostics, std::string(flag) + " must be a positive integer.");
+            return false;
+        }
+        destination = *value;
+        return true;
+    };
+
+    if (!parsePositive(sampleRateText, "--sample-rate", options.sampleRate) ||
+        !parsePositive(chunkSizeText, "--chunk-size", options.chunkSize) || !parsePositive(jobsText, "--jobs", options.jobs))
+    {
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+    if (!bitDepthText.empty())
+    {
+        const auto bitDepth = parsePositiveInt(bitDepthText);
+        if (!bitDepth || (*bitDepth != 16 && *bitDepth != 24 && *bitDepth != 32))
+        {
+            addError(result.diagnostics, "--bit-depth must be 16, 24, or 32.");
+            result.errorKind = CliParseErrorKind::syntax;
+            return result;
+        }
+        options.bitDepth = *bitDepth;
+    }
+    if (!tailSecondsText.empty())
+    {
+        const auto tail = parseNonNegativeDouble(tailSecondsText);
+        if (!tail)
+        {
+            addError(result.diagnostics, "--tail-seconds must be a finite non-negative number.");
+            result.errorKind = CliParseErrorKind::syntax;
+            return result;
+        }
+        options.tailSeconds = *tail;
+    }
+    if (!settleText.empty())
+    {
+        const auto settle = parseNonNegativeInt(settleText);
+        if (!settle)
+        {
+            addError(result.diagnostics, "--preset-settle-ms must be a non-negative integer.");
+            result.errorKind = CliParseErrorKind::syntax;
+            return result;
+        }
+        options.presetSettleMilliseconds = *settle;
+    }
+    if (!applyTimeoutOption(options, timeoutValues, noTimeoutRequested, result.diagnostics))
+    {
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+    if (options.showGui && options.jobs != 1)
+    {
+        addError(result.diagnostics, "--gui requires --jobs 1.");
+        result.errorKind = CliParseErrorKind::syntax;
+        return result;
+    }
+
+    result.options = std::move(options);
+    return result;
+}
+
+std::optional<VstPresetRenderOptions> parseVstPresetRenderOptions(std::span<const std::string> args)
+{
+    return parseVstPresetRenderOptionsDetailed(args).options;
+}
+
+std::optional<VstPresetRenderOptions> parseVstPresetRenderWorkerOptions(std::span<const std::string> args)
+{
+    if (args.empty() || args.front() != kRenderWorkerArgument)
+    {
+        log::error("{} must be the first render-worker argument.", kRenderWorkerArgument);
+        return std::nullopt;
+    }
+
+    auto manifestText = std::string{};
+    auto receiptText = std::string{};
+    auto pluginText = std::string{};
+    auto options = VstPresetRenderOptions{};
+    auto diagnostics = std::vector<CliDiagnostic>{};
+    CLI::App app{"halionbridge internal render worker"};
+    app.set_help_flag();
+    app.add_option("--worker-manifest", manifestText);
+    app.add_option("--worker-receipt", receiptText);
+    app.add_option("--plugin", pluginText);
+    app.add_flag("--gui", options.showGui);
+    app.add_flag("--force-scan", options.forceScan);
+
+    if (!parseCli11App(app, args.subspan(1), diagnostics) || app.remaining_size() > 0 || manifestText.empty() || receiptText.empty())
+    {
+        log::error("Invalid internal VSTPreset render-worker arguments.");
+        return std::nullopt;
+    }
+
+    const auto manifest = normalizeCliPath(toJuceString(std::string_view(manifestText)));
+    const auto receipt = normalizeCliPath(toJuceString(std::string_view(receiptText)));
+    if (!manifest.existsAsFile() || !receipt.getParentDirectory().isDirectory())
+    {
+        log::error("Render-worker manifest is missing or the receipt parent directory does not exist.");
+        return std::nullopt;
+    }
+    if (!pluginText.empty())
+    {
+        const auto plugin = normalizeCliPath(toJuceString(std::string_view(pluginText)));
+        if (!plugin.existsAsFile() && !plugin.isDirectory())
+        {
+            log::error("Render-worker plugin path does not exist: {}", plugin.getFullPathName().toStdString());
+            return std::nullopt;
+        }
+        options.pluginPathOverride = toStdPath(plugin);
+    }
+    VstPresetRenderOptionsAccess::setWorkerFiles(options, toStdPath(manifest), toStdPath(receipt));
+    return options;
 }
 
 std::optional<AppOptions> parseBuildWorkerOptions(std::span<const std::string> args)

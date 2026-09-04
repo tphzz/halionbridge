@@ -15,6 +15,7 @@
 #include "PresetRemap.h"
 #include "ProgressMarkers.h"
 #include "VstPresetMetadata.h"
+#include "VstPresetRender.h"
 #include <juce_core/juce_core.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_processors_headless/format_types/VST3_SDK/pluginterfaces/base/funknown.h>
@@ -25,13 +26,16 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <future>
 #include <limits>
 #include <memory>
 #include <set>
 #include <span>
+#include <unordered_set>
 #include <thread>
 #include <utility>
 
@@ -1332,6 +1336,320 @@ std::optional<int> readBuildWorkerResultFile(const juce::File& resultFile)
 
     return static_cast<int>(value);
 }
+
+std::filesystem::path defaultVstPresetRenderReportPath(const VstPresetRenderOptions& options)
+{
+    auto error = std::error_code{};
+    if (std::filesystem::is_directory(detail::toFilesystemAccessPath(options.inputPath), error) && !error)
+        return options.inputPath / "halionbridge-render-report.jsonl";
+    return options.inputPath.parent_path() / (options.inputPath.stem().string() + ".render-report.jsonl");
+}
+
+std::filesystem::path vstPresetRenderManifestPath(const std::filesystem::path& reportPath)
+{
+    auto result = reportPath;
+    result += ".manifest.json";
+    return result;
+}
+
+juce::var makeVstPresetRenderManifest(const VstPresetRenderOptions& options, const detail::VstPresetRenderSourceCollection& presets,
+                                      const detail::MidiRenderCollection& midiFiles)
+{
+    auto root = juce::var(new juce::DynamicObject());
+    auto* object = root.getDynamicObject();
+    object->setProperty("format", "halionbridge-vstpreset-render");
+    object->setProperty("format_version", 1);
+    object->setProperty("render_revision", 1);
+    object->setProperty("input", detail::toJuceString(options.inputPath));
+    object->setProperty("recursive", options.recursive);
+    object->setProperty("sample_rate", options.sampleRate);
+    object->setProperty("bit_depth", options.bitDepth);
+    object->setProperty("tail_seconds", options.tailSeconds);
+    object->setProperty("preset_settle_ms", options.presetSettleMilliseconds);
+    object->setProperty("plugin", detail::toJuceString(options.pluginPathOverride.value_or(Bridge::getDefaultHalionPluginPath())));
+
+    auto presetArray = juce::Array<juce::var>{};
+    for (const auto& preset : presets.files)
+    {
+        auto entry = juce::var(new juce::DynamicObject());
+        entry.getDynamicObject()->setProperty("path", detail::toJuceString(preset.sourcePath));
+        entry.getDynamicObject()->setProperty("sha256", juce::String(preset.sha256));
+        presetArray.add(std::move(entry));
+    }
+    object->setProperty("presets", std::move(presetArray));
+
+    auto midiArray = juce::Array<juce::var>{};
+    for (const auto& midi : midiFiles.files)
+    {
+        auto entry = juce::var(new juce::DynamicObject());
+        entry.getDynamicObject()->setProperty("path", detail::toJuceString(midi.sourcePath));
+        entry.getDynamicObject()->setProperty("sha256", juce::String(midi.sha256));
+        midiArray.add(std::move(entry));
+    }
+    object->setProperty("midi", std::move(midiArray));
+    return root;
+}
+
+bool writeTextFileAtomically(const std::filesystem::path& path, const juce::String& text, std::string& error)
+{
+    error.clear();
+    const auto file = detail::toJuceFile(detail::toFilesystemAccessPath(path));
+    if (!file.getParentDirectory().isDirectory())
+    {
+        error = "Output parent directory does not exist: " + path.parent_path().string();
+        return false;
+    }
+    auto temporary = juce::TemporaryFile(file);
+    if (!temporary.getFile().replaceWithText(text) || !temporary.overwriteTargetFileWithTemporary())
+    {
+        error = "Could not atomically write file: " + path.string();
+        return false;
+    }
+    return true;
+}
+
+bool appendVstPresetRenderReportRecord(juce::FileOutputStream& stream, const juce::var& record, std::string& error)
+{
+    const auto line = juce::JSON::toString(record, true) + "\n";
+    if (!stream.writeText(line, false, false, "\n"))
+    {
+        error = "Could not durably append the VSTPreset render report.";
+        return false;
+    }
+    stream.flush();
+    if (stream.getStatus().failed())
+    {
+        error = "Could not durably flush the VSTPreset render report.";
+        return false;
+    }
+    return true;
+}
+
+std::unordered_set<std::uint64_t> readSuccessfulVstPresetRenderPairs(const std::filesystem::path& reportPath,
+                                                                     std::vector<std::string>& errors)
+{
+    auto result = std::unordered_set<std::uint64_t>{};
+    auto input = detail::toJuceFile(detail::toFilesystemAccessPath(reportPath)).createInputStream();
+    if (input == nullptr || !input->openedOk())
+    {
+        errors.push_back("Could not read existing VSTPreset render report: " + reportPath.string());
+        return result;
+    }
+    auto lineNumber = std::uint64_t{};
+    while (!input->isExhausted())
+    {
+        const auto line = input->readNextLine();
+        ++lineNumber;
+        if (line.trim().isEmpty())
+            continue;
+        auto value = juce::var{};
+        if (juce::JSON::parse(line, value).failed())
+        {
+            errors.push_back("Invalid JSON on render report line " + std::to_string(lineNumber) + ".");
+            continue;
+        }
+        const auto* object = value.getDynamicObject();
+        if (object == nullptr || object->getProperty("record").toString() != "render" ||
+            object->getProperty("status").toString() != "success")
+            continue;
+        const auto rawIndex = static_cast<juce::int64>(object->getProperty("pair_index"));
+        if (rawIndex < 0)
+            errors.push_back("Invalid pair index on render report line " + std::to_string(lineNumber) + ".");
+        else
+            result.insert(static_cast<std::uint64_t>(rawIndex));
+    }
+    return result;
+}
+
+juce::var makeVstPresetRenderReportRecord(const std::uint64_t pairIndex, const detail::VstPresetRenderSource& preset,
+                                          const detail::MidiRenderSequence& midi, const std::filesystem::path& output,
+                                          const detail::VstPresetAudioRenderResult& render)
+{
+    auto value = juce::var(new juce::DynamicObject());
+    auto* object = value.getDynamicObject();
+    object->setProperty("record", "render");
+    object->setProperty("pair_index", static_cast<juce::int64>(pairIndex));
+    object->setProperty("status", render.succeeded ? "success" : "failed");
+    object->setProperty("preset", detail::toJuceString(preset.sourcePath));
+    object->setProperty("preset_sha256", juce::String(preset.sha256));
+    object->setProperty("midi", detail::toJuceString(midi.sourcePath));
+    object->setProperty("midi_sha256", juce::String(midi.sha256));
+    object->setProperty("output", detail::toJuceString(output));
+    if (render.succeeded)
+    {
+        object->setProperty("sample_count", static_cast<juce::int64>(render.metrics.sampleCount));
+        object->setProperty("latency_samples", render.metrics.latencySamples);
+        object->setProperty("peak", render.metrics.peak);
+        object->setProperty("rms", render.metrics.rms);
+        object->setProperty("silent", render.metrics.silent);
+        object->setProperty("clipped", render.metrics.clipped);
+    }
+    else
+    {
+        object->setProperty("error", juce::String(render.error));
+    }
+    return value;
+}
+
+struct VstPresetRenderTask
+{
+    std::uint64_t pairIndex = 0;
+    detail::VstPresetRenderSource preset;
+    detail::MidiRenderSequence midi;
+    std::filesystem::path output;
+};
+
+struct VstPresetRenderWorkerChunk
+{
+    VstPresetRenderOptions options;
+    std::vector<VstPresetRenderTask> tasks;
+};
+
+juce::var makeVstPresetRenderWorkerManifest(const VstPresetRenderOptions& options, std::span<const VstPresetRenderTask> tasks)
+{
+    auto root = juce::var(new juce::DynamicObject());
+    auto* object = root.getDynamicObject();
+    object->setProperty("format", "halionbridge-vstpreset-render-worker");
+    object->setProperty("format_version", 1);
+    object->setProperty("sample_rate", options.sampleRate);
+    object->setProperty("bit_depth", options.bitDepth);
+    object->setProperty("tail_seconds", options.tailSeconds);
+    object->setProperty("preset_settle_ms", options.presetSettleMilliseconds);
+    object->setProperty("overwrite", options.resume || options.overwrite);
+    object->setProperty("fail_fast", options.failFast);
+
+    auto taskArray = juce::Array<juce::var>{};
+    for (const auto& task : tasks)
+    {
+        auto entry = juce::var(new juce::DynamicObject());
+        auto* taskObject = entry.getDynamicObject();
+        taskObject->setProperty("pair_index", static_cast<juce::int64>(task.pairIndex));
+        taskObject->setProperty("preset", detail::toJuceString(task.preset.sourcePath));
+        taskObject->setProperty("preset_sha256", juce::String(task.preset.sha256));
+        taskObject->setProperty("midi", detail::toJuceString(task.midi.sourcePath));
+        taskObject->setProperty("midi_sha256", juce::String(task.midi.sha256));
+        taskObject->setProperty("output", detail::toJuceString(task.output));
+        taskArray.add(std::move(entry));
+    }
+    object->setProperty("tasks", std::move(taskArray));
+    return root;
+}
+
+std::optional<VstPresetRenderWorkerChunk> readVstPresetRenderWorkerManifest(const std::filesystem::path& path, std::string& error)
+{
+    error.clear();
+    const auto file = detail::toJuceFile(detail::toFilesystemAccessPath(path));
+    auto root = juce::var{};
+    if (!file.existsAsFile() || juce::JSON::parse(file.loadFileAsString(), root).failed())
+    {
+        error = "Could not read VSTPreset render-worker manifest: " + path.string();
+        return std::nullopt;
+    }
+    const auto* object = root.getDynamicObject();
+    if (object == nullptr || object->getProperty("format").toString() != "halionbridge-vstpreset-render-worker" ||
+        static_cast<int>(object->getProperty("format_version")) != 1)
+    {
+        error = "Unsupported VSTPreset render-worker manifest format.";
+        return std::nullopt;
+    }
+
+    auto result = VstPresetRenderWorkerChunk{};
+    result.options.sampleRate = static_cast<int>(object->getProperty("sample_rate"));
+    result.options.bitDepth = static_cast<int>(object->getProperty("bit_depth"));
+    result.options.tailSeconds = static_cast<double>(object->getProperty("tail_seconds"));
+    result.options.presetSettleMilliseconds = static_cast<int>(object->getProperty("preset_settle_ms"));
+    result.options.overwrite = static_cast<bool>(object->getProperty("overwrite"));
+    result.options.failFast = static_cast<bool>(object->getProperty("fail_fast"));
+    if (result.options.sampleRate <= 0 ||
+        (result.options.bitDepth != 16 && result.options.bitDepth != 24 && result.options.bitDepth != 32) ||
+        !std::isfinite(result.options.tailSeconds) || result.options.tailSeconds < 0.0 || result.options.presetSettleMilliseconds < 0)
+    {
+        error = "VSTPreset render-worker manifest contains invalid audio settings.";
+        return std::nullopt;
+    }
+
+    const auto* tasks = object->getProperty("tasks").getArray();
+    if (tasks == nullptr || tasks->isEmpty())
+    {
+        error = "VSTPreset render-worker manifest contains no tasks.";
+        return std::nullopt;
+    }
+    auto midiCache = std::map<std::string, detail::MidiRenderSequence>{};
+    for (const auto& value : *tasks)
+    {
+        const auto* taskObject = value.getDynamicObject();
+        if (taskObject == nullptr)
+        {
+            error = "VSTPreset render-worker manifest contains a malformed task.";
+            return std::nullopt;
+        }
+        const auto rawIndex = static_cast<juce::int64>(taskObject->getProperty("pair_index"));
+        const auto presetPath = detail::toStdPath(taskObject->getProperty("preset").toString());
+        const auto presetHash = taskObject->getProperty("preset_sha256").toString().toStdString();
+        const auto midiPath = detail::toStdPath(taskObject->getProperty("midi").toString());
+        const auto midiHash = taskObject->getProperty("midi_sha256").toString().toStdString();
+        const auto outputPath = detail::toStdPath(taskObject->getProperty("output").toString());
+        if (rawIndex < 0 || presetPath.empty() || presetHash.size() != 64 || midiPath.empty() || midiHash.size() != 64 ||
+            outputPath.empty())
+        {
+            error = "VSTPreset render-worker manifest task has invalid required fields.";
+            return std::nullopt;
+        }
+
+        auto hashError = std::string{};
+        const auto currentPresetHash = detail::sha256RenderInputFile(presetPath, hashError);
+        if (!currentPresetHash || *currentPresetHash != presetHash)
+        {
+            error = currentPresetHash ? "Preset changed after render preflight: " + presetPath.string() : hashError;
+            return std::nullopt;
+        }
+        const auto midiKey = midiPath.lexically_normal().generic_string();
+        if (!midiCache.contains(midiKey))
+        {
+            auto midi = detail::parseMidiRenderSequence(midiPath, hashError);
+            if (!midi || midi->sha256 != midiHash)
+            {
+                error = midi ? "MIDI file changed after render preflight: " + midiPath.string() : hashError;
+                return std::nullopt;
+            }
+            midiCache.emplace(midiKey, std::move(*midi));
+        }
+        auto preset = detail::VstPresetRenderSource{presetPath, presetPath.filename(), presetHash};
+        auto task = VstPresetRenderTask{static_cast<std::uint64_t>(rawIndex), std::move(preset), midiCache.at(midiKey), outputPath};
+        const auto expectedOutput = detail::makeVstPresetRenderOutputPath(task.preset, task.midi, hashError);
+        if (expectedOutput.lexically_normal() != task.output.lexically_normal())
+        {
+            error = "Render-worker output path does not match the deterministic sibling naming contract.";
+            return std::nullopt;
+        }
+        result.tasks.push_back(std::move(task));
+    }
+    return result;
+}
+
+juce::StringArray makeVstPresetRenderWorkerCommand(const VstPresetRenderOptions& options, const std::filesystem::path& manifest,
+                                                   const std::filesystem::path& receipt)
+{
+    auto command = juce::StringArray{};
+    if (!options.executableFile)
+        return command;
+    command.add(detail::toJuceString(*options.executableFile));
+    command.add("--halionbridge-render-worker");
+    command.add("--worker-manifest");
+    command.add(detail::toJuceString(manifest));
+    command.add("--worker-receipt");
+    command.add(detail::toJuceString(receipt));
+    if (options.pluginPathOverride)
+    {
+        command.add("--plugin");
+        command.add(detail::toJuceString(*options.pluginPathOverride));
+    }
+    if (options.showGui)
+        command.add("--gui");
+    if (options.forceScan)
+        command.add("--force-scan");
+    return command;
+}
 } // namespace
 
 void requestStop() noexcept
@@ -1362,7 +1680,10 @@ struct Bridge::Impl
     RunResult runPresetInspectionInvocation(const VstPresetInspectionOptions& options,
                                             const detail::VstPresetInspectionRuntimeConfig& config);
     RunResult injectMacroPageDetailed(const VstPresetMacroPageInjectionOptions& options);
-    bool loadPlugin(const juce::File& pluginFile, const AppOptions& options);
+    RunResult renderVstPresetsDetailed(const VstPresetRenderOptions& options);
+    RunResult runVstPresetRenderTasks(const VstPresetRenderOptions& options, std::span<const VstPresetRenderTask> tasks,
+                                      juce::FileOutputStream& reportStream, std::uint64_t totalPairs);
+    bool loadPlugin(const juce::File& pluginFile, const AppOptions& options, double sampleRate = kSampleRate, int blockSize = kBlockSize);
     bool loadPlugin(const juce::File& pluginFile, const VstPresetRemapOptions& options);
     bool applyVstPresetData(const juce::MemoryBlock& presetData);
     RunResult runProcessingLoop(const AppOptions& options, const juce::File& builderRoot);
@@ -1398,6 +1719,22 @@ std::optional<VstPresetInspectionOptions> Bridge::parseVstPresetInspectionArgume
 std::optional<VstPresetMacroPageInjectionOptions> Bridge::parseVstPresetMacroPageInjectionArguments(const std::vector<std::string>& args)
 {
     return detail::parseVstPresetMacroPageInjectionOptions(args);
+}
+
+AppOptions toRuntimeOptions(const VstPresetRenderOptions& options)
+{
+    AppOptions runtimeOptions;
+    runtimeOptions.pluginPathOverride = options.pluginPathOverride;
+    runtimeOptions.executableFile = options.executableFile;
+    runtimeOptions.timeoutSeconds = options.timeoutSeconds;
+    runtimeOptions.showGui = options.showGui;
+    runtimeOptions.forceScan = options.forceScan;
+    return runtimeOptions;
+}
+
+std::optional<VstPresetRenderOptions> Bridge::parseVstPresetRenderArguments(const std::vector<std::string>& args)
+{
+    return detail::parseVstPresetRenderOptions(args);
 }
 
 std::optional<std::filesystem::path> Bridge::findHalionPlugin(const std::optional<std::filesystem::path>& pluginPathOverride)
@@ -1923,6 +2260,812 @@ RunResult Bridge::injectMacroPageDetailed(const VstPresetMacroPageInjectionOptio
         return RunResult::invalidBridge;
 
     return impl->injectMacroPageDetailed(options);
+}
+
+RunResult Bridge::renderVstPresetsDetailed(const VstPresetRenderOptions& options)
+{
+    if (impl == nullptr)
+        return RunResult::invalidBridge;
+
+    return impl->renderVstPresetsDetailed(options);
+}
+
+RunResult Bridge::Impl::renderVstPresetsDetailed(const VstPresetRenderOptions& options)
+{
+    setCrashDiagnosticPhase("halionbridge::renderVstPresets startup");
+
+    if (detail::VstPresetRenderOptionsAccess::isWorkerMode(options))
+    {
+        const auto& manifestPath = detail::VstPresetRenderOptionsAccess::workerManifest(options);
+        const auto& receiptPath = detail::VstPresetRenderOptionsAccess::workerReceipt(options);
+        if (!manifestPath || !receiptPath)
+        {
+            log::error("Internal render worker is missing its manifest or receipt path.");
+            return RunResult::invalidOptions;
+        }
+        auto workerError = std::string{};
+        auto chunk = readVstPresetRenderWorkerManifest(*manifestPath, workerError);
+        if (!chunk)
+        {
+            log::error("{}", workerError);
+            return RunResult::invalidOptions;
+        }
+        chunk->options.pluginPathOverride = options.pluginPathOverride;
+        chunk->options.executableFile = options.executableFile;
+        chunk->options.showGui = options.showGui;
+        chunk->options.forceScan = options.forceScan;
+
+        const auto receiptFile = detail::toJuceFile(detail::toFilesystemAccessPath(*receiptPath));
+        if (receiptFile.exists() || !receiptFile.getParentDirectory().isDirectory())
+        {
+            log::error("Render-worker receipt must be a new file in an existing directory: {}", receiptPath->string());
+            return RunResult::invalidOptions;
+        }
+        auto receipt = juce::FileOutputStream(receiptFile);
+        if (!receipt.openedOk())
+        {
+            log::error("Could not create render-worker receipt: {}", receiptPath->string());
+            return RunResult::runtimeSetupFailed;
+        }
+        return runVstPresetRenderTasks(chunk->options, chunk->tasks, receipt, chunk->tasks.size());
+    }
+
+    log::info("Starting halionbridge VSTPreset MIDI rendering {}...", getBuildInfo().versionString);
+
+    if (options.sampleRate <= 0 || (options.bitDepth != 16 && options.bitDepth != 24 && options.bitDepth != 32) ||
+        !std::isfinite(options.tailSeconds) || options.tailSeconds < 0.0 || options.presetSettleMilliseconds < 0 ||
+        options.chunkSize <= 0 || options.jobs <= 0 || (options.showGui && options.jobs != 1) || (options.resume && options.overwrite))
+    {
+        log::error("Invalid VSTPreset render options.");
+        return RunResult::invalidOptions;
+    }
+
+    auto presets = detail::collectVstPresetRenderSources(options.inputPath, options.recursive);
+    auto midiFiles = detail::collectMidiRenderSequences(options.midiInputs);
+    for (const auto& error : presets.errors)
+        log::error("{}", error);
+    for (const auto& error : midiFiles.errors)
+        log::error("{}", error);
+    if (!presets.errors.empty() || !midiFiles.errors.empty())
+        return RunResult::invalidOptions;
+
+    if (midiFiles.files.size() > std::numeric_limits<std::uint64_t>::max() / presets.files.size())
+    {
+        log::error("The preset/MIDI render matrix is too large to index safely.");
+        return RunResult::invalidOptions;
+    }
+    const auto totalPairs = static_cast<std::uint64_t>(presets.files.size()) * midiFiles.files.size();
+    const auto reportPath = options.reportJsonl.value_or(defaultVstPresetRenderReportPath(options));
+    const auto manifestPath = vstPresetRenderManifestPath(reportPath);
+    const auto reportFile = detail::toJuceFile(detail::toFilesystemAccessPath(reportPath));
+    const auto manifestFile = detail::toJuceFile(detail::toFilesystemAccessPath(manifestPath));
+    if (!reportFile.getParentDirectory().isDirectory())
+    {
+        log::error("Render report parent directory does not exist: {}", reportPath.parent_path().string());
+        return RunResult::invalidOptions;
+    }
+
+    const auto validateControlFile = [](const std::filesystem::path& path, const bool mayExist, std::string& error)
+    {
+        auto filesystemError = std::error_code{};
+        const auto status = std::filesystem::symlink_status(detail::toFilesystemAccessPath(path), filesystemError);
+        if (status.type() == std::filesystem::file_type::not_found ||
+            filesystemError == std::make_error_code(std::errc::no_such_file_or_directory))
+            return true;
+        if (filesystemError || std::filesystem::is_symlink(status) || !std::filesystem::is_regular_file(status))
+        {
+            error = "Render control path is not a regular non-symlink file: " + path.string();
+            return false;
+        }
+        if (!mayExist)
+        {
+            error = "Render control file already exists; use --resume or --overwrite: " + path.string();
+            return false;
+        }
+        return true;
+    };
+
+    auto error = std::string{};
+    if (!validateControlFile(reportPath, options.resume || options.overwrite, error) ||
+        !validateControlFile(manifestPath, options.resume || options.overwrite, error))
+    {
+        log::error("{}", error);
+        return RunResult::invalidOptions;
+    }
+
+    const auto manifestJson = juce::JSON::toString(makeVstPresetRenderManifest(options, presets, midiFiles), false);
+    auto completedPairs = std::unordered_set<std::uint64_t>{};
+    if (options.resume)
+    {
+        if (!reportFile.existsAsFile() || !manifestFile.existsAsFile())
+        {
+            log::error("--resume requires both the existing JSONL report and its manifest: {}", manifestPath.string());
+            return RunResult::invalidOptions;
+        }
+        if (manifestFile.loadFileAsString().trim() != manifestJson.trim())
+        {
+            log::error("The existing render manifest does not exactly match the selected inputs and render settings.");
+            return RunResult::invalidOptions;
+        }
+        auto reportErrors = std::vector<std::string>{};
+        completedPairs = readSuccessfulVstPresetRenderPairs(reportPath, reportErrors);
+        for (const auto& reportError : reportErrors)
+            log::error("{}", reportError);
+        if (!reportErrors.empty())
+            return RunResult::invalidOptions;
+    }
+    else
+    {
+        if (options.overwrite)
+        {
+            if ((reportFile.exists() && !reportFile.deleteFile()) || (manifestFile.exists() && !manifestFile.deleteFile()))
+            {
+                log::error("Could not replace existing render report control files.");
+                return RunResult::invalidOptions;
+            }
+        }
+        if (!writeTextFileAtomically(manifestPath, manifestJson + "\n", error))
+        {
+            log::error("{}", error);
+            return RunResult::runtimeSetupFailed;
+        }
+    }
+
+    log::info("Preflighting {} preset(s), {} MIDI file(s), and {} render pair(s)...", presets.files.size(), midiFiles.files.size(),
+              totalPairs);
+    auto requiredBytes = static_cast<long double>(0.0);
+    for (std::size_t midiIndex = 0; midiIndex < midiFiles.files.size(); ++midiIndex)
+    {
+        const auto& midi = midiFiles.files[midiIndex];
+        const auto sampleCount =
+            detail::calculateVstPresetRenderSampleCount(midi.durationSeconds, options.tailSeconds, options.sampleRate, error);
+        if (!sampleCount)
+        {
+            log::error("{}", error);
+            return RunResult::invalidOptions;
+        }
+        auto outputKeys = std::set<std::string>{};
+        for (std::size_t presetIndex = 0; presetIndex < presets.files.size(); ++presetIndex)
+        {
+            const auto& preset = presets.files[presetIndex];
+            const auto output = detail::makeVstPresetRenderOutputPath(preset, midi, error);
+            if (output.empty())
+            {
+                log::error("{}", error);
+                return RunResult::invalidOptions;
+            }
+            auto outputKey = output.lexically_normal().generic_string();
+#if JUCE_WINDOWS || JUCE_MAC
+            std::ranges::transform(outputKey, outputKey.begin(),
+                                   [](const unsigned char character) { return static_cast<char>(std::tolower(character)); });
+#endif
+            if (!outputKeys.insert(std::move(outputKey)).second)
+            {
+                log::error("Two planned renders resolve to the same portable output path near: {}", output.string());
+                return RunResult::invalidOptions;
+            }
+
+            const auto pairIndex = static_cast<std::uint64_t>(presetIndex) * midiFiles.files.size() + midiIndex;
+            auto completed = completedPairs.contains(pairIndex);
+            if (completed)
+            {
+                const auto config =
+                    detail::VstPresetAudioRenderConfig{options.sampleRate, options.bitDepth, options.tailSeconds, kBlockSize, true};
+                completed = detail::validateRenderedWav(output, config, *sampleCount, error);
+                if (!completed)
+                {
+                    log::warn("Resume validation will rerender pair {}: {}", pairIndex, error);
+                    completedPairs.erase(pairIndex);
+                }
+            }
+            if (!completed && !options.resume && !options.overwrite && detail::toJuceFile(output).exists())
+            {
+                log::error("Output WAV already exists; use --resume or --overwrite: {}", output.string());
+                return RunResult::invalidOptions;
+            }
+            if (!completed)
+                requiredBytes += static_cast<long double>(*sampleCount) * 2.0L * (options.bitDepth / 8.0L) + 4096.0L;
+        }
+    }
+
+    for (std::size_t index = 0; index < presets.files.size(); ++index)
+    {
+        auto data = juce::MemoryBlock{};
+        if (!detail::toJuceFile(detail::toFilesystemAccessPath(presets.files[index].sourcePath)).loadFileAsData(data) ||
+            !inspectVstPresetContainerData(data))
+        {
+            log::error("Input is not a readable VST3 preset container: {}", presets.files[index].sourcePath.string());
+            return RunResult::invalidOptions;
+        }
+        if ((index + 1) % 1000 == 0)
+            log::info("Validated {}/{} VSTPreset containers...", index + 1, presets.files.size());
+    }
+
+    if (!options.skipDiskSpaceCheck)
+    {
+        auto filesystemError = std::error_code{};
+        const auto probePath =
+            std::filesystem::is_directory(options.inputPath, filesystemError) ? options.inputPath : options.inputPath.parent_path();
+        const auto space = std::filesystem::space(detail::toFilesystemAccessPath(probePath), filesystemError);
+        if (filesystemError)
+        {
+            log::error("Could not determine available output disk space: {}", filesystemError.message());
+            return RunResult::runtimeSetupFailed;
+        }
+        if (requiredBytes > static_cast<long double>(space.available))
+        {
+            log::error("Insufficient disk space: render requires approximately {:.2f} GiB, but {:.2f} GiB are available.",
+                       static_cast<double>(requiredBytes / (1024.0L * 1024.0L * 1024.0L)),
+                       static_cast<double>(space.available) / (1024.0 * 1024.0 * 1024.0));
+            return RunResult::runtimeSetupFailed;
+        }
+    }
+
+    auto reportStream = std::make_unique<juce::FileOutputStream>(reportFile);
+    if (!reportStream->openedOk() || !reportStream->setPosition(options.resume ? reportFile.getSize() : 0))
+    {
+        log::error("Could not open render report for writing: {}", reportPath.string());
+        return RunResult::runtimeSetupFailed;
+    }
+    if (!options.resume)
+    {
+        auto header = juce::var(new juce::DynamicObject());
+        header.getDynamicObject()->setProperty("record", "header");
+        header.getDynamicObject()->setProperty("format", "halionbridge-vstpreset-render-report");
+        header.getDynamicObject()->setProperty("format_version", 1);
+        header.getDynamicObject()->setProperty("total_pairs", static_cast<juce::int64>(totalPairs));
+        if (!appendVstPresetRenderReportRecord(*reportStream, header, error))
+        {
+            log::error("{}", error);
+            return RunResult::runtimeSetupFailed;
+        }
+    }
+
+    if (completedPairs.size() == totalPairs)
+    {
+        log::info("All {} render pair(s) are already complete and structurally valid.", totalPairs);
+        return RunResult::success;
+    }
+
+    if (options.executableFile && !options.showGui)
+    {
+        struct WorkerOutcome
+        {
+            RunResult result = RunResult::success;
+            std::set<std::uint64_t> received;
+            std::vector<juce::var> records;
+            std::uint64_t failedRecords = 0;
+        };
+
+        const auto runWorker = [&](std::span<const VstPresetRenderTask> tasks, const bool retryOverwrite)
+        {
+            auto outcome = WorkerOutcome{};
+            const auto temporaryRoot = juce::File::getSpecialLocation(juce::File::tempDirectory);
+            const auto token = juce::Uuid().toString();
+            const auto manifest = temporaryRoot.getChildFile("halionbridge-render-worker-" + token + ".json");
+            const auto receipt = temporaryRoot.getChildFile("halionbridge-render-worker-" + token + ".jsonl");
+            auto workerOptions = options;
+            if (retryOverwrite)
+            {
+                workerOptions.resume = false;
+                workerOptions.overwrite = true;
+            }
+            auto workerError = std::string{};
+            const auto workerJson = juce::JSON::toString(makeVstPresetRenderWorkerManifest(workerOptions, tasks), false) + "\n";
+            if (!writeTextFileAtomically(detail::toStdPath(manifest), workerJson, workerError))
+            {
+                log::error("{}", workerError);
+                outcome.result = RunResult::runtimeSetupFailed;
+                return outcome;
+            }
+
+            auto command = makeVstPresetRenderWorkerCommand(options, detail::toStdPath(manifest), detail::toStdPath(receipt));
+            auto process = std::make_shared<juce::ChildProcess>();
+            if (command.isEmpty() || !process->start(command, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
+            {
+                log::error("Could not launch VSTPreset render worker.");
+                manifest.deleteFile();
+                outcome.result = RunResult::runtimeSetupFailed;
+                return outcome;
+            }
+
+            auto childOutput = std::make_shared<detail::ChildProcessOutputBuffer>();
+            auto outputThread = std::thread([process, childOutput] { detail::forwardChildOutputToConsole(*process, *childOutput); });
+            const auto started = juce::Time::getMillisecondCounterHiRes();
+            auto timedOut = false;
+            while (process->isRunning())
+            {
+                if (isStopRequested() ||
+                    (options.timeoutSeconds > 0 && juce::Time::getMillisecondCounterHiRes() - started > options.timeoutSeconds * 1000.0))
+                {
+                    timedOut = !isStopRequested();
+                    process->kill();
+                    process->waitForProcessToFinish(2000);
+                    break;
+                }
+                juce::Thread::sleep(10);
+            }
+            if (outputThread.joinable())
+                outputThread.join();
+            detail::flushChildOutputToConsole(*childOutput);
+            process->waitForProcessToFinish(2000);
+
+            auto expectedIndices = std::set<std::uint64_t>{};
+            for (const auto& task : tasks)
+                expectedIndices.insert(task.pairIndex);
+            if (receipt.existsAsFile())
+            {
+                auto receiptInput = receipt.createInputStream();
+                auto lineNumber = std::uint64_t{};
+                while (receiptInput != nullptr && !receiptInput->isExhausted())
+                {
+                    const auto line = receiptInput->readNextLine();
+                    ++lineNumber;
+                    if (line.trim().isEmpty())
+                        continue;
+                    auto record = juce::var{};
+                    const auto* recordObject = record.getDynamicObject();
+                    if (juce::JSON::parse(line, record).failed() || (recordObject = record.getDynamicObject()) == nullptr ||
+                        recordObject->getProperty("record").toString() != "render")
+                    {
+                        log::error("Malformed render-worker receipt line {}.", lineNumber);
+                        outcome.result = RunResult::renderFailed;
+                        continue;
+                    }
+                    const auto rawIndex = static_cast<juce::int64>(recordObject->getProperty("pair_index"));
+                    if (rawIndex < 0 || !expectedIndices.contains(static_cast<std::uint64_t>(rawIndex)) ||
+                        !outcome.received.insert(static_cast<std::uint64_t>(rawIndex)).second)
+                    {
+                        log::error("Unexpected or duplicate pair index in render-worker receipt line {}.", lineNumber);
+                        outcome.result = RunResult::renderFailed;
+                        continue;
+                    }
+                    if (recordObject->getProperty("status").toString() != "success")
+                        ++outcome.failedRecords;
+                    outcome.records.push_back(std::move(record));
+                }
+            }
+            if (isStopRequested())
+                outcome.result = RunResult::stopped;
+            else if (timedOut)
+            {
+                log::error("VSTPreset render worker exceeded the {} second timeout.", options.timeoutSeconds);
+                outcome.result = RunResult::timedOut;
+            }
+            else if (outcome.received.size() != tasks.size() || process->getExitCode() != 0 || outcome.failedRecords != 0)
+            {
+                outcome.result = RunResult::renderFailed;
+            }
+            manifest.deleteFile();
+            receipt.deleteFile();
+            return outcome;
+        };
+
+        auto failures = std::uint64_t{};
+        auto finished = completedPairs.size();
+        auto chunk = std::vector<VstPresetRenderTask>{};
+        chunk.reserve(static_cast<std::size_t>(options.chunkSize));
+        const auto appendRecords = [&](const std::vector<juce::var>& records)
+        {
+            for (const auto& record : records)
+                if (!appendVstPresetRenderReportRecord(*reportStream, record, error))
+                {
+                    log::error("{}", error);
+                    return false;
+                }
+            return true;
+        };
+        const auto executeOutcome = [&](const std::vector<VstPresetRenderTask>& tasks, WorkerOutcome outcome)
+        {
+            if (!appendRecords(outcome.records))
+                return RunResult::runtimeSetupFailed;
+            if (outcome.result == RunResult::stopped)
+                return RunResult::stopped;
+            failures += outcome.failedRecords;
+            finished += outcome.received.size();
+            if (options.failFast && failures != 0)
+                return RunResult::renderFailed;
+
+            for (const auto& task : tasks)
+            {
+                if (outcome.received.contains(task.pairIndex))
+                    continue;
+                log::warn("Retrying render pair {} once after an incomplete worker run.", task.pairIndex);
+                const auto retryTasks = std::vector<VstPresetRenderTask>{task};
+                const auto retry = runWorker(retryTasks, true);
+                if (!appendRecords(retry.records))
+                    return RunResult::renderFailed;
+                if (retry.result == RunResult::stopped)
+                    return RunResult::stopped;
+                failures += retry.failedRecords;
+                finished += retry.received.size();
+                if (!retry.received.contains(task.pairIndex))
+                {
+                    auto failed = detail::VstPresetAudioRenderResult{};
+                    failed.error = "Render worker failed twice before writing a durable receipt.";
+                    if (!appendVstPresetRenderReportRecord(
+                            *reportStream, makeVstPresetRenderReportRecord(task.pairIndex, task.preset, task.midi, task.output, failed),
+                            error))
+                    {
+                        log::error("{}", error);
+                        return RunResult::runtimeSetupFailed;
+                    }
+                    ++failures;
+                    ++finished;
+                }
+                if (options.failFast && failures != 0)
+                    return RunResult::renderFailed;
+            }
+            log::info("Completed {}/{} render pair(s).", finished, totalPairs);
+            return failures == 0 ? RunResult::success : RunResult::renderFailed;
+        };
+
+        struct ActiveWorker
+        {
+            std::vector<VstPresetRenderTask> tasks;
+            std::future<WorkerOutcome> outcome;
+        };
+        auto activeWorkers = std::vector<ActiveWorker>{};
+        activeWorkers.reserve(static_cast<std::size_t>(options.jobs));
+        const auto launchChunk = [&](std::vector<VstPresetRenderTask> tasks)
+        {
+            auto workerTasks = tasks;
+            auto future =
+                std::async(std::launch::async, [&, workerTasks = std::move(workerTasks)] { return runWorker(workerTasks, false); });
+            activeWorkers.push_back({std::move(tasks), std::move(future)});
+        };
+        const auto finishActiveWorkers = [&]()
+        {
+            auto result = RunResult::success;
+            for (auto& worker : activeWorkers)
+            {
+                auto workerResult = RunResult::renderFailed;
+                try
+                {
+                    workerResult = executeOutcome(worker.tasks, worker.outcome.get());
+                }
+                catch (const std::exception& exception)
+                {
+                    log::error("Render-worker supervisor failed: {}", exception.what());
+                    workerResult = RunResult::runtimeSetupFailed;
+                }
+                if (workerResult == RunResult::stopped)
+                    result = RunResult::stopped;
+                else if (workerResult == RunResult::runtimeSetupFailed)
+                    result = RunResult::runtimeSetupFailed;
+                else if (workerResult != RunResult::success && result == RunResult::success)
+                    result = workerResult;
+            }
+            activeWorkers.clear();
+            return result;
+        };
+
+        for (std::size_t presetIndex = 0; presetIndex < presets.files.size(); ++presetIndex)
+        {
+            for (std::size_t midiIndex = 0; midiIndex < midiFiles.files.size(); ++midiIndex)
+            {
+                const auto pairIndex = static_cast<std::uint64_t>(presetIndex) * midiFiles.files.size() + midiIndex;
+                if (completedPairs.contains(pairIndex))
+                    continue;
+                const auto& preset = presets.files[presetIndex];
+                const auto& midi = midiFiles.files[midiIndex];
+                const auto output = detail::makeVstPresetRenderOutputPath(preset, midi, error);
+                chunk.push_back({pairIndex, preset, midi, output});
+                if (chunk.size() == static_cast<std::size_t>(options.chunkSize))
+                {
+                    launchChunk(std::move(chunk));
+                    chunk = std::vector<VstPresetRenderTask>{};
+                    chunk.reserve(static_cast<std::size_t>(options.chunkSize));
+                    if (activeWorkers.size() == static_cast<std::size_t>(options.jobs))
+                    {
+                        const auto batchResult = finishActiveWorkers();
+                        if (batchResult == RunResult::stopped || batchResult == RunResult::runtimeSetupFailed ||
+                            (options.failFast && batchResult != RunResult::success))
+                            return batchResult;
+                    }
+                }
+            }
+        }
+        if (!chunk.empty())
+            launchChunk(std::move(chunk));
+        if (!activeWorkers.empty())
+        {
+            const auto batchResult = finishActiveWorkers();
+            if (batchResult == RunResult::stopped || batchResult == RunResult::runtimeSetupFailed ||
+                (options.failFast && batchResult != RunResult::success))
+                return batchResult;
+        }
+        if (failures != 0)
+        {
+            log::error("VSTPreset rendering completed with {} failed pair(s).", failures);
+            return RunResult::renderFailed;
+        }
+        log::info("VSTPreset rendering completed successfully: {} pair(s) are present.", totalPairs);
+        return RunResult::success;
+    }
+
+    if (options.jobs > 1)
+        log::warn("This build currently executes render workers serially; --jobs {} is retained in the run contract.", options.jobs);
+
+    const auto runtimeOptions = toRuntimeOptions(options);
+    if (!pluginFormatsRegistered && options.showGui)
+    {
+        juce::addDefaultFormatsToManager(formatManager);
+        pluginFormatsRegistered = true;
+    }
+    else if (!pluginFormatsRegistered)
+    {
+        juce::addHeadlessDefaultFormatsToManager(formatManager);
+        pluginFormatsRegistered = true;
+    }
+    const auto pluginFile = Bridge::findHalionPlugin(options.pluginPathOverride);
+    if (!pluginFile)
+        return RunResult::pluginNotFound;
+    if (!loadPlugin(detail::toJuceFile(*pluginFile), runtimeOptions, options.sampleRate, kBlockSize))
+        return RunResult::pluginLoadFailed;
+
+    // HALion finishes license and engine startup work through the message queue after the VST3 instance callback returns.
+    // Starting accelerated offline audio immediately can outrun that initialization and produce silent early renders.
+    for (int iteration = 0; iteration < kInitialMessagePumpIterations; ++iteration)
+    {
+        if (isStopRequested())
+            return RunResult::stopped;
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(kInitialMessagePumpMs);
+    }
+
+    pluginInstance->setNonRealtime(true);
+    pluginInstance->prepareToPlay(options.sampleRate, kBlockSize);
+    pumpMessages(kPrepareMessagePumpMs);
+    const auto finish = [&](const RunResult value)
+    {
+        pluginInstance->releaseResources();
+        pluginInstance = nullptr;
+        pumpMessages(kPrepareMessagePumpMs);
+        return value;
+    };
+
+    auto failures = std::uint64_t{};
+    auto completedThisRun = std::uint64_t{};
+    for (std::size_t presetIndex = 0; presetIndex < presets.files.size(); ++presetIndex)
+    {
+        auto presetData = juce::MemoryBlock{};
+        const auto& preset = presets.files[presetIndex];
+        if (!detail::toJuceFile(detail::toFilesystemAccessPath(preset.sourcePath)).loadFileAsData(presetData))
+        {
+            log::error("Could not reread preset after preflight: {}", preset.sourcePath.string());
+            return finish(RunResult::renderFailed);
+        }
+
+        for (std::size_t midiIndex = 0; midiIndex < midiFiles.files.size(); ++midiIndex)
+        {
+            const auto pairIndex = static_cast<std::uint64_t>(presetIndex) * midiFiles.files.size() + midiIndex;
+            if (completedPairs.contains(pairIndex))
+                continue;
+            if (isStopRequested())
+            {
+                log::warn("VSTPreset rendering stopped after {}/{} pair(s) in this run.", completedThisRun, totalPairs);
+                return finish(RunResult::stopped);
+            }
+
+            const auto& midi = midiFiles.files[midiIndex];
+            const auto output = detail::makeVstPresetRenderOutputPath(preset, midi, error);
+            auto render = detail::VstPresetAudioRenderResult{};
+            pluginInstance->reset();
+            if (!applyVstPresetData(presetData))
+            {
+                render.error = "HALion did not accept the VSTPreset state.";
+            }
+            else
+            {
+                if (options.presetSettleMilliseconds > 0)
+                {
+                    const auto settleSamples = static_cast<std::int64_t>(
+                        std::ceil(options.presetSettleMilliseconds * static_cast<double>(options.sampleRate) / 1000.0));
+                    auto buffer = juce::AudioBuffer<float>(
+                        std::max({2, pluginInstance->getTotalNumInputChannels(), pluginInstance->getTotalNumOutputChannels()}), kBlockSize);
+                    auto midiBuffer = juce::MidiBuffer{};
+                    for (auto processed = std::int64_t{}; processed < settleSamples; processed += kBlockSize)
+                    {
+                        const auto count = static_cast<int>(std::min<std::int64_t>(kBlockSize, settleSamples - processed));
+                        buffer.setSize(buffer.getNumChannels(), count, false, false, true);
+                        buffer.clear();
+                        pluginInstance->processBlock(buffer, midiBuffer);
+                    }
+                }
+                pluginInstance->reset();
+                const auto config = detail::VstPresetAudioRenderConfig{options.sampleRate, options.bitDepth, options.tailSeconds,
+                                                                       kBlockSize, options.resume || options.overwrite};
+                render = detail::renderVstPresetMidiToWav(*pluginInstance, midi, output, config);
+            }
+
+            if (!appendVstPresetRenderReportRecord(*reportStream, makeVstPresetRenderReportRecord(pairIndex, preset, midi, output, render),
+                                                   error))
+            {
+                log::error("{}", error);
+                return finish(RunResult::renderFailed);
+            }
+            ++completedThisRun;
+            if (render.succeeded)
+            {
+                log::info("Rendered {}/{}: {}", completedThisRun + completedPairs.size(), totalPairs, output.string());
+                if (render.metrics.silent)
+                    log::warn("Rendered output is silent: {}", output.string());
+                if (render.metrics.clipped)
+                    log::warn("Rendered output reaches or exceeds full scale: {}", output.string());
+            }
+            else
+            {
+                ++failures;
+                log::error("Render failed for {} with {}: {}", preset.sourcePath.string(), midi.sourcePath.string(), render.error);
+                if (options.failFast)
+                    return finish(RunResult::renderFailed);
+            }
+        }
+    }
+
+    if (failures != 0)
+    {
+        log::error("VSTPreset rendering completed with {} failed pair(s).", failures);
+        return finish(RunResult::renderFailed);
+    }
+    log::info("VSTPreset rendering completed successfully: {} pair(s) are present.", totalPairs);
+    return finish(RunResult::success);
+}
+
+RunResult Bridge::Impl::runVstPresetRenderTasks(const VstPresetRenderOptions& options, const std::span<const VstPresetRenderTask> tasks,
+                                                juce::FileOutputStream& reportStream, const std::uint64_t totalPairs)
+{
+    if (tasks.empty())
+        return RunResult::success;
+
+    const auto runtimeOptions = toRuntimeOptions(options);
+    if (!pluginFormatsRegistered && options.showGui)
+    {
+        juce::addDefaultFormatsToManager(formatManager);
+        pluginFormatsRegistered = true;
+    }
+    else if (!pluginFormatsRegistered)
+    {
+        juce::addHeadlessDefaultFormatsToManager(formatManager);
+        pluginFormatsRegistered = true;
+    }
+    const auto pluginFile = Bridge::findHalionPlugin(options.pluginPathOverride);
+    if (!pluginFile)
+        return RunResult::pluginNotFound;
+    if (!loadPlugin(detail::toJuceFile(*pluginFile), runtimeOptions, options.sampleRate, kBlockSize))
+        return RunResult::pluginLoadFailed;
+
+    // HALion finishes license and engine startup work through the message queue after the VST3 instance callback returns.
+    // Starting accelerated offline audio immediately can outrun that initialization and produce silent early renders.
+    for (int iteration = 0; iteration < kInitialMessagePumpIterations; ++iteration)
+    {
+        if (isStopRequested())
+            return RunResult::stopped;
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(kInitialMessagePumpMs);
+    }
+
+    pluginInstance->setNonRealtime(true);
+    pluginInstance->prepareToPlay(options.sampleRate, kBlockSize);
+    pumpMessages(kPrepareMessagePumpMs);
+    const auto finish = [&](const RunResult value)
+    {
+        pluginInstance->releaseResources();
+        pluginInstance = nullptr;
+        pumpMessages(kPrepareMessagePumpMs);
+        return value;
+    };
+
+    // Accelerated offline processing can reach the first MIDI event before a cold HALion engine is ready, especially when
+    // several worker processes start together. Prime the exact first state/MIDI combination into a disposable WAV, then
+    // reload it for the real task. Silent Programs remain valid; silence only controls the bounded number of warm-up passes.
+    {
+        constexpr auto maximumWarmupPasses = 3;
+        const auto& firstTask = tasks.front();
+        auto firstPresetData = juce::MemoryBlock{};
+        if (!detail::toJuceFile(detail::toFilesystemAccessPath(firstTask.preset.sourcePath)).loadFileAsData(firstPresetData))
+            return finish(RunResult::renderFailed);
+
+        const auto warmupFile =
+            juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("halionbridge-render-warmup", ".wav", false);
+        for (int pass = 0; pass < maximumWarmupPasses; ++pass)
+        {
+            pluginInstance->reset();
+            if (!applyVstPresetData(firstPresetData))
+                break;
+            pumpMessages(250);
+            pluginInstance->reset();
+            const auto warmupConfig = detail::VstPresetAudioRenderConfig{options.sampleRate, 16, 0.0, kBlockSize, true};
+            const auto warmup =
+                detail::renderVstPresetMidiToWav(*pluginInstance, firstTask.midi, detail::toStdPath(warmupFile), warmupConfig);
+            warmupFile.deleteFile();
+            if (!warmup.succeeded || !warmup.metrics.silent)
+                break;
+            if (pass + 1 < maximumWarmupPasses)
+                pumpMessages(500);
+        }
+    }
+
+    auto failures = std::uint64_t{};
+    auto presetData = juce::MemoryBlock{};
+    auto loadedPreset = std::filesystem::path{};
+    auto renderedFirstState = false;
+    for (std::size_t index = 0; index < tasks.size(); ++index)
+    {
+        const auto& task = tasks[index];
+        if (isStopRequested())
+            return finish(RunResult::stopped);
+        if (loadedPreset != task.preset.sourcePath)
+        {
+            presetData.reset();
+            if (!detail::toJuceFile(detail::toFilesystemAccessPath(task.preset.sourcePath)).loadFileAsData(presetData))
+            {
+                log::error("Could not read preflighted preset: {}", task.preset.sourcePath.string());
+                return finish(RunResult::renderFailed);
+            }
+            loadedPreset = task.preset.sourcePath;
+        }
+
+        auto render = detail::VstPresetAudioRenderResult{};
+        pluginInstance->reset();
+        if (!applyVstPresetData(presetData))
+        {
+            render.error = "HALion did not accept the VSTPreset state.";
+        }
+        else
+        {
+            if (!renderedFirstState)
+            {
+                // HALion completes some engine initialization on its message thread only after the first real Program state is loaded.
+                // Give that one-time initialization a bounded opportunity to finish before racing through offline audio blocks.
+                pumpMessages(250);
+                renderedFirstState = true;
+            }
+            if (options.presetSettleMilliseconds > 0)
+            {
+                pumpMessages(options.presetSettleMilliseconds);
+                const auto settleSamples = static_cast<std::int64_t>(
+                    std::ceil(options.presetSettleMilliseconds * static_cast<double>(options.sampleRate) / 1000.0));
+                auto buffer = juce::AudioBuffer<float>(
+                    std::max({2, pluginInstance->getTotalNumInputChannels(), pluginInstance->getTotalNumOutputChannels()}), kBlockSize);
+                auto midi = juce::MidiBuffer{};
+                for (auto processed = std::int64_t{}; processed < settleSamples; processed += kBlockSize)
+                {
+                    const auto count = static_cast<int>(std::min<std::int64_t>(kBlockSize, settleSamples - processed));
+                    buffer.setSize(buffer.getNumChannels(), count, false, false, true);
+                    buffer.clear();
+                    pluginInstance->processBlock(buffer, midi);
+                }
+            }
+            pluginInstance->reset();
+            const auto config = detail::VstPresetAudioRenderConfig{options.sampleRate, options.bitDepth, options.tailSeconds, kBlockSize,
+                                                                   options.overwrite};
+            render = detail::renderVstPresetMidiToWav(*pluginInstance, task.midi, task.output, config);
+        }
+
+        auto error = std::string{};
+        if (!appendVstPresetRenderReportRecord(
+                reportStream, makeVstPresetRenderReportRecord(task.pairIndex, task.preset, task.midi, task.output, render), error))
+        {
+            log::error("{}", error);
+            return finish(RunResult::renderFailed);
+        }
+        if (render.succeeded)
+        {
+            log::info("Rendered {}/{}: {}", index + 1, totalPairs, task.output.string());
+            if (render.metrics.silent)
+                log::warn("Rendered output is silent: {}", task.output.string());
+            if (render.metrics.clipped)
+                log::warn("Rendered output reaches or exceeds full scale: {}", task.output.string());
+        }
+        else
+        {
+            ++failures;
+            log::error("Render failed for {} with {}: {}", task.preset.sourcePath.string(), task.midi.sourcePath.string(), render.error);
+            if (options.failFast)
+                return finish(RunResult::renderFailed);
+        }
+    }
+    return finish(failures == 0 ? RunResult::success : RunResult::renderFailed);
 }
 
 RunResult Bridge::Impl::remapVstPresetsDetailed(const VstPresetRemapOptions& options)
@@ -2591,7 +3734,7 @@ RunResult Bridge::Impl::runPresetInspectionInvocation(const VstPresetInspectionO
     return runProcessingLoop(runtimeOptions, toJuceFile(config.runtimeRoot));
 }
 
-bool Bridge::Impl::loadPlugin(const juce::File& pluginFile, const AppOptions& options)
+bool Bridge::Impl::loadPlugin(const juce::File& pluginFile, const AppOptions& options, const double sampleRate, const int blockSize)
 {
     setCrashDiagnosticPhase("loadPlugin: preparing plugin description");
 
@@ -2644,7 +3787,7 @@ bool Bridge::Impl::loadPlugin(const juce::File& pluginFile, const AppOptions& op
 
     log::debug("Instantiating plugin asynchronously...");
     setCrashDiagnosticPhase("loadPlugin: posting async plugin instantiation");
-    formatManager.createPluginInstanceAsync(*description, kSampleRate, kBlockSize,
+    formatManager.createPluginInstanceAsync(*description, sampleRate, blockSize,
                                             [creation](std::unique_ptr<juce::AudioPluginInstance> instance, const juce::String& error)
                                             {
                                                 setCrashDiagnosticPhase("loadPlugin: async plugin callback");

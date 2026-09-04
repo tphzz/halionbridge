@@ -74,6 +74,7 @@ void writeTopLevelHelp(std::ostream& output, const bool includeHeader = true)
            << "  halionbridge init <build-directory> [--overwrite]\n"
            << "  halionbridge remap-vstpresets --input-directory <dir> --output-directory <dir> --old-root <path> --new-root <path>\n"
            << "  halionbridge inspect-vstpresets --input <file-or-directory> --output-json <report.json> [options]\n"
+           << "  halionbridge render-vstpresets --input <file-or-directory> --midi <file-or-directory> [options]\n"
            << "  halionbridge inject-macro-page --input-directory <dir> --output-directory <dir> --donor-preset <file> [options]\n"
            << "  halionbridge vstpreset-metadata export --input-directory <dir> --metadata-csv <file> [options]\n"
            << "  halionbridge vstpreset-metadata apply --input-directory <dir> --metadata-csv <file> --output-directory <dir> [options]\n"
@@ -110,6 +111,14 @@ void writeTopLevelHelp(std::ostream& output, const bool includeHeader = true)
            << "  --output-json <file>    Destination .json report.\n"
            << "  --recursive             Include subdirectories when --input is a directory.\n"
            << "  --overwrite             Replace an existing report file.\n"
+           << "\n"
+           << "VSTPreset MIDI render command:\n"
+           << "  render-vstpresets       Render every selected preset/MIDI pair to a sibling stereo WAV.\n"
+           << "  --input <path>          One .vstpreset file or a directory scanned non-recursively by default.\n"
+           << "  --midi <path>           Repeatable MIDI file or non-recursive MIDI directory input.\n"
+           << "  --recursive             Include preset subdirectories.\n"
+           << "  --resume                Resume an exact matching manifest and verify completed WAV files.\n"
+           << "  --overwrite             Replace planned WAV outputs and render-report control files.\n"
            << "\n"
            << "Macro-page injection command:\n"
            << "  inject-macro-page      Add a donor macro page to HALion Sonic Program presets.\n"
@@ -262,6 +271,47 @@ void printInspectVstPresetsHelp()
     writeInspectVstPresetsHelp(std::cout);
 }
 
+void writeRenderVstPresetsHelp(std::ostream& output, const bool includeHeader = true)
+{
+    if (includeHeader)
+        writeVersionHeader(output);
+
+    output << (includeHeader ? "\n" : "") << "Usage:\n"
+           << "  halionbridge render-vstpresets --input <file-or-directory> --midi <file-or-directory> [options]\n"
+           << "\n"
+           << "Required options:\n"
+           << "  --input <path>             One .vstpreset file or a directory.\n"
+           << "  --midi <path>              Repeatable .mid/.midi file or a non-recursive directory.\n"
+           << "\n"
+           << "Selection and output:\n"
+           << "  --recursive                Include preset subdirectories.\n"
+           << "  --report-jsonl <file>      JSONL diagnostics report; a deterministic default is used otherwise.\n"
+           << "  --resume                   Resume an exact matching manifest and structurally verify completed WAVs.\n"
+           << "  --overwrite                Atomically replace planned outputs.\n"
+           << "  --skip-disk-space-check    Skip the conservative free-space preflight.\n"
+           << "\n"
+           << "Audio:\n"
+           << "  --sample-rate <n>          Output sample rate. Defaults to 48000.\n"
+           << "  --bit-depth <16|24|32>     PCM 16/24-bit or IEEE float 32-bit. Defaults to 24.\n"
+           << "  --tail-seconds <seconds>   Render beyond the MIDI end. Defaults to 0.\n"
+           << "  --preset-settle-ms <ms>    Silent processing time after each preset load. Defaults to 0.\n"
+           << "\n"
+           << "Runtime:\n"
+           << "  --chunk-size <n>           Render pairs per isolated work unit. Defaults to 32.\n"
+           << "  --jobs <n>                 Requested render workers. Defaults to 1.\n"
+           << "  --fail-fast                Stop after the first failed pair.\n"
+           << "  --plugin <path>            Override the HALion 7 VST3 path.\n"
+           << "  --timeout-seconds <n>      Completion timeout. Defaults to 3600 seconds.\n"
+           << "  --no-timeout               Wait indefinitely.\n"
+           << "  --gui                      Use JUCE's GUI-capable VST3 host format; requires --jobs 1.\n"
+           << "  --force-scan               Force VST3 scanning instead of the embedded class ID shortcut.\n";
+}
+
+void printRenderVstPresetsHelp()
+{
+    writeRenderVstPresetsHelp(std::cout);
+}
+
 void writeInjectMacroPageHelp(std::ostream& output, const bool includeHeader = true)
 {
     if (includeHeader)
@@ -376,6 +426,7 @@ bool isInternalWorkerCommand(const juce::StringArray& args)
 
     const auto command = halionbridge::detail::classifyCliCommand(commandArgs);
     return command == halionbridge::detail::CliCommandKind::buildWorker ||
+           command == halionbridge::detail::CliCommandKind::renderVstPresetsWorker ||
            command == halionbridge::detail::CliCommandKind::scanPluginWorker;
 }
 
@@ -707,6 +758,12 @@ int main(int argc, char* argv[])
         return 0;
     }
 
+    if (juceArgs.size() > 0 && juceArgs[0] == "render-vstpresets" && hasHelpArgument(juceArgs, 1))
+    {
+        printRenderVstPresetsHelp();
+        return 0;
+    }
+
     if (juceArgs.size() > 0 && juceArgs[0] == "inject-macro-page" && hasHelpArgument(juceArgs, 1))
     {
         printInjectMacroPageHelp();
@@ -815,6 +872,7 @@ int main(int argc, char* argv[])
     auto parsedRemapOptions = std::optional<halionbridge::VstPresetRemapOptions>{};
     auto parsedInspectionOptions = std::optional<halionbridge::VstPresetInspectionOptions>{};
     auto parsedMacroPageOptions = std::optional<halionbridge::VstPresetMacroPageInjectionOptions>{};
+    auto parsedRenderOptions = std::optional<halionbridge::VstPresetRenderOptions>{};
     auto parsedBuildOptions = std::optional<halionbridge::AppOptions>{};
 
     if (command == halionbridge::detail::CliCommandKind::remapVstPresets)
@@ -870,6 +928,25 @@ int main(int argc, char* argv[])
         }
 
         parsedInspectionOptions = std::move(*parseResult.options);
+        writeVersionHeader(std::cout);
+        std::cout << "\n";
+        halionbridge::log::configureFromEnvironment();
+    }
+    else if (command == halionbridge::detail::CliCommandKind::renderVstPresets)
+    {
+        const auto renderArgs = std::vector<std::string>(args.begin() + 1, args.end());
+        auto parseResult = halionbridge::detail::parseVstPresetRenderOptionsDetailed(renderArgs);
+        if (!parseResult.options)
+        {
+            writeVersionHeader(std::cerr);
+            std::cerr << "\n";
+            writeCliDiagnostics(std::cerr, parseResult.diagnostics);
+            if (parseResult.errorKind == halionbridge::detail::CliParseErrorKind::syntax)
+                writeRenderVstPresetsHelp(std::cerr, false);
+            return 1;
+        }
+
+        parsedRenderOptions = std::move(*parseResult.options);
         writeVersionHeader(std::cout);
         std::cout << "\n";
         halionbridge::log::configureFromEnvironment();
@@ -940,6 +1017,25 @@ int main(int argc, char* argv[])
         juce::Logger::setCurrentLogger(nullptr);
         halionbridge::log::flush();
         return exitCode;
+    }
+
+    if (command == halionbridge::detail::CliCommandKind::renderVstPresetsWorker)
+    {
+        auto options = halionbridge::detail::parseVstPresetRenderWorkerOptions(args);
+        if (!options)
+        {
+            juce::Logger::setCurrentLogger(nullptr);
+            halionbridge::log::flush();
+            return 1;
+        }
+
+        const auto executableFile = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        options->executableFile = halionbridge::detail::toStdPath(executableFile);
+        halionbridge::Bridge app;
+        const auto result = app.renderVstPresetsDetailed(*options);
+        juce::Logger::setCurrentLogger(nullptr);
+        halionbridge::log::flush();
+        return result == halionbridge::RunResult::success ? 0 : 1;
     }
 
     if (command == halionbridge::detail::CliCommandKind::remapVstPresets)
@@ -1013,6 +1109,34 @@ int main(int argc, char* argv[])
                 halionbridge::log::error("Macro-page injection completed with one or more presets still pending.");
             else
                 halionbridge::log::error("Failed to run halionbridge macro-page injection.");
+
+            juce::Logger::setCurrentLogger(nullptr);
+            halionbridge::log::flush();
+            return 1;
+        }
+
+        juce::Logger::setCurrentLogger(nullptr);
+        halionbridge::log::flush();
+        return 0;
+    }
+
+    if (command == halionbridge::detail::CliCommandKind::renderVstPresets)
+    {
+        jassert(parsedRenderOptions.has_value());
+
+        const auto executableFile = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        parsedRenderOptions->executableFile = halionbridge::detail::toStdPath(executableFile);
+
+        halionbridge::Bridge app;
+        const auto runResult = app.renderVstPresetsDetailed(*parsedRenderOptions);
+        if (runResult != halionbridge::RunResult::success)
+        {
+            if (runResult == halionbridge::RunResult::stopped)
+                halionbridge::log::warn("halionbridge VSTPreset MIDI rendering stopped by user request.");
+            else if (runResult == halionbridge::RunResult::renderFailed)
+                halionbridge::log::error("VSTPreset MIDI rendering completed with one or more failed pairs.");
+            else
+                halionbridge::log::error("Failed to run halionbridge VSTPreset MIDI rendering.");
 
             juce::Logger::setCurrentLogger(nullptr);
             halionbridge::log::flush();

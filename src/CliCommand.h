@@ -20,8 +20,10 @@ enum class CliCommandKind
     remapVstPresets,
     inspectVstPresets,
     injectMacroPage,
+    renderVstPresets,
     vstPresetMetadata,
     buildWorker,
+    renderVstPresetsWorker,
     scanPluginWorker,
     unknown,
 };
@@ -74,6 +76,13 @@ struct VstPresetMacroPageInjectionOptionsParseResult
     std::vector<CliDiagnostic> diagnostics;
 };
 
+struct VstPresetRenderOptionsParseResult
+{
+    std::optional<VstPresetRenderOptions> options;
+    CliParseErrorKind errorKind = CliParseErrorKind::none;
+    std::vector<CliDiagnostic> diagnostics;
+};
+
 CliCommandKind classifyCliCommand(std::span<const std::string> args) noexcept;
 BuildOptionsParseResult parseBuildOptionsDetailed(std::span<const std::string> args);
 std::optional<AppOptions> parseBuildOptions(std::span<const std::string> args);
@@ -83,6 +92,9 @@ VstPresetInspectionOptionsParseResult parseVstPresetInspectionOptionsDetailed(st
 std::optional<VstPresetInspectionOptions> parseVstPresetInspectionOptions(std::span<const std::string> args);
 VstPresetMacroPageInjectionOptionsParseResult parseVstPresetMacroPageInjectionOptionsDetailed(std::span<const std::string> args);
 std::optional<VstPresetMacroPageInjectionOptions> parseVstPresetMacroPageInjectionOptions(std::span<const std::string> args);
+VstPresetRenderOptionsParseResult parseVstPresetRenderOptionsDetailed(std::span<const std::string> args);
+std::optional<VstPresetRenderOptions> parseVstPresetRenderOptions(std::span<const std::string> args);
+std::optional<VstPresetRenderOptions> parseVstPresetRenderWorkerOptions(std::span<const std::string> args);
 std::optional<AppOptions> parseBuildWorkerOptions(std::span<const std::string> args);
 
 } // namespace halionbridge::detail

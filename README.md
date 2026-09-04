@@ -41,6 +41,7 @@ For source formats such as SFZ and Yamaha DX7 SysEx, halionbridge can also gener
 * **Reproducible Preset Libraries:** Treat HALion presets as reliable build artifacts that can be entirely regenerated from source Lua scripts and sample files.
 * **Preset Relocation:** Copy existing HALion `.vstpreset` trees and ask HALion to rewrite embedded sample path prefixes after moving a sample library.
 * **HALion-Side Preset Introspection:** Load one preset or a preset tree through HALion and export its Program Tree, parameter definitions, current values, display strings, and modulation rows as versioned JSON.
+* **Preset MIDI Rendering:** Load every selected preset into HALion, play one or more Standard MIDI Files offline, and write sibling stereo WAV previews with durable diagnostics.
 * **Metadata Batch Editing:** Export VSTPreset metadata to CSV, edit it in a spreadsheet or script, and apply it to copied preset files.
 * **CI and Headless Automation:** Execute scripted HALion builds seamlessly on build servers or CI pipelines without opening an audio device.
 * **Script Debugging:** Visually inspect scripted builds by using `--gui` or `--nokill` flags to keep the HALion GUI open after a run.
@@ -51,6 +52,7 @@ For source formats such as SFZ and Yamaha DX7 SysEx, halionbridge can also gener
 * **Native Format Conversion Setup:** Commands such as `halionbridge convert sfz` and `halionbridge convert dx7` parse source files or directories and generate a flat or explicitly routed `halionbridge` build directory. Users can review or edit these generated Lua scripts before triggering the final build.
 * **Preset Path Remapping:** `halionbridge remap-vstpresets` stages copied presets, lets HALion rewrite matching `SampleOsc.Filename` prefixes, and copies the remapped presets to a clean output directory.
 * **Preset Parameter Reports:** `halionbridge inspect-vstpresets` asks HALion itself to load each preset and writes a deterministic JSON report for converter validation and other inspection tooling.
+* **Batch Audio Preview Rendering:** `halionbridge render-vstpresets` renders the complete preset/MIDI matrix without opening an audio device, compensates HALion's reported latency, and supports resumable isolated workers.
 * **Macro-Page Injection Processing:** `halionbridge inject-macro-page` transactionally applies a macro page from a prepared Program donor to a tree of HALion Sonic Program presets while retaining each source Program's content, persistent root state, Quick Controls, relative path, and metadata.
 * **Preset Metadata CSV Editing:** `halionbridge vstpreset-metadata` reads and rewrites VST3 preset `Info` metadata offline, preserving the HALion program data in the preset file.
 * **Marker-Based Status Detection:** Tracks build progress and completion by waiting for HALion to write `.vstpreset` status markers into the build directory. Temporary progress markers are automatically cleaned up, while failure markers are preserved for diagnostics.
@@ -80,6 +82,7 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
 ./halionbridge convert sfz --help
 ./halionbridge convert dx7 --help
 ./halionbridge inspect-vstpresets --help
+./halionbridge render-vstpresets --help
 ./halionbridge inject-macro-page --help
 ./halionbridge vstpreset-metadata --help
 
@@ -134,6 +137,18 @@ The build directory must contain `halionbridge_build.lua` and the Lua build scri
   --input /path/to/presets \
   --output-json /path/to/inspection.json \
   --recursive
+
+# Render every selected preset with every MIDI file and write WAVs beside the presets
+./halionbridge render-vstpresets \
+  --input /path/to/presets \
+  --midi /path/to/classification-midi \
+  --recursive
+
+# Continue an interrupted default-settings render with explicit parallelism
+./halionbridge render-vstpresets \
+  --input /path/to/presets \
+  --midi /path/to/classification-midi \
+  --recursive --resume --jobs 2 --chunk-size 32
 
 # Apply a prepared Program-root macro donor to a preset tree
 ./halionbridge inject-macro-page \
@@ -205,6 +220,12 @@ Build scripts receive `ctx.output_dir`, which equals `ctx.script_dir` unless `--
 `remap-vstpresets` is for moved sample libraries. It scans the input directory recursively for `.vstpreset` files, works on temporary copies in HALion's user preset area, and leaves the input directory untouched. The output directory must be missing or empty; halionbridge refuses to merge into an existing tree. The command rewrites exact normalized path prefixes only, so choose `--old-root` and `--new-root` as directory roots, not partial filename fragments. If temporary cleanup fails after the remapped presets were copied, halionbridge prints a warning and the temporary staging directory can be deleted later.
 
 `inspect-vstpresets` is for parameter and structure analysis. It accepts one `.vstpreset` file or a directory, scans only the top level unless `--recursive` is supplied, and loads every selected preset through HALion's Lua `loadPreset()` API. The versioned JSON report records the Program Tree, mapping fields, parameter definitions, current values, display strings, and all 32 modulation-matrix rows for each Zone. Failed presets remain in the report and make the command return a failure status after the report is published. Existing reports are refused unless `--overwrite` is supplied. Because HALion is the decoder, this mode requires the installed HALion 7 VST3 and the same user-script search-path setup as a build; it does not infer parameters by reading opaque preset bytes directly.
+
+`render-vstpresets` is for reproducible audio previews and downstream classification. `--input` accepts one `.vstpreset` or a directory; preset directory traversal is top-level unless `--recursive` is supplied. Each repeatable `--midi` argument accepts one `.mid`/`.midi` file or a directory whose MIDI files are selected non-recursively. The command renders every selected preset/MIDI pair through HALion and writes `<preset-name>__<midi-name>.wav` beside the preset. Long names are shortened deterministically. Source presets and MIDI files are never modified.
+
+Output defaults to stereo 48 kHz, 24-bit PCM and ends at the MIDI duration. `--bit-depth` also accepts 16-bit PCM and 32-bit IEEE float; `--tail-seconds` adds release time, and `--preset-settle-ms` adds silent processing after each preset load. The render path restores the VST3 preset before every MIDI file, reports tempo and time signatures to HALion, compensates the plugin's reported latency, and applies no normalization, limiting, or dither. MIDI formats 0 and 1 are supported. Format 2, SysEx, Program Change, and bank-select CC 0/32 are rejected during preflight so a MIDI file cannot silently replace or reconfigure the selected preset.
+
+The default report is `halionbridge-render-report.jsonl` in a directory input, or `<preset-name>.render-report.jsonl` for a single-file input; `--report-jsonl` selects another location. Its adjacent `.manifest.json` binds the exact preset and MIDI hashes, render settings, and plugin path. Existing planned WAVs and control files are refused by default. `--resume` requires an exactly matching manifest and rerenders missing or structurally invalid WAVs; `--overwrite` atomically replaces the planned outputs. Isolated workers process 32 pairs per chunk by default, retry incomplete pairs once after a worker failure, and can run concurrently with `--jobs`. `--fail-fast` stops after the first failed pair. A conservative disk-space preflight estimates the complete unfinished render matrix; `--skip-disk-space-check` is available only when that check is unsuitable. Large libraries can produce millions of files, so test the selected MIDI set and storage estimate on a small preset subset first.
 
 `inject-macro-page` requires a `.vstpreset` donor that HALion loads as a Program and whose desired macro page is attached directly to that Program root. HALionScript cannot attach or identify a macro page directly, so the donor Program remains the saved root. The processor removes all donor children, moves every direct source Program child into that root, and dynamically replaces every persistent writable Program-root parameter plus all Quick Control values and assignments with source state. Donor children and donor sound-design state are therefore scaffolding and are intentionally discarded; users may prepare donors with ordinary extra content without that content leaking into outputs. Source and donor must expose the same persistent Program-root parameter schema, and unsupported structured values fail closed instead of producing an incomplete preset.
 

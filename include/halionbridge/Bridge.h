@@ -18,7 +18,8 @@ namespace halionbridge
 namespace detail
 {
 struct AppOptionsAccess;
-}
+struct VstPresetRenderOptionsAccess;
+} // namespace detail
 
 struct AppOptions
 {
@@ -88,6 +89,36 @@ struct VstPresetMacroPageInjectionOptions
     bool forceScan = false;
 };
 
+struct VstPresetRenderOptions
+{
+    std::filesystem::path inputPath;
+    std::vector<std::filesystem::path> midiInputs;
+    std::optional<std::filesystem::path> reportJsonl;
+    std::optional<std::filesystem::path> pluginPathOverride;
+    std::optional<std::filesystem::path> executableFile;
+    int sampleRate = 48000;
+    int bitDepth = 24;
+    double tailSeconds = 0.0;
+    int presetSettleMilliseconds = 0;
+    int timeoutSeconds = 3600;
+    int chunkSize = 32;
+    int jobs = 1;
+    bool recursive = false;
+    bool resume = false;
+    bool overwrite = false;
+    bool failFast = false;
+    bool skipDiskSpaceCheck = false;
+    bool showGui = false;
+    bool forceScan = false;
+
+  private:
+    friend struct detail::VstPresetRenderOptionsAccess;
+
+    bool workerMode = false;
+    std::optional<std::filesystem::path> workerManifest;
+    std::optional<std::filesystem::path> workerReceipt;
+};
+
 namespace detail
 {
 
@@ -129,6 +160,31 @@ struct AppOptionsAccess
     }
 };
 
+struct VstPresetRenderOptionsAccess
+{
+    static void setWorkerFiles(VstPresetRenderOptions& options, std::filesystem::path manifest, std::filesystem::path receipt)
+    {
+        options.workerMode = true;
+        options.workerManifest = std::move(manifest);
+        options.workerReceipt = std::move(receipt);
+    }
+
+    static bool isWorkerMode(const VstPresetRenderOptions& options) noexcept
+    {
+        return options.workerMode;
+    }
+
+    static const std::optional<std::filesystem::path>& workerManifest(const VstPresetRenderOptions& options) noexcept
+    {
+        return options.workerManifest;
+    }
+
+    static const std::optional<std::filesystem::path>& workerReceipt(const VstPresetRenderOptions& options) noexcept
+    {
+        return options.workerReceipt;
+    }
+};
+
 } // namespace detail
 
 struct BuildStatusMarkerFiles
@@ -162,7 +218,8 @@ enum class RunResult
     timedOut,
     cleanupFailed,
     inspectionFailed,
-    macroPageInjectionFailed
+    macroPageInjectionFailed,
+    renderFailed
 };
 
 HALIONBRIDGE_EXPORT void requestStop() noexcept;
@@ -192,6 +249,7 @@ class HALIONBRIDGE_EXPORT Bridge
     static std::optional<VstPresetInspectionOptions> parseVstPresetInspectionArguments(const std::vector<std::string>& args);
     static std::optional<VstPresetMacroPageInjectionOptions> parseVstPresetMacroPageInjectionArguments(
         const std::vector<std::string>& args);
+    static std::optional<VstPresetRenderOptions> parseVstPresetRenderArguments(const std::vector<std::string>& args);
 
     // Resolves the path to the HALion 7 VST3 plugin.
     // Falls back to standard OS locations if pluginPathOverride is empty.
@@ -217,6 +275,7 @@ class HALIONBRIDGE_EXPORT Bridge
     RunResult remapVstPresetsDetailed(const VstPresetRemapOptions& options);
     RunResult inspectVstPresetsDetailed(const VstPresetInspectionOptions& options);
     RunResult injectMacroPageDetailed(const VstPresetMacroPageInjectionOptions& options);
+    RunResult renderVstPresetsDetailed(const VstPresetRenderOptions& options);
 
   private:
     struct Impl;
