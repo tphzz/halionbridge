@@ -7,6 +7,7 @@
 #include <juce_cryptography/juce_cryptography.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <limits>
@@ -248,6 +249,232 @@ std::optional<std::string> sha256RenderInputFile(const std::filesystem::path& pa
         return std::nullopt;
     }
     return juce::SHA256(*stream).toHexString().toStdString();
+}
+
+bool prepareVstPresetRender(juce::AudioProcessor& processor, const int sampleRate, const int maximumBlockSize, const int settleMilliseconds,
+                            const VstPresetRenderPreparationHooks& hooks, std::string& error)
+{
+    error.clear();
+    if (sampleRate <= 0 || maximumBlockSize <= 0 || settleMilliseconds < 0 || !hooks.restorePreset || !hooks.validateMidiReset ||
+        !hooks.pumpMessages || !hooks.shouldStop)
+    {
+        error = "Invalid render preparation settings or missing host hooks.";
+        return false;
+    }
+
+    // A preparation block is stopped transport, not MIDI-file pre-roll. Restore
+    // the caller's playhead even on a failed restore or cancellation.
+    struct PreparationTransport final : juce::AudioPlayHead
+    {
+        explicit PreparationTransport(juce::AudioProcessor& target) : processor(target), previous(target.getPlayHead())
+        {
+            processor.setPlayHead(this);
+        }
+        ~PreparationTransport() override
+        {
+            processor.setPlayHead(previous);
+        }
+        juce::Optional<PositionInfo> getPosition() const override
+        {
+            auto position = PositionInfo{};
+            position.setTimeInSamples(0);
+            position.setTimeInSeconds(0.0);
+            position.setPpqPosition(0.0);
+            position.setBpm(120.0);
+            position.setIsPlaying(false);
+            position.setIsRecording(false);
+            position.setIsLooping(false);
+            return position;
+        }
+        juce::AudioProcessor& processor;
+        juce::AudioPlayHead* previous;
+    };
+
+    auto stage = std::string{"initial MIDI reset"};
+    const auto stopped = [&]
+    {
+        if (!hooks.shouldStop())
+            return false;
+        error = "Render preparation stopped during " + stage + ".";
+        return true;
+    };
+    try
+    {
+        if (stopped())
+            return false;
+        const auto transport = PreparationTransport{processor};
+        const auto channels = std::max({2, processor.getTotalNumInputChannels(), processor.getTotalNumOutputChannels()});
+        auto buffer = juce::AudioBuffer<float>(channels, maximumBlockSize);
+        const auto resetMidi = [&]
+        {
+            auto mappingError = std::string{};
+            if (!hooks.validateMidiReset(mappingError))
+            {
+                error = "Render preparation " + stage + " failed: " + mappingError;
+                return false;
+            }
+            if (stopped())
+                return false;
+            auto midi = juce::MidiBuffer{};
+            for (int channel = 1; channel <= 16; ++channel)
+            {
+                midi.addEvent(juce::MidiMessage::allSoundOff(channel), 0);
+                midi.addEvent(juce::MidiMessage::allControllersOff(channel), 0);
+                midi.addEvent(juce::MidiMessage::allNotesOff(channel), 0);
+            }
+            buffer.setSize(channels, maximumBlockSize, false, false, true);
+            buffer.clear();
+            processor.processBlock(buffer, midi);
+            return !stopped();
+        };
+        if (!resetMidi())
+            return false;
+        stage = "engine reset";
+        processor.reset();
+        if (stopped())
+            return false;
+        stage = "preset restore";
+        auto restoreError = std::string{};
+        if (!hooks.restorePreset(restoreError))
+        {
+            error = "Render preparation preset restore failed: " + restoreError;
+            return false;
+        }
+
+        stage = "preset settling";
+        // Offline audio time does not advance the plug-in's message queue.
+        // Interleave wall-clock message dispatch and silent audio; neither alone
+        // is a readiness acknowledgment. Short slices bound stop latency.
+        for (int remaining = settleMilliseconds; remaining > 0;)
+        {
+            if (stopped())
+                return false;
+            const auto milliseconds = std::min(20, remaining);
+            hooks.pumpMessages(milliseconds);
+            auto samples = static_cast<std::int64_t>(std::ceil(milliseconds * static_cast<double>(sampleRate) / 1000.0));
+            while (samples > 0)
+            {
+                if (stopped())
+                    return false;
+                const auto count = static_cast<int>(std::min<std::int64_t>(samples, maximumBlockSize));
+                buffer.setSize(channels, count, false, false, true);
+                buffer.clear();
+                auto midi = juce::MidiBuffer{};
+                processor.processBlock(buffer, midi);
+                samples -= count;
+            }
+            remaining -= milliseconds;
+        }
+        stage = "final MIDI reset";
+        // JUCE's VST3 reset() deactivates/reactivates the engine. Do not call it
+        // here: that would invalidate the activation work just completed.
+        return !stopped() && resetMidi();
+    }
+    catch (const std::exception& exception)
+    {
+        error = "Render preparation failed during " + stage + ": " + exception.what();
+        return false;
+    }
+}
+
+bool verifyVstPresetMidiResetTransport(juce::AudioProcessor& processor, const int maximumBlockSize, const std::function<bool()>& shouldStop,
+                                       std::string& error)
+{
+    error.clear();
+    if (maximumBlockSize <= 0 || !shouldStop)
+    {
+        error = "Invalid MIDI reset verification block size or missing cancellation hook.";
+        return false;
+    }
+    if (shouldStop())
+    {
+        error = "MIDI reset verification stopped before processing.";
+        return false;
+    }
+    // HALion keeps IMidiMapping on its separate controller, not the component
+    // exposed by JUCE's public VST3Client. JUCE's MIDI conversion updates the
+    // corresponding hosted parameter cache when it queues the mapped CC.
+    // Verify that observable route, without private JUCE casts or fixed IDs.
+    // Reference: JUCE VST3PluginFormatImpl.h, associateWith(ProcessData&, MidiBuffer&).
+    constexpr std::array names{"Contr. 120", "Reset Ctrl", "AllNoteOff"};
+    constexpr std::array controllers{120, 121, 123};
+    struct Candidate
+    {
+        juce::AudioProcessorParameter* parameter;
+        float original;
+        bool matched = false;
+    };
+    auto families = std::array<std::vector<Candidate>, 3>{};
+    for (auto* parameter : processor.getParameters())
+        for (std::size_t family = 0; family < names.size(); ++family)
+            if (parameter != nullptr && parameter->getName(256) == names[family])
+                families[family].push_back({parameter, parameter->getValue(), false});
+    for (const auto& family : families)
+        if (family.size() < 16)
+        {
+            error = "HALion is missing the exposed reset parameters needed to verify CC120/121/123 on all 16 channels.";
+            return false;
+        }
+
+    const auto channels = std::max({2, processor.getTotalNumInputChannels(), processor.getTotalNumOutputChannels()});
+    auto buffer = juce::AudioBuffer<float>(channels, maximumBlockSize);
+    auto succeeded = true;
+    try
+    {
+        // Touch only reset controls; never record this verification audio.
+        // A nonzero cache sentinel makes even a repeated zero-valued MIDI reset
+        // observable. All original values are restored and drained below.
+        for (auto& family : families)
+            for (auto& candidate : family)
+                candidate.parameter->setValue(0.5f);
+        for (int channel = 1; channel <= 16 && succeeded; ++channel)
+            for (std::size_t family = 0; family < families.size() && succeeded; ++family)
+            {
+                if (shouldStop())
+                {
+                    error = "MIDI reset verification stopped during processing.";
+                    succeeded = false;
+                    break;
+                }
+                auto midi = juce::MidiBuffer{};
+                midi.addEvent(juce::MidiMessage::controllerEvent(channel, controllers[family], 0), 0);
+                buffer.clear();
+                processor.processBlock(buffer, midi);
+                auto matches = 0;
+                for (auto& candidate : families[family])
+                    if (!candidate.matched && candidate.parameter->getValue() == 0.0f)
+                    {
+                        candidate.matched = true;
+                        ++matches;
+                    }
+                if (matches != 1)
+                {
+                    error = "HALion MIDI reset CC" + std::to_string(controllers[family]) + " on channel " + std::to_string(channel) +
+                            " did not reach exactly one distinct VST3 parameter (observed " + std::to_string(matches) + ").";
+                    succeeded = false;
+                }
+            }
+    }
+    catch (const std::exception& exception)
+    {
+        error = "HALion MIDI reset transport verification failed: " + std::string(exception.what());
+        succeeded = false;
+    }
+    try
+    {
+        for (auto& family : families)
+            for (auto& candidate : family)
+                candidate.parameter->setValue(candidate.original);
+        buffer.clear();
+        auto midi = juce::MidiBuffer{};
+        processor.processBlock(buffer, midi);
+    }
+    catch (const std::exception& exception)
+    {
+        error += " Could not restore reset-control verification values: " + std::string(exception.what());
+        return false;
+    }
+    return succeeded;
 }
 
 VstPresetRenderSourceCollection collectVstPresetRenderSources(const std::filesystem::path& input, const bool recursive)

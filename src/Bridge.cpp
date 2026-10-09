@@ -1359,7 +1359,8 @@ juce::var makeVstPresetRenderManifest(const VstPresetRenderOptions& options, con
     auto* object = root.getDynamicObject();
     object->setProperty("format", "halionbridge-vstpreset-render");
     object->setProperty("format_version", 1);
-    object->setProperty("render_revision", 1);
+    object->setProperty("render_revision", detail::kVstPresetRenderRevision);
+    object->setProperty("midi_reset_policy", detail::kVstPresetMidiResetPolicy);
     object->setProperty("input", detail::toJuceString(options.inputPath));
     object->setProperty("recursive", options.recursive);
     object->setProperty("sample_rate", options.sampleRate);
@@ -1686,6 +1687,7 @@ struct Bridge::Impl
     bool loadPlugin(const juce::File& pluginFile, const AppOptions& options, double sampleRate = kSampleRate, int blockSize = kBlockSize);
     bool loadPlugin(const juce::File& pluginFile, const VstPresetRemapOptions& options);
     bool applyVstPresetData(const juce::MemoryBlock& presetData);
+    bool prepareRenderPreset(const juce::MemoryBlock& presetData, const VstPresetRenderOptions& options, std::string& error);
     RunResult runProcessingLoop(const AppOptions& options, const juce::File& builderRoot);
 
     juce::AudioPluginFormatManager formatManager;
@@ -2384,7 +2386,9 @@ RunResult Bridge::Impl::renderVstPresetsDetailed(const VstPresetRenderOptions& o
         }
         if (manifestFile.loadFileAsString().trim() != manifestJson.trim())
         {
-            log::error("The existing render manifest does not exactly match the selected inputs and render settings.");
+            log::error("The existing render manifest does not exactly match the selected inputs, render revision, and settings. "
+                       "Revision-1 audio predates per-pair MIDI reset and settling. Preserve old outputs and render into a separate "
+                       "directory, or explicitly use --overwrite to regenerate the selected matrix.");
             return RunResult::invalidOptions;
         }
         auto reportErrors = std::vector<std::string>{};
@@ -2413,6 +2417,9 @@ RunResult Bridge::Impl::renderVstPresetsDetailed(const VstPresetRenderOptions& o
 
     log::info("Preflighting {} preset(s), {} MIDI file(s), and {} render pair(s)...", presets.files.size(), midiFiles.files.size(),
               totalPairs);
+    if (options.presetSettleMilliseconds == 0)
+        log::warn("--preset-settle-ms 0 disables the preset activation guard; asynchronous preset loading can render the wrong sound. "
+                  "MIDI reset remains enabled.");
     auto requiredBytes = static_cast<long double>(0.0);
     for (std::size_t midiIndex = 0; midiIndex < midiFiles.files.size(); ++midiIndex)
     {
@@ -2850,33 +2857,14 @@ RunResult Bridge::Impl::renderVstPresetsDetailed(const VstPresetRenderOptions& o
             const auto& midi = midiFiles.files[midiIndex];
             const auto output = detail::makeVstPresetRenderOutputPath(preset, midi, error);
             auto render = detail::VstPresetAudioRenderResult{};
-            pluginInstance->reset();
-            if (!applyVstPresetData(presetData))
+            if (prepareRenderPreset(presetData, options, render.error))
             {
-                render.error = "HALion did not accept the VSTPreset state.";
-            }
-            else
-            {
-                if (options.presetSettleMilliseconds > 0)
-                {
-                    const auto settleSamples = static_cast<std::int64_t>(
-                        std::ceil(options.presetSettleMilliseconds * static_cast<double>(options.sampleRate) / 1000.0));
-                    auto buffer = juce::AudioBuffer<float>(
-                        std::max({2, pluginInstance->getTotalNumInputChannels(), pluginInstance->getTotalNumOutputChannels()}), kBlockSize);
-                    auto midiBuffer = juce::MidiBuffer{};
-                    for (auto processed = std::int64_t{}; processed < settleSamples; processed += kBlockSize)
-                    {
-                        const auto count = static_cast<int>(std::min<std::int64_t>(kBlockSize, settleSamples - processed));
-                        buffer.setSize(buffer.getNumChannels(), count, false, false, true);
-                        buffer.clear();
-                        pluginInstance->processBlock(buffer, midiBuffer);
-                    }
-                }
-                pluginInstance->reset();
                 const auto config = detail::VstPresetAudioRenderConfig{options.sampleRate, options.bitDepth, options.tailSeconds,
                                                                        kBlockSize, options.resume || options.overwrite};
                 render = detail::renderVstPresetMidiToWav(*pluginInstance, midi, output, config);
             }
+            if (isStopRequested())
+                return finish(RunResult::stopped);
 
             if (!appendVstPresetRenderReportRecord(*reportStream, makeVstPresetRenderReportRecord(pairIndex, preset, midi, output, render),
                                                    error))
@@ -2969,11 +2957,13 @@ RunResult Bridge::Impl::runVstPresetRenderTasks(const VstPresetRenderOptions& op
             juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("halionbridge-render-warmup", ".wav", false);
         for (int pass = 0; pass < maximumWarmupPasses; ++pass)
         {
-            pluginInstance->reset();
-            if (!applyVstPresetData(firstPresetData))
-                break;
-            pumpMessages(250);
-            pluginInstance->reset();
+            auto preparationError = std::string{};
+            if (!prepareRenderPreset(firstPresetData, options, preparationError))
+            {
+                log::error("Warm-up preparation failed for {} with {}: {}", firstTask.preset.sourcePath.string(),
+                           firstTask.midi.sourcePath.string(), preparationError);
+                return finish(isStopRequested() ? RunResult::stopped : RunResult::renderFailed);
+            }
             const auto warmupConfig = detail::VstPresetAudioRenderConfig{options.sampleRate, 16, 0.0, kBlockSize, true};
             const auto warmup =
                 detail::renderVstPresetMidiToWav(*pluginInstance, firstTask.midi, detail::toStdPath(warmupFile), warmupConfig);
@@ -2988,7 +2978,6 @@ RunResult Bridge::Impl::runVstPresetRenderTasks(const VstPresetRenderOptions& op
     auto failures = std::uint64_t{};
     auto presetData = juce::MemoryBlock{};
     auto loadedPreset = std::filesystem::path{};
-    auto renderedFirstState = false;
     for (std::size_t index = 0; index < tasks.size(); ++index)
     {
         const auto& task = tasks[index];
@@ -3006,41 +2995,14 @@ RunResult Bridge::Impl::runVstPresetRenderTasks(const VstPresetRenderOptions& op
         }
 
         auto render = detail::VstPresetAudioRenderResult{};
-        pluginInstance->reset();
-        if (!applyVstPresetData(presetData))
+        if (prepareRenderPreset(presetData, options, render.error))
         {
-            render.error = "HALion did not accept the VSTPreset state.";
-        }
-        else
-        {
-            if (!renderedFirstState)
-            {
-                // HALion completes some engine initialization on its message thread only after the first real Program state is loaded.
-                // Give that one-time initialization a bounded opportunity to finish before racing through offline audio blocks.
-                pumpMessages(250);
-                renderedFirstState = true;
-            }
-            if (options.presetSettleMilliseconds > 0)
-            {
-                pumpMessages(options.presetSettleMilliseconds);
-                const auto settleSamples = static_cast<std::int64_t>(
-                    std::ceil(options.presetSettleMilliseconds * static_cast<double>(options.sampleRate) / 1000.0));
-                auto buffer = juce::AudioBuffer<float>(
-                    std::max({2, pluginInstance->getTotalNumInputChannels(), pluginInstance->getTotalNumOutputChannels()}), kBlockSize);
-                auto midi = juce::MidiBuffer{};
-                for (auto processed = std::int64_t{}; processed < settleSamples; processed += kBlockSize)
-                {
-                    const auto count = static_cast<int>(std::min<std::int64_t>(kBlockSize, settleSamples - processed));
-                    buffer.setSize(buffer.getNumChannels(), count, false, false, true);
-                    buffer.clear();
-                    pluginInstance->processBlock(buffer, midi);
-                }
-            }
-            pluginInstance->reset();
             const auto config = detail::VstPresetAudioRenderConfig{options.sampleRate, options.bitDepth, options.tailSeconds, kBlockSize,
                                                                    options.overwrite};
             render = detail::renderVstPresetMidiToWav(*pluginInstance, task.midi, task.output, config);
         }
+        if (isStopRequested())
+            return finish(RunResult::stopped);
 
         auto error = std::string{};
         if (!appendVstPresetRenderReportRecord(
@@ -3840,6 +3802,43 @@ bool Bridge::Impl::loadPlugin(const juce::File& pluginFile, const AppOptions& op
 bool Bridge::Impl::loadPlugin(const juce::File& pluginFile, const VstPresetRemapOptions& options)
 {
     return loadPlugin(pluginFile, toRuntimeOptions(options));
+}
+
+bool Bridge::Impl::prepareRenderPreset(const juce::MemoryBlock& presetData, const VstPresetRenderOptions& options, std::string& error)
+{
+    if (!pluginInstance)
+    {
+        error = "Cannot prepare a render without a loaded HALion instance.";
+        return false;
+    }
+    const auto hooks = detail::VstPresetRenderPreparationHooks{
+        [&](std::string& restoreError)
+        {
+            if (applyVstPresetData(presetData))
+                return true;
+            restoreError = "HALion did not accept the VSTPreset state.";
+            return false;
+        },
+        [&](std::string& mappingError)
+        {
+            if (pluginInstance->getVST3Client() == nullptr || !pluginInstance->acceptsMidi())
+            {
+                mappingError = "HALion does not expose a VST3 MIDI input.";
+                return false;
+            }
+            // Mapping assignments can change while the preset loads and the
+            // host pumps messages. Revalidate at both reset stages, not once
+            // per processor lifetime.
+            const auto verified =
+                detail::verifyVstPresetMidiResetTransport(*pluginInstance, kBlockSize, [] { return isStopRequested(); }, mappingError);
+            if (verified)
+                log::debug("Verified VST3 MIDI reset delivery: CC120/121/123 on all 16 input channels.");
+            return verified;
+        },
+        [](const int milliseconds) { pumpMessages(milliseconds); }, [] { return isStopRequested(); }};
+    log::debug("Preparing render state: {} ms settling, MIDI reset policy {}.", options.presetSettleMilliseconds,
+               detail::kVstPresetMidiResetPolicy);
+    return detail::prepareVstPresetRender(*pluginInstance, options.sampleRate, kBlockSize, options.presetSettleMilliseconds, hooks, error);
 }
 
 bool Bridge::Impl::applyVstPresetData(const juce::MemoryBlock& presetData)

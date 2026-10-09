@@ -99,7 +99,7 @@ struct VstPresetRenderOptions
     int sampleRate = 48000;
     int bitDepth = 24;
     double tailSeconds = 0.0;
-    int presetSettleMilliseconds = 0;
+    int presetSettleMilliseconds = 500;
     int timeoutSeconds = 3600;
     int chunkSize = 32;
     int jobs = 1;

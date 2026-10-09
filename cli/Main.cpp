@@ -294,7 +294,7 @@ void writeRenderVstPresetsHelp(std::ostream& output, const bool includeHeader = 
            << "  --sample-rate <n>          Output sample rate. Defaults to 48000.\n"
            << "  --bit-depth <16|24|32>     PCM 16/24-bit or IEEE float 32-bit. Defaults to 24.\n"
            << "  --tail-seconds <seconds>   Render beyond the MIDI end. Defaults to 0.\n"
-           << "  --preset-settle-ms <ms>    Silent processing time after each preset load. Defaults to 0.\n"
+           << "  --preset-settle-ms <ms>    Preset activation guard before each MIDI file. Defaults to 500.\n"
            << "\n"
            << "Runtime:\n"
            << "  --chunk-size <n>           Render pairs per isolated work unit. Defaults to 32.\n"

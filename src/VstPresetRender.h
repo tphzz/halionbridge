@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -15,6 +16,25 @@ class AudioProcessor;
 
 namespace halionbridge::detail
 {
+
+inline constexpr int kVstPresetRenderRevision = 2;
+inline constexpr auto kVstPresetMidiResetPolicy = "all-channels-cc120-121-123-v1";
+
+bool verifyVstPresetMidiResetTransport(juce::AudioProcessor& processor, int maximumBlockSize, const std::function<bool()>& shouldStop,
+                                       std::string& error);
+
+// Host operations stay on the caller's message thread. The pump must service
+// messages for the requested wall-clock interval; audio preparation is discarded.
+struct VstPresetRenderPreparationHooks
+{
+    std::function<bool(std::string&)> restorePreset;
+    std::function<bool(std::string&)> validateMidiReset;
+    std::function<void(int)> pumpMessages;
+    std::function<bool()> shouldStop;
+};
+
+bool prepareVstPresetRender(juce::AudioProcessor& processor, int sampleRate, int maximumBlockSize, int settleMilliseconds,
+                            const VstPresetRenderPreparationHooks& hooks, std::string& error);
 
 struct VstPresetRenderSource
 {

@@ -7,6 +7,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_core/juce_core.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <deque>
@@ -16,7 +17,7 @@
 namespace
 {
 
-class LatencyImpulseProcessor final : public juce::AudioProcessor
+class LatencyImpulseProcessor : public juce::AudioProcessor
 {
   public:
     LatencyImpulseProcessor() : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true))
@@ -98,6 +99,237 @@ class LatencyImpulseProcessor final : public juce::AudioProcessor
     std::deque<std::int64_t> pendingSamples;
 };
 
+// Preset restoration is deliberately asynchronous here: neither an engine reset,
+// message pumping alone, nor MIDI-file pre-roll can activate the requested state.
+class DelayedPresetProcessor final : public LatencyImpulseProcessor
+{
+  public:
+    struct ChannelState
+    {
+        bool sounding = true;
+        bool heldNote = true;
+        bool sustain = true;
+        int modulation = 127;
+        int pitchBend = 16383;
+        int pressure = 127;
+        int volume = 91;
+        int pan = 35;
+    };
+
+    void reset() override
+    {
+        ++resetCount;
+        activePreset = 0;
+        pendingPreset = 0;
+    }
+
+    bool restore(const int preset)
+    {
+        cleanBeforeRestore = isClean();
+        ++restoreCount;
+        pendingPreset = preset;
+        pumpedSinceRestore = false;
+        channels.fill(ChannelState{});
+        return true;
+    }
+
+    void pump(const int milliseconds)
+    {
+        pumpedSinceRestore = true;
+        pumpDurations.push_back(milliseconds);
+    }
+
+    bool isClean() const
+    {
+        for (const auto& channel : channels)
+            if (channel.sounding || channel.heldNote || channel.sustain || channel.modulation != 0 || channel.pitchBend != 8192 ||
+                channel.pressure != 0 || channel.volume != 91 || channel.pan != 35)
+                return false;
+        return true;
+    }
+
+    void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override
+    {
+        ++processCount;
+        maximumObservedBlockSize = std::max(maximumObservedBlockSize, buffer.getNumSamples());
+        if (!recording)
+        {
+            if (const auto* currentPlayHead = getPlayHead())
+                if (const auto position = currentPlayHead->getPosition())
+                    preparationTransportWasPlaying |= position->getIsPlaying();
+            silentPreparationInput &= buffer.getMagnitude(0, buffer.getNumSamples()) == 0.0f;
+        }
+
+        if (pendingPreset != 0 && pumpedSinceRestore && midi.isEmpty())
+        {
+            activePreset = pendingPreset;
+            pendingPreset = 0;
+            setLatencySamples(29);
+        }
+
+        for (const auto metadata : midi)
+        {
+            const auto message = metadata.getMessage();
+            if (recording)
+            {
+                if (message.isNoteOn())
+                {
+                    noteStartedClean &= isClean();
+                    notePreset = activePreset;
+                }
+                continue;
+            }
+
+            if (!message.isController() || message.getChannel() < 1 || message.getChannel() > 16)
+            {
+                unexpectedPreparationMidi = true;
+                continue;
+            }
+            auto& channel = channels[static_cast<std::size_t>(message.getChannel() - 1)];
+            const auto controller = message.getControllerNumber();
+            if (controller == 120)
+                channel.sounding = false;
+            else if (controller == 121)
+            {
+                channel.sustain = false;
+                channel.modulation = 0;
+                channel.pitchBend = 8192;
+                channel.pressure = 0;
+            }
+            else if (controller == 123)
+                channel.heldNote = false;
+            else
+                unexpectedPreparationMidi = true;
+            if (message.getControllerValue() != 0)
+                unexpectedPreparationMidi = true;
+        }
+        LatencyImpulseProcessor::processBlock(buffer, midi);
+    }
+
+    std::array<ChannelState, 16> channels{};
+    std::vector<int> pumpDurations;
+    int activePreset = 7;
+    int pendingPreset = 0;
+    int resetCount = 0;
+    int restoreCount = 0;
+    int processCount = 0;
+    int maximumObservedBlockSize = 0;
+    int notePreset = 0;
+    bool cleanBeforeRestore = false;
+    bool recording = false;
+    bool noteStartedClean = true;
+    bool silentPreparationInput = true;
+    bool preparationTransportWasPlaying = false;
+    bool unexpectedPreparationMidi = false;
+
+  private:
+    bool pumpedSinceRestore = false;
+};
+
+class MappedResetProcessor final : public LatencyImpulseProcessor
+{
+  public:
+    enum class Mapping
+    {
+        valid,
+        missingParameter,
+        droppedMessage,
+        duplicateChannel,
+        ambiguousChange
+    };
+
+    explicit MappedResetProcessor(const Mapping mappingMode = Mapping::valid, const int familySize = 16) : mapping(mappingMode)
+    {
+        constexpr std::array names{"Contr. 120", "Reset Ctrl", "AllNoteOff"};
+        for (std::size_t family = 0; family < names.size(); ++family)
+            for (int channel = 0; channel < familySize; ++channel)
+            {
+                if (mapping == Mapping::missingParameter && family == 1 && channel == 15)
+                    continue;
+                auto parameter = std::make_unique<juce::AudioParameterFloat>(
+                    juce::ParameterID{juce::String(static_cast<int>(family)) + "_" + juce::String(channel), 1}, names[family],
+                    juce::NormalisableRange<float>{0.0f, 1.0f}, 0.1f + static_cast<float>(channel) * 0.01f);
+                resetParameters[family].push_back(parameter.get());
+                addParameter(parameter.release());
+            }
+        for (const auto* name : {"Volume", "Reset Ctrl Amount", "Contr. 120 Extended"})
+        {
+            auto parameter = std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{name, 1}, name,
+                                                                         juce::NormalisableRange<float>{0.0f, 1.0f}, 0.73f);
+            unrelatedParameters.push_back(parameter.get());
+            addParameter(parameter.release());
+        }
+        originalValues = values();
+    }
+
+    std::vector<float> values() const
+    {
+        auto result = std::vector<float>{};
+        for (const auto* parameter : getParameters())
+            result.push_back(parameter->getValue());
+        return result;
+    }
+
+    void changeMapping(const Mapping mappingMode)
+    {
+        mapping = mappingMode;
+    }
+
+    void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override
+    {
+        ++processCount;
+        maximumObservedBlockSize = std::max(maximumObservedBlockSize, buffer.getNumSamples());
+        silentInput &= buffer.getMagnitude(0, buffer.getNumSamples()) == 0.0f;
+        for (const auto* parameter : unrelatedParameters)
+            unrelatedControlsUntouched &= parameter->getValue() == 0.73f;
+        temporaryValuesObserved |= values() != originalValues;
+        if (temporaryValuesObserved && midi.isEmpty() && values() == originalValues)
+            restorationDrained = true;
+
+        for (const auto metadata : midi)
+        {
+            ++messageCount;
+            const auto message = metadata.getMessage();
+            if (!message.isController() || message.getControllerValue() != 0)
+            {
+                unexpectedMidi = true;
+                continue;
+            }
+            const auto controller = message.getControllerNumber();
+            const auto family = controller == 120 ? 0 : controller == 121 ? 1 : controller == 123 ? 2 : -1;
+            if (family < 0 || message.getChannel() < 1 || message.getChannel() > 16)
+            {
+                unexpectedMidi = true;
+                continue;
+            }
+            if (mapping == Mapping::droppedMessage && controller == 123 && message.getChannel() == 16)
+                continue;
+            const auto channel = mapping == Mapping::duplicateChannel && message.getChannel() == 16 ? 14 : message.getChannel() - 1;
+            auto& candidates = resetParameters[static_cast<std::size_t>(family)];
+            if (static_cast<std::size_t>(channel) < candidates.size())
+                candidates[static_cast<std::size_t>(channel)]->setValue(0.0f);
+            if (mapping == Mapping::ambiguousChange && controller == 121 && message.getChannel() == 1)
+                candidates[1]->setValue(0.0f);
+        }
+        buffer.clear();
+    }
+
+    std::vector<float> originalValues;
+    int processCount = 0;
+    int messageCount = 0;
+    int maximumObservedBlockSize = 0;
+    bool silentInput = true;
+    bool unexpectedMidi = false;
+    bool unrelatedControlsUntouched = true;
+    bool restorationDrained = false;
+
+  private:
+    Mapping mapping;
+    bool temporaryValuesObserved = false;
+    std::array<std::vector<juce::AudioProcessorParameter*>, 3> resetParameters;
+    std::vector<juce::AudioProcessorParameter*> unrelatedParameters;
+};
+
 class VstPresetRenderTests final : public juce::UnitTest
 {
   public:
@@ -175,6 +407,22 @@ class VstPresetRenderTests final : public juce::UnitTest
             expect(midi.replaceWithText("midi"));
             const auto base =
                 std::vector<std::string>{"--input", preset.getFullPathName().toStdString(), "--midi", midi.getFullPathName().toStdString()};
+
+            const auto defaults = halionbridge::detail::parseVstPresetRenderOptionsDetailed(base);
+            expect(defaults.options.has_value());
+            if (defaults.options)
+                expectEquals(defaults.options->presetSettleMilliseconds, 500);
+            expectEquals(halionbridge::VstPresetRenderOptions{}.presetSettleMilliseconds, 500);
+
+            auto zeroSettle = base;
+            zeroSettle.insert(zeroSettle.end(), {"--preset-settle-ms", "0"});
+            const auto parsedZeroSettle = halionbridge::detail::parseVstPresetRenderOptionsDetailed(zeroSettle);
+            expect(parsedZeroSettle.options.has_value());
+            if (parsedZeroSettle.options)
+                expectEquals(parsedZeroSettle.options->presetSettleMilliseconds, 0);
+            auto negativeSettle = base;
+            negativeSettle.insert(negativeSettle.end(), {"--preset-settle-ms", "-1"});
+            expect(!halionbridge::detail::parseVstPresetRenderOptionsDetailed(negativeSettle).options.has_value());
 
             auto conflicting = base;
             conflicting.insert(conflicting.end(), {"--resume", "--overwrite"});
@@ -377,6 +625,301 @@ class VstPresetRenderTests final : public juce::UnitTest
             root.deleteRecursively();
         }
 
+        beginTest("MIDI reset transport verifies distinct mappings on all channels and restores every parameter");
+        {
+            for (const auto familySize : {16, 17})
+            {
+                auto processor = MappedResetProcessor{MappedResetProcessor::Mapping::valid, familySize};
+                auto error = std::string{};
+                expect(halionbridge::detail::verifyVstPresetMidiResetTransport(processor, 64, [] { return false; }, error), error);
+                expectEquals(processor.messageCount, 48);
+                expect(processor.values() == processor.originalValues);
+                expect(processor.restorationDrained);
+                expect(processor.unrelatedControlsUntouched);
+                expect(!processor.unexpectedMidi);
+                expect(processor.silentInput);
+                expect(processor.maximumObservedBlockSize <= 64);
+            }
+        }
+
+        beginTest("MIDI reset transport rejects missing parameter families before sending MIDI");
+        {
+            auto processor = MappedResetProcessor{MappedResetProcessor::Mapping::missingParameter};
+            auto error = std::string{};
+            expect(!halionbridge::detail::verifyVstPresetMidiResetTransport(processor, 64, [] { return false; }, error));
+            expect(!error.empty());
+            expectEquals(processor.messageCount, 0);
+            expect(processor.values() == processor.originalValues);
+            expect(processor.unrelatedControlsUntouched);
+        }
+
+        beginTest("MIDI reset transport rejects dropped, duplicate-channel, and ambiguous mappings without retaining probe values");
+        {
+            for (const auto mapping : {MappedResetProcessor::Mapping::droppedMessage, MappedResetProcessor::Mapping::duplicateChannel,
+                                       MappedResetProcessor::Mapping::ambiguousChange})
+            {
+                auto processor = MappedResetProcessor{mapping};
+                auto error = std::string{};
+                expect(!halionbridge::detail::verifyVstPresetMidiResetTransport(processor, 64, [] { return false; }, error));
+                expect(!error.empty());
+                expect(processor.messageCount > 0);
+                expect(processor.values() == processor.originalValues, "Temporary reset-parameter values must not survive failure");
+                expect(processor.restorationDrained);
+                expect(processor.unrelatedControlsUntouched);
+                expect(!processor.unexpectedMidi);
+            }
+        }
+
+        beginTest("MIDI reset transport rejects invalid processing sizes without touching parameters");
+        {
+            auto processor = MappedResetProcessor{};
+            auto error = std::string{};
+            expect(!halionbridge::detail::verifyVstPresetMidiResetTransport(processor, 0, [] { return false; }, error));
+            expect(!error.empty());
+            expect(!halionbridge::detail::verifyVstPresetMidiResetTransport(processor, -1, [] { return false; }, error));
+            expect(!error.empty());
+            expectEquals(processor.processCount, 0);
+            expect(processor.values() == processor.originalValues);
+        }
+
+        beginTest("MIDI reset transport requires cancellation support and honors an already-stopped operation before mutation");
+        {
+            auto processor = MappedResetProcessor{};
+            auto error = std::string{};
+            expect(!halionbridge::detail::verifyVstPresetMidiResetTransport(processor, 64, {}, error));
+            expect(!error.empty());
+            expectEquals(processor.processCount, 0);
+            expect(processor.values() == processor.originalValues);
+
+            expect(!halionbridge::detail::verifyVstPresetMidiResetTransport(processor, 64, [] { return true; }, error));
+            expect(!error.empty());
+            expectEquals(processor.processCount, 0);
+            expect(processor.values() == processor.originalValues);
+        }
+
+        beginTest("MIDI reset transport cancels between discarded blocks while still restoring and draining temporary values");
+        {
+            auto processor = MappedResetProcessor{};
+            auto error = std::string{};
+            expect(!halionbridge::detail::verifyVstPresetMidiResetTransport(
+                processor, 64, [&processor] { return processor.processCount >= 3; }, error));
+            expect(!error.empty());
+            expectEquals(processor.processCount, 4, "Three verification blocks followed by the mandatory restoration drain");
+            expect(processor.messageCount > 0 && processor.messageCount < 48);
+            expect(processor.values() == processor.originalValues);
+            expect(processor.restorationDrained);
+            expect(processor.unrelatedControlsUntouched);
+            expect(!processor.unexpectedMidi);
+        }
+
+        beginTest("Preparation revalidates MIDI reset transport after both preset restore and asynchronous activation");
+        {
+            for (const auto invalidateWhenPumping : {false, true})
+            {
+                auto processor = MappedResetProcessor{};
+                auto restored = false;
+                auto validationCount = 0;
+                auto hooks = halionbridge::detail::VstPresetRenderPreparationHooks{};
+                hooks.shouldStop = [] { return false; };
+                hooks.validateMidiReset = [&processor, &validationCount, &hooks](std::string& validationError)
+                {
+                    ++validationCount;
+                    return halionbridge::detail::verifyVstPresetMidiResetTransport(processor, 64, hooks.shouldStop, validationError);
+                };
+                hooks.restorePreset = [&processor, &restored, invalidateWhenPumping](std::string&)
+                {
+                    restored = true;
+                    if (!invalidateWhenPumping)
+                        processor.changeMapping(MappedResetProcessor::Mapping::droppedMessage);
+                    return true;
+                };
+                hooks.pumpMessages = [&processor, &restored, invalidateWhenPumping](int)
+                {
+                    if (restored && invalidateWhenPumping)
+                        processor.changeMapping(MappedResetProcessor::Mapping::droppedMessage);
+                };
+                auto error = std::string{};
+                expect(!halionbridge::detail::prepareVstPresetRender(processor, 48000, 64, 21, hooks, error));
+                expect(!error.empty());
+                expect(restored);
+                expectEquals(validationCount, 2, "A pre-restore mapping result cannot establish post-activation transport safety");
+                expect(processor.getPlayHead() == nullptr);
+                expect(processor.unrelatedControlsUntouched);
+            }
+        }
+
+        beginTest("Every preparation activates its preset and clears MIDI residue on all channels");
+        {
+            auto processor = DelayedPresetProcessor{};
+            processor.prepareToPlay(48000.0, 64);
+            auto requestedPreset = 11;
+            auto hooks = preparationHooks(processor, requestedPreset);
+            auto error = std::string{};
+
+            for (const auto preset : {11, 11, 23})
+            {
+                requestedPreset = preset;
+                processor.channels.fill(DelayedPresetProcessor::ChannelState{});
+                expect(halionbridge::detail::prepareVstPresetRender(processor, 48000, 64, 45, hooks, error), error);
+                expectEquals(processor.activePreset, preset);
+                expect(processor.cleanBeforeRestore, "The previous performance must be cleared before restoring the preset");
+                expect(processor.isClean(), "Restored MIDI residue must be cleared before recording starts");
+                expect(!processor.unexpectedPreparationMidi, "Preparation must not change programs or unrelated controllers");
+                expect(processor.silentPreparationInput);
+                expect(!processor.preparationTransportWasPlaying);
+                expect(processor.getPlayHead() == nullptr);
+            }
+            expectEquals(processor.restoreCount, 3);
+            expectEquals(processor.resetCount, 3);
+            expect(processor.maximumObservedBlockSize <= 64);
+            expect(!processor.pumpDurations.empty());
+            for (const auto milliseconds : processor.pumpDurations)
+                expect(milliseconds > 0 && milliseconds <= 20, "Settling must yield in bounded, cancellation-aware slices");
+        }
+
+        beginTest("Zero settling still resets MIDI and restores the preset without claiming asynchronous readiness");
+        {
+            auto processor = DelayedPresetProcessor{};
+            auto requestedPreset = 11;
+            const auto hooks = preparationHooks(processor, requestedPreset);
+            auto error = std::string{};
+            expect(halionbridge::detail::prepareVstPresetRender(processor, 48000, 64, 0, hooks, error), error);
+            expect(processor.cleanBeforeRestore);
+            expect(processor.isClean());
+            expectEquals(processor.restoreCount, 1);
+            expectEquals(processor.resetCount, 1);
+            expect(processor.pumpDurations.empty());
+        }
+
+        beginTest("Preparation validates its inputs and required hooks before touching processor state");
+        {
+            auto processor = DelayedPresetProcessor{};
+            auto requestedPreset = 11;
+            const auto hooks = preparationHooks(processor, requestedPreset);
+            auto error = std::string{};
+            expect(!halionbridge::detail::prepareVstPresetRender(processor, 0, 64, 1, hooks, error));
+            expect(!error.empty());
+            expect(!halionbridge::detail::prepareVstPresetRender(processor, 48000, 0, 1, hooks, error));
+            expect(!error.empty());
+            expect(!halionbridge::detail::prepareVstPresetRender(processor, 48000, 64, -1, hooks, error));
+            expect(!error.empty());
+
+            auto missingRestore = hooks;
+            missingRestore.restorePreset = {};
+            expect(!halionbridge::detail::prepareVstPresetRender(processor, 48000, 64, 1, missingRestore, error));
+            expect(!error.empty());
+            auto missingMappingValidation = hooks;
+            missingMappingValidation.validateMidiReset = {};
+            expect(!halionbridge::detail::prepareVstPresetRender(processor, 48000, 64, 1, missingMappingValidation, error));
+            expect(!error.empty());
+            auto missingPump = hooks;
+            missingPump.pumpMessages = {};
+            expect(!halionbridge::detail::prepareVstPresetRender(processor, 48000, 64, 1, missingPump, error));
+            expect(!error.empty());
+            expectEquals(processor.processCount, 0);
+            expectEquals(processor.resetCount, 0);
+            expectEquals(processor.restoreCount, 0);
+        }
+
+        beginTest("Unmapped reset messages and failed preset restores fail preparation with actionable errors");
+        {
+            auto processor = DelayedPresetProcessor{};
+            auto requestedPreset = 11;
+            auto hooks = preparationHooks(processor, requestedPreset);
+            hooks.validateMidiReset = [](std::string& error)
+            {
+                error = "Controller 121 on channel 16 is not mapped";
+                return false;
+            };
+            auto error = std::string{};
+            expect(!halionbridge::detail::prepareVstPresetRender(processor, 48000, 64, 1, hooks, error));
+            expect(error.find("Controller 121 on channel 16") != std::string::npos, error);
+            expectEquals(processor.processCount, 0);
+            expectEquals(processor.resetCount, 0);
+            expectEquals(processor.restoreCount, 0);
+
+            hooks = preparationHooks(processor, requestedPreset);
+            hooks.restorePreset = [](std::string& restoreError)
+            {
+                restoreError = "Preset state could not be restored";
+                return false;
+            };
+            expect(!halionbridge::detail::prepareVstPresetRender(processor, 48000, 64, 1, hooks, error));
+            expect(error.find("Preset state could not be restored") != std::string::npos, error);
+            expect(processor.pumpDurations.empty());
+            expect(processor.getPlayHead() == nullptr);
+        }
+
+        beginTest("Preparation cancels before mutation or during a bounded settling interval");
+        {
+            auto processor = DelayedPresetProcessor{};
+            auto requestedPreset = 11;
+            auto hooks = preparationHooks(processor, requestedPreset);
+            hooks.shouldStop = [] { return true; };
+            auto error = std::string{};
+            expect(!halionbridge::detail::prepareVstPresetRender(processor, 48000, 64, 45, hooks, error));
+            expect(!error.empty());
+            expectEquals(processor.processCount, 0);
+            expectEquals(processor.resetCount, 0);
+            expectEquals(processor.restoreCount, 0);
+
+            hooks.shouldStop = [&processor] { return !processor.pumpDurations.empty(); };
+            expect(!halionbridge::detail::prepareVstPresetRender(processor, 48000, 64, 45, hooks, error));
+            expect(!error.empty());
+            expectEquals(static_cast<int>(processor.pumpDurations.size()), 1);
+            expectEquals(processor.restoreCount, 1);
+            expect(processor.getPlayHead() == nullptr);
+        }
+
+        beginTest("Discarded preparation preserves time-zero notes, event offsets, latency compensation, and WAV tail");
+        {
+            const auto root = makeTempRoot("prepared_audio");
+            const auto output = root.getChildFile("Voice__Phrase.wav");
+            auto processor = DelayedPresetProcessor{};
+            processor.prepareToPlay(48000.0, 64);
+            auto requestedPreset = 11;
+            const auto hooks = preparationHooks(processor, requestedPreset);
+            auto error = std::string{};
+            expect(halionbridge::detail::prepareVstPresetRender(processor, 48000, 64, 21, hooks, error), error);
+            expectEquals(processor.getLatencySamples(), 29);
+
+            auto midi = halionbridge::detail::MidiRenderSequence{};
+            midi.durationSeconds = 0.01;
+            midi.tempoPoints.push_back({0.0, 0.0, 120.0});
+            midi.timeSignaturePoints.push_back({0.0, 0.0, 4, 4});
+            midi.events.push_back({juce::MidiMessage::noteOn(1, 60, static_cast<juce::uint8>(100)), 0.0, 0, 0});
+            midi.events.push_back({juce::MidiMessage::noteOn(16, 64, static_cast<juce::uint8>(100)), 0.001, 0, 1});
+            processor.recording = true;
+            processor.playHeadSamples.clear();
+            const auto config = halionbridge::detail::VstPresetAudioRenderConfig{48000, 32, 0.002, 64, false};
+            const auto rendered =
+                halionbridge::detail::renderVstPresetMidiToWav(processor, midi, halionbridge::detail::toStdPath(output), config);
+            expect(rendered.succeeded, rendered.error);
+            expectEquals(rendered.metrics.sampleCount, static_cast<std::int64_t>(576));
+            expectEquals(rendered.metrics.latencySamples, 29);
+            expectEquals(processor.notePreset, requestedPreset);
+            expect(processor.noteStartedClean);
+            expect(!processor.playHeadSamples.empty());
+            if (!processor.playHeadSamples.empty())
+                expectEquals(processor.playHeadSamples.front(), static_cast<std::int64_t>(0));
+            expect(processor.getPlayHead() == nullptr);
+
+            auto wav = juce::WavAudioFormat{};
+            auto input = output.createInputStream();
+            auto reader = std::unique_ptr<juce::AudioFormatReader>(wav.createReaderFor(input.release(), true));
+            expect(reader != nullptr);
+            if (reader != nullptr)
+            {
+                expectEquals(reader->lengthInSamples, static_cast<juce::int64>(576));
+                auto samples = juce::AudioBuffer<float>(2, 576);
+                expect(reader->read(&samples, 0, 576, 0, true, true));
+                for (int channel = 0; channel < 2; ++channel)
+                    for (int sample = 0; sample < 576; ++sample)
+                        expectWithinAbsoluteError(samples.getSample(channel, sample), sample == 0 || sample == 48 ? 0.5f : 0.0f, 0.000001f);
+            }
+            root.deleteRecursively();
+        }
+
         beginTest("Render length validation rejects invalid values and rounds up fractional samples");
         {
             auto error = std::string{};
@@ -389,6 +932,17 @@ class VstPresetRenderTests final : public juce::UnitTest
     }
 
   private:
+    static halionbridge::detail::VstPresetRenderPreparationHooks preparationHooks(DelayedPresetProcessor& processor,
+                                                                                  const int& requestedPreset)
+    {
+        auto hooks = halionbridge::detail::VstPresetRenderPreparationHooks{};
+        hooks.restorePreset = [&processor, &requestedPreset](std::string&) { return processor.restore(requestedPreset); };
+        hooks.validateMidiReset = [](std::string&) { return true; };
+        hooks.pumpMessages = [&processor](const int milliseconds) { processor.pump(milliseconds); };
+        hooks.shouldStop = [] { return false; };
+        return hooks;
+    }
+
     enum class MidiExtra
     {
         none,
