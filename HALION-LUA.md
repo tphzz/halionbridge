@@ -50,7 +50,7 @@ A build directory may contain `halionbridge_build_manifest.json` when its script
 }
 ```
 
-`schema_version` must be the integer `1`. `output_directories` must be an array of unique, non-empty relative directory strings normalized with forward slashes. Entries must not contain backslashes, absolute or rooted paths, empty components, `.` or `..`; duplicates are compared case-insensitively so one manifest remains portable between Windows and macOS.
+`schema_version` must be the integer `1`. `output_directories` must be an array of unique, non-empty relative directory strings normalized with forward slashes. Entries must not contain backslashes, absolute or rooted paths, empty components, `.` or `..`; duplicates are compared case-insensitively so one manifest remains portable between Windows and macOS. Windows drive prefixes such as `C:/presets`, `C:presets`, or `C:` are rejected on both platforms, including macOS. An ordinary relative directory such as `C/presets` is valid.
 
 Before HALion is loaded or instantiated, halionbridge parses the optional manifest and creates every declared directory below the effective preset output root. The effective root is the build directory unless `--output-directory` was supplied. Existing parents must be real directories rather than files or symbolic links. A malformed/unsupported manifest, unusable parent, or directory-creation failure stops the build before plugin startup; directories created during a failed preflight are rolled back. Omitting the manifest preserves existing behavior, so flat-output and script-managed build directories do not need one.
 

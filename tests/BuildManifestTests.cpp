@@ -64,21 +64,45 @@ class BuildManifestTests final : public juce::UnitTest
             expectRejected(R"({"schema_version":1,"output_directories":[1]})");
             expectRejected(R"({"schema_version":1,"output_directories":["../escape"]})");
             expectRejected(R"({"schema_version":1,"output_directories":["C:/escape"]})");
+            expectRejected(R"({"schema_version":1,"output_directories":["z:/escape"]})");
+            expectRejected(R"({"schema_version":1,"output_directories":["C:escape"]})");
+            expectRejected(R"({"schema_version":1,"output_directories":["z:escape"]})");
+            expectRejected(R"({"schema_version":1,"output_directories":["C:"]})");
+            expectRejected(R"({"schema_version":1,"output_directories":["/escape"]})");
+            expectRejected(R"({"schema_version":1,"output_directories":["//server/share"]})");
             expectRejected(R"({"schema_version":1,"output_directories":["nested\\preset"]})");
             expectRejected(R"({"schema_version":1,"output_directories":["Preset","preset"]})");
+        }
+
+        beginTest("Rejects drive-prefixed entries before creating any output directories");
+        {
+            auto build = ScopedTestDirectory("manifest_drive_build");
+            auto output = ScopedTestDirectory("manifest_drive_output");
+            for (const auto* invalidPath : {"C:/escape", "z:escape", "C:"})
+            {
+                const auto json = juce::String(R"({"schema_version":1,"output_directories":["valid/nested",")") + invalidPath + R"("]})";
+                expect(build.directory.getChildFile("halionbridge_build_manifest.json").replaceWithText(json));
+                const auto error = halionbridge::detail::prepareBuildManifestOutputDirectories(build.path(), output.path());
+                expect(error.has_value(), invalidPath);
+                if (error)
+                    expectEquals(error->code, std::string("manifest-output-directory"));
+                expect(std::filesystem::is_empty(output.path()), "Rejected manifests must create no output directories.");
+            }
         }
 
         beginTest("Pre-creates nested directories below the effective output root");
         {
             auto build = ScopedTestDirectory("manifest_build");
             auto output = ScopedTestDirectory("manifest_output");
-            expect(build.directory.getChildFile("halionbridge_build_manifest.json")
-                       .replaceWithText(R"({"schema_version":1,"output_directories":["bank_001/01_voice","single_002_voice"]})"));
+            expect(
+                build.directory.getChildFile("halionbridge_build_manifest.json")
+                    .replaceWithText(R"({"schema_version":1,"output_directories":["bank_001/01_voice","single_002_voice","C/library"]})"));
 
             const auto error = halionbridge::detail::prepareBuildManifestOutputDirectories(build.path(), output.path());
             expect(!error.has_value());
             expect(output.directory.getChildFile("bank_001/01_voice").isDirectory());
             expect(output.directory.getChildFile("single_002_voice").isDirectory());
+            expect(output.directory.getChildFile("C/library").isDirectory());
         }
 
         beginTest("Fails before plugin instantiation when an output parent is not a directory");

@@ -34,7 +34,11 @@ std::string lowerCase(std::string text)
 
 bool isSafeManifestDirectory(const std::string_view text, std::filesystem::path& path)
 {
-    if (text.empty() || text.contains('\\') || text.contains('\0'))
+    // Root-name recognition is host-dependent: macOS treats C:/dir and C:dir
+    // as relative names. Manifest entries must reject drive prefixes on both OSes.
+    const auto hasWindowsDrivePrefix =
+        text.size() >= 2 && text[1] == ':' && ((text[0] >= 'A' && text[0] <= 'Z') || (text[0] >= 'a' && text[0] <= 'z'));
+    if (text.empty() || text.contains('\\') || text.contains('\0') || hasWindowsDrivePrefix)
         return false;
 
     path = std::filesystem::path(std::string(text));
