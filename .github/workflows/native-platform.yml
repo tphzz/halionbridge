@@ -25,9 +25,12 @@ jobs:
       HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION: "1"
       PYTHONDONTWRITEBYTECODE: "1"
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      # Recursive checkout and later Git checks need the same long-path support.
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: core.longpaths
+      GIT_CONFIG_VALUE_0: "true"
     defaults:
       run:
-        shell: bash
         working-directory: .ci/${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.platform }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -37,23 +40,39 @@ jobs:
           submodules: recursive
           persist-credentials: false
           path: .ci/${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.platform }}
+      - name: Validate Windows workflow helpers
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & python -B -m unittest discover -s packaging/ci/tests -p test_windows_workflow.py -v
+          exit $LASTEXITCODE
       - name: Initialize native Windows tools
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $gitRoot = Split-Path (Split-Path (Get-Command git.exe).Source -Parent) -Parent
-          Join-Path $gitRoot 'bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           $architecture = if ($env:PLATFORM -eq 'windows-arm64') { 'arm64' } else { 'x64' }
           ./packaging/ci/windows.ps1 -Architecture $architecture
-      - name: Build, test, sign and package
+      - name: Build, test and package Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildArguments = @($env:PLATFORM)
+          if ($env:DEBUG_BUILD -eq 'true') { $buildArguments += '--debug' }
+          if ($env:NOTARIZE -eq 'true') { $buildArguments += '--notarize' }
+          & python -B packaging/ci/build.py @buildArguments
+          exit $LASTEXITCODE
+      - name: Build, test, sign and package macOS
+        if: runner.os == 'macOS'
+        shell: bash
         run: |
           set -euo pipefail
           args=("$PLATFORM")
           if [ "$DEBUG_BUILD" = true ]; then args+=(--debug); fi
           if [ "$NOTARIZE" = true ]; then args+=(--notarize); fi
-          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
-          "$py" -B packaging/ci/build.py "${args[@]}"
+          python3 -B packaging/ci/build.py "${args[@]}"
       - name: Upload platform package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -72,10 +91,21 @@ jobs:
             .ci/${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.platform }}/build-ci/diagnostics/*.txt
           if-no-files-found: ignore
           retention-days: 14
-      - name: Clean owned checkout
-        if: always()
+      - name: Clean owned Windows checkout
+        if: always() && runner.os == 'Windows'
+        shell: powershell
+        working-directory: .
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cleanupHelper = '.ci/{0}-{1}-{2}/packaging/ci/cleanup.py' -f $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT, $env:PLATFORM
+          if (Test-Path -LiteralPath $cleanupHelper -PathType Leaf) {
+            & python -B $cleanupHelper $env:PLATFORM
+            exit $LASTEXITCODE
+          }
+      - name: Clean owned macOS checkout
+        if: always() && runner.os == 'macOS'
+        shell: bash
         working-directory: .
         run: |
           helper=".ci/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$PLATFORM/packaging/ci/cleanup.py"
-          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
-          if [ -f "$helper" ]; then "$py" -B "$helper" "$PLATFORM"; fi
+          if [ -f "$helper" ]; then python3 -B "$helper" "$PLATFORM"; fi
