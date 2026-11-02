@@ -1,0 +1,28 @@
+name: 10 Build - Windows x64
+run-name: "${{ github.workflow }} | ${{ github.ref_name }} | ${{ inputs.debug && 'Debug' || 'Release' }}"
+on:
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: Debug
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: native-windows-x64-only-${{ github.ref }}-${{ inputs.debug }}
+  cancel-in-progress: false
+  queue: max
+jobs:
+  checks:
+    uses: ./.github/workflows/native-checks.yml
+  native:
+    needs: checks
+    concurrency:
+      group: native-x64-host
+      cancel-in-progress: false
+      queue: max
+    uses: ./.github/workflows/native-platform.yml
+    with:
+      platform: windows-x64
+      debug: ${{ inputs.debug }}

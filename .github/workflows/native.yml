@@ -1,0 +1,93 @@
+name: 00 Full - All Platforms
+run-name: "${{ github.workflow }} | ${{ github.ref_name }} | ${{ inputs.debug && 'Debug' || 'Release' }}"
+on:
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: Debug
+        type: boolean
+        default: false
+      notarize_macos:
+        description: "macOS: Notarize"
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: native-all-${{ github.ref }}-${{ inputs.debug }}
+  cancel-in-progress: false
+  queue: max
+jobs:
+  checks:
+    uses: ./.github/workflows/native-checks.yml
+  windows-x64:
+    needs: checks
+    concurrency:
+      group: native-x64-host
+      cancel-in-progress: false
+      queue: max
+    uses: ./.github/workflows/native-platform.yml
+    with:
+      platform: windows-x64
+      debug: ${{ inputs.debug }}
+  windows-arm64:
+    needs: checks
+    concurrency:
+      group: native-apple-silicon-host
+      cancel-in-progress: false
+      queue: max
+    uses: ./.github/workflows/native-platform.yml
+    with:
+      platform: windows-arm64
+      debug: ${{ inputs.debug }}
+  macos:
+    needs: windows-arm64
+    concurrency:
+      group: native-apple-silicon-host
+      cancel-in-progress: false
+      queue: max
+    uses: ./.github/workflows/native-platform.yml
+    with:
+      platform: macos-universal
+      debug: ${{ inputs.debug }}
+      notarize_macos: ${{ inputs.notarize_macos }}
+  draft:
+    if: ${{ !inputs.debug }}
+    needs: [windows-x64, macos]
+    runs-on: [self-hosted, Linux, X64, jammy, docker]
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: native-x64-host
+      cancel-in-progress: false
+      queue: max
+    env:
+      CONFIGURATION: Release
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: .ci/${{ github.run_id }}-${{ github.run_attempt }}-draft
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: .ci/${{ github.run_id }}-${{ github.run_attempt }}-draft
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: .ci/${{ github.run_id }}-${{ github.run_attempt }}-draft/build-ci/assets
+      - name: Verify complete source-matched package set
+        run: python3 -B packaging/ci/release.py verify build-ci/assets
+      - name: Create or replace only the owned draft
+        run: python3 -B packaging/ci/release.py draft build-ci/assets
+      - name: Clean owned checkout
+        if: always()
+        working-directory: .
+        run: |
+          helper=".ci/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-draft/packaging/ci/cleanup.py"
+          if [ -f "$helper" ]; then python3 -B "$helper" draft; fi

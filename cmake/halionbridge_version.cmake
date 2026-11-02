@@ -43,10 +43,27 @@ function(halionbridge_configure_git_version source_dir)
             OUTPUT_STRIP_TRAILING_WHITESPACE
         )
 
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+            WORKING_DIRECTORY "${source_dir}"
+            OUTPUT_VARIABLE git_sha_full
+            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        set(is_matching_github_checkout OFF)
+        if("$ENV{GITHUB_ACTIONS}" STREQUAL "true" AND NOT git_sha_full STREQUAL "" AND "$ENV{GITHUB_SHA}" STREQUAL git_sha_full)
+            set(is_matching_github_checkout ON)
+        endif()
+
         if(git_branch_result EQUAL 0 AND NOT git_branch_output STREQUAL "" AND NOT git_branch_output STREQUAL "HEAD")
             set(ref_name "${git_branch_output}")
             set(git_branch "${git_branch_output}")
-        elseif(DEFINED ENV{GITHUB_REF_TYPE} AND "$ENV{GITHUB_REF_TYPE}" STREQUAL "tag" AND DEFINED ENV{GITHUB_REF_NAME} AND NOT "$ENV{GITHUB_REF_NAME}" STREQUAL "")
+        elseif(is_matching_github_checkout AND "$ENV{GITHUB_REF_TYPE}" STREQUAL "branch" AND NOT "$ENV{GITHUB_REF_NAME}" STREQUAL "")
+            # Checkout pins the dispatch SHA, so CI branch builds are detached.
+            # A tag on that same commit must not turn a branch preview into a release.
+            set(ref_name "$ENV{GITHUB_REF_NAME}")
+            set(git_branch "$ENV{GITHUB_REF_NAME}")
+        elseif(is_matching_github_checkout AND "$ENV{GITHUB_REF_TYPE}" STREQUAL "tag" AND NOT "$ENV{GITHUB_REF_NAME}" STREQUAL "")
             set(ref_name "$ENV{GITHUB_REF_NAME}")
             set(git_tag "$ENV{GITHUB_REF_NAME}")
             set(is_tagged_release ON)

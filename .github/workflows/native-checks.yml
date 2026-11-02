@@ -1,0 +1,36 @@
+name: 90 Helper - Checks
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: [self-hosted, Linux, X64, jammy, docker]
+    concurrency:
+      group: native-x64-host
+      cancel-in-progress: false
+      queue: max
+    defaults:
+      run:
+        shell: bash
+        working-directory: .ci/${{ github.run_id }}-${{ github.run_attempt }}-checks
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: .ci/${{ github.run_id }}-${{ github.run_attempt }}-checks
+      - name: Validate workflows and release tools
+        run: |
+          set -euo pipefail
+          python3 --version
+          actionlint -version
+          python3 -B packaging/ci/lint.py
+          python3 -B -m unittest discover -s packaging/ci/tests -v
+      - name: Clean owned checkout
+        if: always()
+        working-directory: .
+        run: |
+          helper=".ci/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-checks/packaging/ci/cleanup.py"
+          if [ -f "$helper" ]; then python3 -B "$helper" checks; fi

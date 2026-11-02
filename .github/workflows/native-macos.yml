@@ -1,0 +1,33 @@
+name: 12 Build - macOS Universal
+run-name: "${{ github.workflow }} | ${{ github.ref_name }} | ${{ inputs.debug && 'Debug' || 'Release' }}"
+on:
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: Debug
+        type: boolean
+        default: false
+      notarize_macos:
+        description: Notarize macOS
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: native-macos-only-${{ github.ref }}-${{ inputs.debug }}
+  cancel-in-progress: false
+  queue: max
+jobs:
+  checks:
+    uses: ./.github/workflows/native-checks.yml
+  native:
+    needs: checks
+    concurrency:
+      group: native-apple-silicon-host
+      cancel-in-progress: false
+      queue: max
+    uses: ./.github/workflows/native-platform.yml
+    with:
+      platform: macos-universal
+      debug: ${{ inputs.debug }}
+      notarize_macos: ${{ inputs.notarize_macos }}
