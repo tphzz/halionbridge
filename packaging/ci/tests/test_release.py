@@ -13,6 +13,15 @@ import release
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_hashing_supports_python_310_without_file_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.bin"
+            with patch.object(release.hashlib, "file_digest", create=True,
+                              side_effect=AssertionError("file_digest requires Python 3.11")):
+                for content in (b"", b"abc", b"\x00\xff\r\n" * 300000):
+                    path.write_bytes(content)
+                    self.assertEqual(release.digest(path), release.hashlib.sha256(content).hexdigest())
+
     def context(self, ref="refs/heads/main", run=2):
         return dict(repository="owner/repo", ref=ref, sha="a" * 40,
                     run_id=123, run_number=run, run_attempt=1, configuration="Release")

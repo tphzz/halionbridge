@@ -21,6 +21,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           path: .ci/${{ github.run_id }}-${{ github.run_attempt }}-checks
+      - name: Prepare pinned actionlint for this job
+        run: |
+          set -euo pipefail
+          tools_dir="$PWD/build-ci/tools"
+          mkdir -p "$tools_dir"
+          archive="$tools_dir/actionlint_1.7.12_linux_amd64.tar.gz"
+          curl --fail --show-error --location --retry 3 \
+            --output "$archive" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          printf '%s  %s\n' '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' "$archive" | sha256sum --check -
+          tar -xzf "$archive" -C "$tools_dir" actionlint
+          chmod +x "$tools_dir/actionlint"
+          printf '%s\n' "$tools_dir" >> "$GITHUB_PATH"
       - name: Validate workflows and release tools
         run: |
           set -euo pipefail

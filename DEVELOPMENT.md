@@ -159,7 +159,7 @@ All Platforms verifies all three Release packages before creating or updating a 
 
 The reusable checks and native helpers run formatting, compilation, CTest, CLI version checks, architecture checks, and dependency checks. macOS checks both slices and executes x86_64 tests through Rosetta. `HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION=1` prevents CI from loading HALion. HALion runtime acceptance remains a separate test on a licensed, activated machine.
 
-Offline CI helper tests require Python 3.11+, Git, and CMake; workflow lint also requires actionlint:
+Offline CI helper tests require Python 3.10+, Git, and CMake; local workflow lint also requires actionlint. The checks workflow downloads actionlint 1.7.12 into its own checkout, verifies the pinned archive SHA-256 before extraction, and adds that directory to the current job's PATH. Cleanup removes it with the checkout; no system installation is required.
 
 ```sh
 python -B -m unittest discover -s packaging/ci/tests -v
