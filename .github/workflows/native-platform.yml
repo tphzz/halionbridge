@@ -1,0 +1,81 @@
+name: 91 Helper - Native Platform
+on:
+  workflow_call:
+    inputs:
+      platform:
+        type: string
+        required: true
+      debug:
+        type: boolean
+        default: false
+      notarize_macos:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  native:
+    # Host locks belong to callers, not this job (nested identical locks deadlock).
+    runs-on: ${{ fromJSON(inputs.platform == 'windows-x64' && '["self-hosted","Windows","X64"]' || inputs.platform == 'windows-arm64' && '["self-hosted","Windows","ARM64"]' || '["self-hosted","macOS","ARM64"]') }}
+    env:
+      PLATFORM: ${{ inputs.platform }}
+      DEBUG_BUILD: ${{ inputs.debug }}
+      NOTARIZE: ${{ inputs.notarize_macos }}
+      CI_BUILD_PARALLEL_LEVEL: ${{ vars.CI_BUILD_PARALLEL_LEVEL || '2' }}
+      HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    defaults:
+      run:
+        shell: bash
+        working-directory: .ci/${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.platform }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+          path: .ci/${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.platform }}
+      - name: Initialize native Windows tools
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gitRoot = Split-Path (Split-Path (Get-Command git.exe).Source -Parent) -Parent
+          Join-Path $gitRoot 'bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $architecture = if ($env:PLATFORM -eq 'windows-arm64') { 'arm64' } else { 'x64' }
+          ./packaging/ci/windows.ps1 -Architecture $architecture
+      - name: Build, test, sign and package
+        run: |
+          set -euo pipefail
+          args=("$PLATFORM")
+          if [ "$DEBUG_BUILD" = true ]; then args+=(--debug); fi
+          if [ "$NOTARIZE" = true ]; then args+=(--notarize); fi
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          "$py" -B packaging/ci/build.py "${args[@]}"
+      - name: Upload platform package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: package-${{ inputs.platform }}-${{ inputs.debug && 'debug' || 'release' }}
+          path: .ci/${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.platform }}/build-ci/packages/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve test and notarization diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: diagnostics-${{ inputs.platform }}-${{ inputs.debug && 'debug' || 'release' }}
+          path: |
+            .ci/${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.platform }}/build*/Testing/Temporary/*.log
+            .ci/${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.platform }}/build-ci/diagnostics/*.json
+            .ci/${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.platform }}/build-ci/diagnostics/*.txt
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Clean owned checkout
+        if: always()
+        working-directory: .
+        run: |
+          helper=".ci/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$PLATFORM/packaging/ci/cleanup.py"
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          if [ -f "$helper" ]; then "$py" -B "$helper" "$PLATFORM"; fi

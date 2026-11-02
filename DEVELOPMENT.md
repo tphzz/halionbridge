@@ -3,7 +3,7 @@
 ## Requirements
 - **C++ Standard:** C++23 is strictly required.
 - **Toolchain (Windows):** Visual Studio 2026 is required for Windows builds to ensure the highest code quality.
-- **Toolchain (macOS):** Xcode and Clang supporting C++23.
+- **Toolchain (macOS):** Xcode and Clang supporting C++23; deployment target macOS 13.3 or newer.
 - **CMake:** CMake 3.22+ is required.
 - **Ninja (Windows):** Windows builds use CMake's Ninja generator. Visual Studio's CMake tools include Ninja, or it can be installed separately.
 
@@ -115,7 +115,7 @@ The macOS release CLI is signed with hardened runtime plus `com.apple.security.c
 
 CMake computes the build version from Git. Developers do not pass version variables manually. Local builds and GitHub Actions builds use the same `cmake/halionbridge_version.cmake` logic.
 
-Versions are intentionally source-identification strings, not calendar build IDs. A named branch checkout uses the active branch name even when `HEAD` also happens to point at a tag. Detached checkouts use an exact tag when one exists, otherwise `detached`. The short Git hash is always included. Modified worktrees append `-mod`; this includes tracked modifications and untracked, non-ignored files.
+Versions are intentionally source-identification strings, not calendar build IDs. A named branch checkout uses the active branch name even when `HEAD` also happens to point at a tag. A detached GitHub Actions checkout uses the dispatched branch or tag when `GITHUB_SHA` matches its commit. Other detached checkouts use an exact tag when one exists, otherwise `detached`. The short Git hash is always included. Modified worktrees append `-mod`; this includes tracked modifications and untracked, non-ignored files.
 
 Examples:
 
@@ -143,13 +143,31 @@ build-release\halionbridge_artefacts\Release\halionbridge.exe --version
 
 ## GitHub Actions
 
-The repository includes a manual-only GitHub Actions workflow at `.github/workflows/build.yml`. It is intentionally triggered with `workflow_dispatch` from the Actions tab and does not run automatically on pushes, pull requests, or tags.
+Four workflows are manually dispatched from the Actions tab. None runs automatically on pushes, pull requests, or tags:
 
-The workflow can build Debug, Release, or both. When starting the workflow from the Actions tab, select the `Build Debug` and `Build Release` checkboxes for the configurations you want. Debug and Release run as separate jobs on GitHub-hosted Windows and macOS runners using the existing CMake presets. Windows uses GitHub's `windows-2025-vs2026` image so the hosted build runs in a Visual Studio 2026 environment; macOS uses `macos-latest`, GitHub's current stable macOS arm64 label. Each selected job initializes submodules with full Git history and tags, prepares the MSVC environment on Windows without a JavaScript setup action, verifies first-party C++ formatting with `clang-format --dry-run --Werror`, builds with Ninja, and runs the CTest suite.
+| Workflow | Output |
+| --- | --- |
+| `00 Full - All Platforms` (`native.yml`) | Windows x64, Windows ARM64, macOS Universal artifacts; Release also prepares a draft release |
+| `10 Build - Windows x64` (`native-windows-x64.yml`) | Windows x64 artifacts only |
+| `11 Build - Windows ARM64` (`native-windows-arm64.yml`) | Windows ARM64 artifacts only |
+| `12 Build - macOS Universal` (`native-macos.yml`) | macOS Universal artifacts only |
 
-Release jobs upload the platform CLI, the tracked `examples/` directory, the halionbridge license, `THIRD_PARTY_NOTICES.md`, and the license/provenance files required by linked dependencies. The Windows release artifact stages `halionbridge.exe`; the macOS release artifact stages `halionbridge`; both use the same documentation layout. Tests, static libraries, import libraries, shared libraries, `.exp` files, generated example output presets, and build-directory structure are intentionally not uploaded. On exact semver tags such as `v0.5.0`, artifact names are `halionbridge-0.5.0-windows-x64` and `halionbridge-0.5.0-macos-universal`; GitHub downloads those artifacts as `.zip` files. Non-tag manual builds use CMake's generated package basename plus the same platform suffix.
+Leave **Debug** unchecked for Release, or check it for a separate Debug run. Debug always produces workflow artifacts only. **macOS: Notarize** is optional, defaults off, and is available for both configurations. These workflows never publish a release automatically, including tag and main-branch builds.
 
-The workflow validates compilation, unit tests, and offline CLI parser/file tests only. The GitHub Actions test steps and CTest entries set `HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION=1`, and the bridge refuses to enter the VST3 load/instantiate path when that variable is enabled. GitHub-hosted tests must never install, launch, instantiate, or smoke-test HALion; HALion runtime testing still requires a licensed and activated local or self-hosted machine.
+Each platform artifact contains a portable ZIP, a SHA-256 checksum, and a JSON manifest recording the source ref, commit, configuration, platform, and workflow run. The ZIP contains the CLI, tracked `examples/`, `LICENSE`, `THIRD_PARTY_NOTICES.md`, and required dependency notices. It excludes tests, libraries, build directories, generated presets, and installers. Semver tags such as `v0.5.0` produce `halionbridge-0.5.0-windows-x64.zip`, `halionbridge-0.5.0-windows-arm64.zip`, and `halionbridge-0.5.0-macos-universal.zip`. Branch filenames include the Git-derived ref and commit; Debug adds `-debug`.
+
+All Platforms verifies all three Release packages before creating or updating a draft. Tag builds target that tag's draft. Branch builds use one stable `preview-<branch>-<hash>` draft per branch. Replacement requires matching ownership metadata, preserves other refs, rejects stale runs, and refuses published or manually created drafts. Publishing is a separate manual action. After publication, another build targeting that release fails rather than modifying it. Uploads are verified before old assets are removed; an interrupted update remains a draft and can be repaired by rerunning **all jobs**. Rerunning only failed jobs can mix run attempts and is deliberately rejected by package verification.
+
+The reusable checks and native helpers run formatting, compilation, CTest, CLI version checks, architecture checks, and dependency checks. macOS checks both slices and executes x86_64 tests through Rosetta. `HALIONBRIDGE_FORBID_PLUGIN_INSTANTIATION=1` prevents CI from loading HALion. HALion runtime acceptance remains a separate test on a licensed, activated machine.
+
+Offline CI helper tests require Python 3.11+, Git, and CMake; workflow lint also requires actionlint:
+
+```sh
+python -B -m unittest discover -s packaging/ci/tests -v
+python -B packaging/ci/lint.py
+```
+
+The lint wrapper suppresses only actionlint 1.7.12's unsupported `concurrency.queue` diagnostic and independently validates `queue: max` with cancellation disabled. Other actionlint errors still fail the checks.
 
 ## Converter Subsystem
 
@@ -328,7 +346,7 @@ The metadata writer treats present CSV metadata columns as authoritative. Non-em
 
 First-party C++ source files are compiled with warnings as errors: `/W4 /WX` on MSVC and `-Wall -Wextra -Wpedantic -Werror` on Clang/GCC-style compilers. Do not suppress warning classes globally to make the build pass; fix the warning or isolate an intentionally noisy platform boundary narrowly.
 
-The repository uses `.clang-format` for first-party C++ formatting. GitHub Actions runs `clang-format --dry-run --Werror` on tracked `.cpp` and `.h` files outside `external/`. First-party C++ sources build with warnings as errors: MSVC uses `/W4 /WX`, strict conformance switches, and targeted opt-in warnings such as C4505 for unused internal functions; Clang/GCC use `-Wall -Wextra -Wpedantic -Werror`. Vendored JUCE, spdlog, and sfizz code is not reformatted and is not held to project warning settings. sfizz is configured through a narrow CMake wrapper in `converters/CMakeLists.txt` which disables sfizz's unused tests, demos, clients, shared library, sndfile integration, Qt probe, and LTO path. The wrapper also scopes CMake developer/deprecation-warning suppression, MSVC C++23 STL deprecation macros, and Apple Clang C/C++ diagnostics from sfizz's bundled dependency tree, and prepends `cmake/sfizz-overrides` for first-party CMake shims required to keep vendored configure output quiet without editing `external/sfizz`. halionbridge keeps `CMAKE_CXX_STANDARD` cache-backed at C++23 because sfizz's original config otherwise creates a C++14 cache entry that changes Abseil public aliases such as `absl::optional`. On macOS, halionbridge sets the project deployment target to at least macOS 10.15 before `project()` and `cmake/sfizz-overrides/SfizzConfig.cmake` force-restores that value after sfizz's own config resets it. Together these settings keep sfizz's public C++ ABI, including `fs::path` and `absl::optional`, matching first-party converter code in universal release builds.
+The repository uses `.clang-format` for first-party C++ formatting. GitHub Actions runs `clang-format --dry-run --Werror` on tracked `.cpp` and `.h` files outside `external/`. First-party C++ sources build with warnings as errors: MSVC uses `/W4 /WX`, strict conformance switches, and targeted opt-in warnings such as C4505 for unused internal functions; Clang/GCC use `-Wall -Wextra -Wpedantic -Werror`. Vendored JUCE, spdlog, and sfizz code is not reformatted and is not held to project warning settings. sfizz is configured through a narrow CMake wrapper in `converters/CMakeLists.txt` which disables sfizz's unused tests, demos, clients, shared library, sndfile integration, Qt probe, and LTO path. The wrapper also scopes CMake developer/deprecation-warning suppression, MSVC C++23 STL deprecation macros, and Apple Clang C/C++ diagnostics from sfizz's bundled dependency tree, and prepends `cmake/sfizz-overrides` for first-party CMake shims required to keep vendored configure output quiet without editing `external/sfizz`. halionbridge keeps `CMAKE_CXX_STANDARD` cache-backed at C++23 because sfizz's original config otherwise creates a C++14 cache entry that changes Abseil public aliases such as `absl::optional`. On macOS, halionbridge sets the project deployment target to at least macOS 13.3 before `project()` and `cmake/sfizz-overrides/SfizzConfig.cmake` force-restores that value after sfizz's own config resets it. Together these settings keep sfizz's public C++ ABI, including `fs::path` and `absl::optional`, matching first-party converter code in universal release builds.
 
 ## Console Logging
 
