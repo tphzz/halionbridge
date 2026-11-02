@@ -36,7 +36,7 @@ struct BuildDirectoryRequest
     std::filesystem::path outputDirectory;
     bool overwrite = false;
     std::vector<GeneratedLuaScript> scripts;
-    std::vector<GeneratedBuildFile> files;
+    std::vector<GeneratedBuildFile> files = {};
 };
 
 struct BuildDirectoryResult

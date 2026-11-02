@@ -7,6 +7,8 @@
 - **CMake:** CMake 3.22+ is required.
 - **Ninja (Windows):** Windows builds use CMake's Ninja generator. Visual Studio's CMake tools include Ninja, or it can be installed separately.
 
+The SFZ converter uses `absl::from_chars` from sfizz's existing Abseil dependency for floating-point opcode values. The standard-library floating-point overload requires macOS 26 in current Apple SDKs, so it cannot be used with the macOS 13.3 deployment target. Integer parsing still uses `std::from_chars`. The adapter requires complete input consumption, rejects hexadecimal prefixes to retain its decimal-only contract, and keeps the existing range-error and nonfinite-value handling. Abseil is linked privately through `absl::strings`; no vendor types enter the converter API.
+
 ## Building the Project
 
 1. Clone the repository and initialize submodules:

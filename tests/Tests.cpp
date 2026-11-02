@@ -2498,6 +2498,40 @@ class BridgeTests : public juce::UnitTest
             outputDir.deleteRecursively();
         }
 
+        beginTest("SFZ Converter - preserves strict decimal pitch LFO parsing");
+        {
+            auto sourceDir = cleanTempDirectory("halionbridge_sfz_lfo_numbers");
+            auto outputDir = cleanTempDirectory("halionbridge_sfz_lfo_numbers_out");
+            expect(sourceDir.createDirectory());
+            expect(sourceDir.getChildFile("sample.wav").replaceWithText(""));
+
+            auto options = halionbridge::converters::sfz::ConversionOptions{};
+            options.sourceDirectory = halionbridge::detail::toStdPath(sourceDir);
+            options.outputDirectory = halionbridge::detail::toStdPath(outputDir);
+            options.overwrite = true;
+
+            const auto cases = std::vector<std::pair<juce::String, juce::String>>{
+                {"2.5", "2.5"},  {"2.5e0", "2.5"}, {"25E-1", "2.5"}, {".5", "0.5"}, {"2.", "2"},  {"0", "0"},     {"-2", "0"},
+                {"99", "20"},    {"+2.5", "0"},    {"2.5junk", "0"}, {"2.5e", "0"}, {"2,5", "0"}, {"0x1p1", "0"}, {"0X1p1", "0"},
+                {"-0x1p1", "0"}, {"1e999", "0"},   {"1e-999", "0"},  {"nan", "0"},  {"inf", "0"}, {"-inf", "0"}};
+            for (const auto& [input, expected] : cases)
+            {
+                expect(sourceDir.getChildFile("numbers.sfz")
+                           .replaceWithText("<region> sample=sample.wav lfo01_pitch=-2.4e2 lfo01_freq=" + input + "\n"));
+                const auto result = halionbridge::converters::sfz::convertDirectory(options);
+                expect(result.succeeded, input);
+                const auto lua = outputDir.getChildFile("000_numbers.lua").loadFileAsString();
+                expect(lua.contains("pitch_lfo = {"), input);
+                expect(lua.contains("depth = -12,"), input);
+                expect(lua.contains("rate_hz = " + expected + ","), input);
+                if (input.containsIgnoreCase("0x"))
+                    expect(!containsDiagnosticCode(result.diagnostics, "pitch-lfo-frequency-clamped"), input);
+            }
+
+            sourceDir.deleteRecursively();
+            outputDir.deleteRecursively();
+        }
+
         beginTest("SFZ Converter - writes explicit static amp envelopes");
         {
             auto sourceDir = cleanTempDirectory("halionbridge_sfz_amp_envelope");

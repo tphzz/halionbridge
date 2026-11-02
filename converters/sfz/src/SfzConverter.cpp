@@ -3,6 +3,7 @@
 #include "halionbridge_converters/BuildDirectoryEmitter.h"
 #include "SfzHelperLua.h"
 
+#include <absl/strings/charconv.h>
 #include <sfizz/Defaults.h>
 #include <sfizz/Opcode.h>
 #include <sfizz/Region.h>
@@ -312,10 +313,20 @@ class ExplicitRegionOpcodeCollector final : public ::sfz::ParserListener
 
     static std::optional<float> readFloat(const std::string& value)
     {
+        auto magnitude = std::string_view{value};
+        if (magnitude.starts_with('-'))
+            magnitude.remove_prefix(1);
+        // Abseil additionally recognizes 0x-prefixed hex numbers in general
+        // format. Keep the existing decimal-only SFZ parsing contract.
+        if (magnitude.starts_with("0x") || magnitude.starts_with("0X"))
+            return std::nullopt;
+
         auto parsed = 0.0f;
         const auto* begin = value.data();
         const auto* end = value.data() + value.size();
-        const auto result = std::from_chars(begin, end, parsed);
+        // sfizz already brings Abseil's locale-independent implementation. The
+        // floating-point std overload requires macOS 26, beyond our 13.3 target.
+        const auto result = absl::from_chars(begin, end, parsed);
         if (result.ec == std::errc{} && result.ptr == end)
             return parsed;
 

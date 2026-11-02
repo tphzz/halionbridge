@@ -246,6 +246,7 @@ if(HALIONBRIDGE_ENABLE_CONVERTER_SFZ)
         PRIVATE
             halionbridge_converter_common_static
             sfizz::sfizz
+            absl::strings
     )
     target_include_directories(halionbridge_converter_sfz_static
         PUBLIC
