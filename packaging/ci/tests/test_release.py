@@ -67,6 +67,35 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release.verify_assets(Path(directory), self.context())
 
+    def test_packaging_supports_source_with_and_without_dxsyx(self):
+        for with_dxsyx in (False, True):
+            with self.subTest(with_dxsyx=with_dxsyx), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for origin in release.NOTICES.values():
+                    if origin.startswith("forks/dxsyx/"):
+                        continue
+                    path = root / origin
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("notice")
+                example = "examples/test/halionbridge_build.lua"
+                (root / example).parent.mkdir(parents=True)
+                (root / example).write_text("return {}")
+                binary = root / "halionbridge.exe"
+                binary.write_bytes(b"fixture")
+                if with_dxsyx:
+                    (root / "forks/dxsyx").mkdir(parents=True)
+                    for name in ("LICENSE.txt", "UPSTREAM.md"):
+                        (root / "forks/dxsyx" / name).write_text("notice")
+                with patch.object(release.subprocess, "check_output", return_value=(example + "\0").encode()):
+                    archive = release.package(root, binary, root / "output", "halionbridge-test", "windows-x64", self.context())
+                with zipfile.ZipFile(archive) as package:
+                    self.assertEqual("licenses/dxsyx/LICENSE.txt" in package.namelist(), with_dxsyx)
+                    self.assertEqual("licenses/dxsyx/UPSTREAM.md" in package.namelist(), with_dxsyx)
+                if with_dxsyx:
+                    (root / "forks/dxsyx/LICENSE.txt").unlink()
+                    with patch.object(release.subprocess, "check_output", return_value=(example + "\0").encode()), self.assertRaises(ValueError):
+                        release.package(root, binary, root / "output", "halionbridge-test", "windows-x64", self.context())
+
     def test_archives_reject_unexpected_and_unsafe_entries(self):
         with tempfile.TemporaryDirectory() as directory:
             for extra in ("../outside", "tests.exe", "examples/build/output.txt", "examples/output.vstpreset"):
