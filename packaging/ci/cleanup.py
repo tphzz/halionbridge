@@ -19,6 +19,15 @@ def owned_path(workspace, run_id, attempt, job):
 
 
 def remove_checkout(path):
+    # Git's core.longpaths only affects Git. Use extended-length paths for all
+    # Python filesystem operations too, independently of the host registry policy.
+    # owned_path has already validated the resolved checkout boundary.
+    if os.name == "nt":
+        name = os.path.abspath(path)
+        if not name.startswith("\\\\?\\"):
+            name = "\\\\?\\UNC\\" + name[2:] if name.startswith("\\\\") else "\\\\?\\" + name
+        path = Path(name)
+
     def retry_readonly(function, filename, error):
         target = Path(filename)
         if (os.name != "nt" or not isinstance(error[1], PermissionError)

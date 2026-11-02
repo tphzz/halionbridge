@@ -162,9 +162,11 @@ The reusable checks and native helpers run formatting, compilation, CTest, CLI v
 
 Windows workflow steps use Windows PowerShell for helper validation, toolchain setup, building, and cleanup; they do not depend on Git Bash being on PATH. Cleanup can run even when checkout or toolchain setup fails. Native jobs enable Git's `core.longpaths` through process environment variables inherited by recursive submodule checkout and subsequent Git checks, without changing global Git configuration. macOS build and cleanup steps explicitly use Bash.
 
+Python cleanup separately uses extended-length Windows paths (`\\?\` or `\\?\UNC\`) within the validated checkout boundary, including read-only Git-object removal. Git's setting does not configure Python filesystem calls, and cleanup must work without a machine-wide long-path policy change. Persistent removal errors still fail the job. The Windows toolchain helper exports only named compiler/SDK variables to later steps; it never copies the complete process environment into Actions logs.
+
 Offline CI helper tests require Python 3.10+, Git, and CMake; local workflow lint also requires actionlint. The checks workflow downloads actionlint 1.7.12 into its own checkout, verifies the pinned archive SHA-256 before extraction, and adds that directory to the current job's PATH. Cleanup removes it with the checkout; no system installation is required.
 
-Windows-specific workflow tests execute the actual PowerShell build and cleanup blocks with Bash absent from PATH, checking argument forwarding, exit codes, missing checkouts, and cleanup isolation. These tests run on Windows before toolchain initialization; the Linux checks job skips their PowerShell execution cases.
+Windows-specific workflow tests execute the actual PowerShell build and cleanup blocks with Bash absent from PATH, checking argument forwarding, exit codes, missing checkouts, and cleanup isolation. They also cover long read-only pack filenames under an emulated legacy Windows path policy, UNC/prefixed paths, persistent deletion errors, and compiler environment export. Test subprocesses receive only a minimal operating-system environment plus fixture settings. These tests run on Windows before toolchain initialization; the Linux checks job skips their Windows execution cases.
 
 ```sh
 python -B -m unittest discover -s packaging/ci/tests -v

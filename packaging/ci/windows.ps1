@@ -7,6 +7,22 @@ if (-not $installation) { throw 'Visual Studio 2026 with the requested C++ toolc
 $hostArchitecture = if ($Architecture -eq 'arm64') { 'arm64' } else { 'amd64' }
 & (Join-Path $installation 'Common7/Tools/Launch-VsDevShell.ps1') -Arch $hostArchitecture -HostArch $hostArchitecture -SkipAutomaticLocation
 if ($env:VisualStudioVersion -notlike '18.*') { throw 'Visual Studio 2026 initialization failed.' }
-Get-ChildItem Env: | Where-Object { $_.Name -notmatch '^(GITHUB_|RUNNER_|ACTIONS_|CI$)' } | ForEach-Object {
-    if ($_.Value -notmatch "[\r\n]") { "$($_.Name)=$($_.Value)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+# Persist only compiler/SDK settings needed by later steps. GitHub displays
+# GITHUB_ENV entries in step logs; unrelated process variables must stay out.
+$toolchainEnvironment = @(
+    'Path', 'INCLUDE', 'EXTERNAL_INCLUDE', 'LIB', 'LIBPATH',
+    'VisualStudioVersion', 'VSINSTALLDIR', 'VS180COMNTOOLS', 'DevEnvDir',
+    'VCINSTALLDIR', 'VCIDEInstallDir', 'VCToolsInstallDir', 'VCToolsVersion', 'VCToolsRedistDir',
+    'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH', 'VSCMD_ARG_app_plat', 'VSCMD_VER',
+    'WindowsSdkDir', 'WindowsSDKVersion', 'WindowsSDKLibVersion',
+    'WindowsSdkBinPath', 'WindowsSdkVerBinPath', 'WindowsLibPath',
+    'UniversalCRTSdkDir', 'UCRTVersion', 'ExtensionSdkDir', 'NETFXSDKDir',
+    'FrameworkDir', 'FrameworkDir64', 'FrameworkVersion', 'FrameworkVersion64',
+    'Framework40Version', 'VCPKG_ROOT', 'CommandPromptType'
+)
+foreach ($name in $toolchainEnvironment) {
+    $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+    if ($value -and $value -notmatch "[\r\n]") {
+        "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    }
 }

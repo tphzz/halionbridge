@@ -4,11 +4,16 @@ import os
 import re
 import shutil
 import subprocess
+import stat
 import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import cleanup
 
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".github/workflows/native-platform.yml"
@@ -36,11 +41,14 @@ class CheckoutTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Requires native Windows PowerShell")
 class WindowsWorkflowTests(unittest.TestCase):
-    def run_step(self, root, helper, **settings):
+    def run_script(self, root, source, **settings):
         script = root / "step.ps1"
-        script.write_text(windows_step(helper), encoding="utf-8")
+        script.write_text(source, encoding="utf-8")
         system = Path(os.environ["SystemRoot"]) / "System32"
-        env = {key: value for key, value in os.environ.items() if key.upper() != "PATH"}
+        # Subprocess fixtures must never inherit credentials from the test host.
+        runtime_names = {"SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE",
+                         "PATHEXT", "COMSPEC", "LOCALAPPDATA", "APPDATA"}
+        env = {key: value for key, value in os.environ.items() if key.upper() in runtime_names}
         env.update(PATH=str(Path(sys.executable).parent),
                    PLATFORM="windows-x64", DEBUG_BUILD="false", NOTARIZE="false",
                    GITHUB_WORKSPACE=str(root), GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1")
@@ -49,6 +57,96 @@ class WindowsWorkflowTests(unittest.TestCase):
         return subprocess.run([str(system / "WindowsPowerShell/v1.0/powershell.exe"),
                                "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                                "-File", str(script)], cwd=root, env=env, capture_output=True, text=True)
+
+    def run_step(self, root, helper, **settings):
+        return self.run_script(root, windows_step(helper), **settings)
+
+    def test_toolchain_export_excludes_unrelated_environment(self):
+        source = (ROOT / "packaging/ci/windows.ps1").read_text(encoding="utf-8")
+        # Execute just the environment export, without loading VS on the test host.
+        export = source.split("if ($env:VisualStudioVersion -notlike '18.*')", 1)[1].split("\n", 1)[1]
+        with tempfile.TemporaryDirectory(prefix="ci environment ") as directory:
+            root = Path(directory)
+            output = root / "github-env"
+            result = self.run_script(root, export, GITHUB_ENV=str(output),
+                                     CI_TEST_REGISTRATION_TOKEN="fixture-do-not-export",
+                                     INCLUDE="fixture-include", LIB="fixture-lib",
+                                     VSCMD_ARG_TGT_ARCH="arm64", VisualStudioVersion="18.0",
+                                     VSCMD_ARG_HOST_ARCH="arm64", WindowsSdkDir="fixture-sdk",
+                                     LIBPATH="invalid\nINJECTED=bad")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8-sig").splitlines())
+            self.assertTrue("CI_TEST_REGISTRATION_TOKEN" not in values,
+                            "Unrelated environment variable was exported")
+            self.assertNotIn("GITHUB_ENV", values)
+            self.assertNotIn("PLATFORM", values)
+            self.assertNotIn("LIBPATH", values)
+            self.assertNotIn("INJECTED", values)
+            self.assertEqual(values["INCLUDE"], "fixture-include")
+            self.assertEqual(values["LIB"], "fixture-lib")
+            self.assertEqual(values["VSCMD_ARG_TGT_ARCH"], "arm64")
+            self.assertEqual(values["VSCMD_ARG_HOST_ARCH"], "arm64")
+            self.assertEqual(values["VisualStudioVersion"], "18.0")
+            self.assertEqual(values["WindowsSdkDir"], "fixture-sdk")
+            self.assertTrue(any(name.lower() == "path" for name in values))
+
+    def test_cleanup_removes_long_readonly_pack_paths_without_host_long_path_policy(self):
+        with tempfile.TemporaryDirectory(prefix="ci cleanup ") as directory:
+            root = Path(directory)
+            owned = cleanup.owned_path(root, "41522722411", "1", "windows-arm64")
+            # The directory itself fits MAX_PATH; the pack filename does not.
+            pack_dir = owned / ("nested-" + "x" * (224 - len(str(owned)))) / "objects/pack"
+            extended = Path("\\\\?\\" + str(pack_dir))
+            extended.mkdir(parents=True)
+            for suffix in (".pack", ".idx", ".rev"):
+                obj = extended / ("pack-" + "a" * 40 + suffix)
+                self.assertLess(len(str(pack_dir)), 260)
+                self.assertGreaterEqual(len(str(obj)) - 4, 260)
+                obj.write_bytes(b"git object fixture")
+                obj.chmod(stat.S_IREAD)
+            sibling = root / "other-job"
+            sibling.write_text("preserve")
+            unlink = os.unlink
+
+            def legacy_unlink(filename, *args, **kwargs):
+                text = os.fspath(filename)
+                # Emulate the Win32 path-policy failure even on hosts that have
+                # long paths enabled. Python 3.13 rmtree skips this error, then
+                # fails to remove the still-nonempty pack directory (WinError 145).
+                if not text.startswith("\\\\?\\") and len(text) >= 260:
+                    raise FileNotFoundError(2, "Legacy path limit", text, 3)
+                return unlink(filename, *args, **kwargs)
+
+            with patch.object(cleanup.os, "unlink", side_effect=legacy_unlink):
+                cleanup.remove_checkout(owned)
+            self.assertFalse(owned.exists())
+            self.assertEqual(sibling.read_text(), "preserve")
+
+    def test_cleanup_handles_unc_and_already_extended_paths(self):
+        for source, expected in (
+            (r"C:\workspace\.ci\1-1-checks", r"\\?\C:\workspace\.ci\1-1-checks"),
+            (r"\\server\share\.ci\1-1-checks", r"\\?\UNC\server\share\.ci\1-1-checks"),
+            (r"\\?\C:\workspace\.ci\1-1-checks", r"\\?\C:\workspace\.ci\1-1-checks"),
+            (r"\\?\UNC\server\share\.ci\1-1-checks", r"\\?\UNC\server\share\.ci\1-1-checks"),
+        ):
+            # No access to a real share: check the rmtree boundary representation.
+            with self.subTest(source=source), patch.object(Path, "exists", return_value=True), \
+                 patch.object(cleanup.shutil, "rmtree") as remove:
+                cleanup.remove_checkout(Path(source))
+                self.assertEqual(str(remove.call_args.args[0]), expected)
+
+    def test_cleanup_still_fails_when_a_file_cannot_be_removed(self):
+        with tempfile.TemporaryDirectory(prefix="ci cleanup ") as directory:
+            owned = cleanup.owned_path(directory, "1", "1", "checks")
+            owned.mkdir(parents=True)
+            retained = owned / "retained"
+            retained.write_text("preserve on failure")
+            # A persistent nonempty directory must fail; never hide error 145.
+            with patch.object(cleanup.os, "unlink", return_value=None), \
+                 self.assertRaises(OSError) as failure:
+                cleanup.remove_checkout(owned)
+            self.assertEqual(failure.exception.winerror, 145)
+            self.assertTrue(retained.exists())
 
     def test_build_arguments_work_without_bash_and_preserve_failure(self):
         for platform, debug, notarize, exit_code in (
