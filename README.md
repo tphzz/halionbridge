@@ -63,6 +63,8 @@ For source formats such as SFZ and Yamaha DX7 SysEx, halionbridge can also gener
 
 Portable ZIP packages are provided for Windows x64, Windows ARM64, and macOS Universal (Apple Silicon and Intel, macOS 13.3 or newer). Extract the package and run its `halionbridge` executable; no installer or separate JUCE installation is needed. HALion 7 must be installed and activated for preset processing. On Windows ARM64, use an ARM64-compatible HALion installation.
 
+See [manual build workflows](DEVELOPMENT.md#github-actions) for selecting a branch and downloading build artifacts.
+
 Before running the generic builder, open HALion's **Options Editor**, go to **Scripting**, and make sure the HALion user scripts directory is listed in **Library Search Paths**:
 
 - Windows: `C:\Users\<username>\Documents\Steinberg\HALion\Library\scripts`

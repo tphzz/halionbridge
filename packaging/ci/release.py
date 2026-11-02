@@ -1,4 +1,4 @@
-"""Portable package verification and ref-owned draft releases (Python 3.11+).
+"""Portable package verification and ref-owned draft releases (Python 3.10+).
 
 Only the explicit `draft` command changes GitHub state. Builds and tests use
 the offline functions; no code path publishes a release or changes a Git tag.
@@ -36,8 +36,11 @@ MARKER = "halionbridge-ci-v1"
 
 
 def digest(path: Path) -> str:
+    checksum = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            checksum.update(block)
+    return checksum.hexdigest()
 
 
 def context() -> dict:

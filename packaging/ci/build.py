@@ -31,8 +31,8 @@ def validate_macos_dependencies(output):
 
 
 def main():
-    if sys.version_info < (3, 11):
-        raise ValueError("CI helpers require Python 3.11 or newer")
+    if sys.version_info < (3, 10):
+        raise ValueError("CI helpers require Python 3.10 or newer")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("platform", choices=release.PLATFORMS)
     parser.add_argument("--debug", action="store_true")
