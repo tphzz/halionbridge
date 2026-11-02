@@ -241,6 +241,10 @@ Only one halionbridge build can run at a time for a user account. HALion resolve
 
 Press Ctrl+C to stop a run. Conversion commands stop at converter checkpoints before writing more generated files. Normal headless HALion builds stop the active worker process and do not start later chunks. GUI and `--nokill` inspection runs remain cooperative so HALion can clean up normally.
 
+## Building From Source
+
+Source builds use C++23 and JUCE 9.0.5. Initialize the pinned Git submodules before building; see [DEVELOPMENT.md](DEVELOPMENT.md) for the Windows and macOS toolchain requirements and build commands. Prebuilt executables do not require a separate JUCE installation.
+
 ## License And Notices
 
 halionbridge is distributed under the GNU Affero General Public License version 3; see `LICENSE`. Third-party attributions and packaged license locations are documented in `THIRD_PARTY_NOTICES.md`.

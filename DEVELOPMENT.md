@@ -89,7 +89,7 @@ On macOS, the same library artifact directory contains `libhalionbridge.dylib` a
 - `halionbridge_converter_sfz_static`: Built-in SFZ converter. It links sfizz privately and generates normal Lua build directories consumed by the existing builder workflow.
 - `halionbridge_converter_dx7_static`: Built-in Yamaha DX7 SysEx converter. It links the adapted dxsyx parser and embedded algorithm-template assets privately and generates one build entrypoint per voice.
 
-Vendored third-party code is pulled in through Git submodules under `external/`. JUCE lives at `external/JUCE`, spdlog at `external/spdlog`, sfizz at `external/sfizz`, and CLI11 at `external/CLI11`. The narrowly adapted dxsyx parser lives under `forks/dxsyx`; it is not a submodule and has no nested dependencies. CLI11 is header-only and linked privately to `halionbridge_shared` and `halionbridge_static` for command-line parsing; third-party implementation types must not appear in public headers or converter public APIs.
+Vendored third-party code is pulled in through Git submodules under `external/`. JUCE 9.0.5 lives at `external/JUCE`, pinned to upstream tag `9.0.5` (commit `d60b7a78030661574a615b586d9325ba7a7fa7dd`); spdlog lives at `external/spdlog`, sfizz at `external/sfizz`, and CLI11 at `external/CLI11`. The narrowly adapted dxsyx parser lives under `forks/dxsyx`; it is not a submodule and has no nested dependencies. CLI11 is header-only and linked privately to `halionbridge_shared` and `halionbridge_static` for command-line parsing; third-party implementation types must not appear in public headers or converter public APIs.
 
 The public C++ headers live under `include/halionbridge` and must remain JUCE-free. Public API types use C++23/STL types such as `std::filesystem::path`, `std::string`, `std::vector`, `std::span`, and `std::optional`; JUCE is an implementation dependency only. The generated export header is written by CMake under the build directory and is included through `halionbridge/halionbridge_export.h`. Public headers use `HALIONBRIDGE_EXPORT` so the same declarations work for the shared library and for static consumers that define `HALIONBRIDGE_STATIC_DEFINE`.
 
@@ -288,8 +288,8 @@ The input tree is never modified, and the final output path must not exist. Work
 The metadata writer treats present CSV metadata columns as authoritative. Non-empty cells set or update the matching XML attribute. Empty cells remove the matching attribute. Metadata columns omitted from the CSV are left untouched. Unknown XML attributes such as plugin identity fields are preserved, and unknown CSV columns are ignored on apply for compatibility with older or hand-annotated CSVs. Output preset files and CSV files are written through temporary files in the target directory and renamed into place only after a complete successful write.
 
 ## Orientation in the Code Base
-- `CMakeLists.txt`: Main CMake configuration file linking the JUCE 8 submodule and defining the C++23 requirements.
-- `external/JUCE`: The JUCE 8 framework git submodule.
+- `CMakeLists.txt`: Main CMake configuration file linking the JUCE submodule and defining the C++23 requirements.
+- `external/JUCE`: The JUCE 9.0.5 framework git submodule.
 - `external/spdlog`: The spdlog logging submodule, used privately by the implementation and CLI.
 - `external/sfizz`: The sfizz SFZ parser/synth library git submodule, used privately by the built-in `sfz` converter.
 - `forks/dxsyx`: Dependency-free adapted DX7 SysEx parser/model with pinned upstream provenance and retained GPLv3-or-later license.
@@ -375,7 +375,7 @@ cd halion-lua
 ```
 
 ## Dependencies
-- **JUCE 8:** Core implementation framework, handling VST3 plugin hosting, Standard MIDI File parsing, audio buffers, and WAV encoding. JUCE must not appear in public `include/halionbridge` interfaces.
+- **JUCE 9.0.5:** Core implementation framework, handling VST3 plugin hosting, Standard MIDI File parsing, audio buffers, and WAV encoding. JUCE must not appear in public `include/halionbridge` interfaces.
 - **spdlog 1.17.0:** Private implementation dependency for timestamped console logging and log-level filtering. It is vendored as `external/spdlog` and linked through `spdlog::spdlog_header_only`.
 - **sfizz:** Private implementation dependency for the built-in SFZ converter. halionbridge initializes sfizz's nested submodules with normal Git submodule commands and disables sfizz's own test/demo/client targets in the halionbridge build. sfizz and its nested vendored dependencies are read-only; CMake compatibility workarounds live in first-party configuration, including `cmake/sfizz-overrides`.
 - **dxsyx adaptation:** Private GPLv3-or-later parser/model dependency for the built-in DX7 converter, retained under `forks/dxsyx` without an upstream submodule or nested dependencies. `forks/dxsyx/UPSTREAM.md` records the pinned source and modifications.
