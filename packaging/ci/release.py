@@ -26,6 +26,8 @@ NOTICES = {
     "licenses/CLI11-LICENSE.txt": "external/CLI11/LICENSE",
     "licenses/sfizz-LICENSE.txt": "external/sfizz/LICENSE",
     "licenses/Apache-2.0.txt": "external/sfizz/external/abseil-cpp/LICENSE",
+}
+DXSYX_NOTICES = {
     "licenses/dxsyx/LICENSE.txt": "forks/dxsyx/LICENSE.txt",
     "licenses/dxsyx/UPSTREAM.md": "forks/dxsyx/UPSTREAM.md",
 }
@@ -100,13 +102,15 @@ def verify_zip(path: Path, platform: str) -> None:
             raise ValueError("Duplicate or corrupt ZIP entries")
         if not set((binary, *REQUIRED_NOTICES)).issubset(names):
             raise ValueError("ZIP is missing CLI or notices")
+        if set(DXSYX_NOTICES).intersection(names) and not set(DXSYX_NOTICES).issubset(names):
+            raise ValueError("ZIP has incomplete dxsyx notices")
         if not any(n.startswith("examples/") and n.endswith("/halionbridge_build.lua") for n in names):
             raise ValueError("ZIP is missing build examples")
         for name in names:
             parts = PurePosixPath(name)
             if parts.is_absolute() or ".." in parts.parts or "\\" in name or ":" in name:
                 raise ValueError("Unsafe ZIP path")
-            if name not in (binary, *REQUIRED_NOTICES) and not name.startswith("examples/"):
+            if name not in (binary, *REQUIRED_NOTICES, *DXSYX_NOTICES) and not name.startswith("examples/"):
                 raise ValueError(f"Unexpected ZIP content: {name}")
             if name.startswith("examples/") and (parts.suffix.lower() in (".dll", ".lib", ".pdb", ".vstpreset", ".dylib", ".a", ".exe", ".exp")
                                                 or any(p == "build" or p.startswith("build-") for p in parts.parts)):
@@ -123,7 +127,12 @@ def package(source: Path, binary: Path, output: Path, basename: str, platform: s
     output.mkdir(parents=True, exist_ok=True)
     result = output / f"{basename}-{platform}{suffix}.zip"
     examples = subprocess.check_output(["git", "ls-files", "-z", "examples"], cwd=source).decode().split("\0")
-    entries = {**{name: source / origin for name, origin in NOTICES.items()}, binary.name: binary}
+    # Older source refs do not contain the DX7 converter. Keep their packages
+    # usable while requiring both notices whenever that dependency is present.
+    notices = dict(NOTICES)
+    if (source / "forks/dxsyx").exists():
+        notices.update(DXSYX_NOTICES)
+    entries = {**{name: source / origin for name, origin in notices.items()}, binary.name: binary}
     entries.update({name: source / name for name in examples if name})
     with zipfile.ZipFile(result, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, path in sorted(entries.items()):
