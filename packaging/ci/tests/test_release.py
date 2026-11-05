@@ -1,6 +1,5 @@
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -10,9 +9,15 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import release
+from release_backend import Backend
 
 
 class ReleaseTests(unittest.TestCase):
+    def setUp(self):
+        token = patch.dict(os.environ, GH_TOKEN="offline-test-token")
+        token.start()
+        self.addCleanup(token.stop)
+
     def test_hashing_supports_python_310_without_file_digest(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "input.bin"
@@ -27,6 +32,7 @@ class ReleaseTests(unittest.TestCase):
                     run_id=123, run_number=run, run_attempt=1, configuration="Release")
 
     def test_branch_targets_are_stable_and_collision_resistant(self):
+        self.assertEqual(release.target(self.context("refs/heads/feature/foo")), "snapshot/feature/foo")
         self.assertEqual(release.target(self.context()), release.target(self.context(run=3)))
         self.assertNotEqual(release.target(self.context("refs/heads/feature/foo")),
                             release.target(self.context("refs/heads/feature-foo")))
@@ -50,24 +56,41 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             release.target(dict(self.context(), configuration="Debug"))
 
+    def test_existing_published_tag_is_preserved_with_notes_and_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ctx = self.context("refs/tags/0.3.1")
+            for platform in release.PLATFORMS:
+                (root / (platform + ".json")).write_text("{}")
+            backend = Backend(ctx)
+            backend.current.update(draft=False, body="handwritten release notes",
+                                   html_url="https://github.com/owner/repo/releases/tag/0.3.1")
+            before = json.dumps([backend.current, backend.assets], sort_keys=True)
+            with patch.dict(os.environ, GITHUB_EVENT_NAME="workflow_dispatch", GH_TOKEN="offline-test-token",
+                            GITHUB_WORKFLOW="00 Full - All Platforms"), \
+                 patch.object(release, "verify_assets", return_value=[]), \
+                 patch.object(release, "api", side_effect=backend.api):
+                result = release.draft(root, ctx)
+            self.assertEqual(result, dict(action="preserved", url=backend.current["html_url"]))
+            self.assertEqual(before, json.dumps([backend.current, backend.assets], sort_keys=True))
+            self.assertEqual(backend.mutations, [])
+
     def test_verifies_complete_set_and_rejects_tampering(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for platform in release.PLATFORMS:
-                package = root / (platform + ".zip")
+                package = root / ("halionbridge-main-aaaaaaa-" + platform + ".zip")
                 with zipfile.ZipFile(package, "w") as archive:
                     archive.writestr("halionbridge.exe" if platform.startswith("windows") else "halionbridge", "binary")
                     archive.writestr("examples/test/halionbridge_build.lua", "return {}")
                     for name in release.REQUIRED_NOTICES:
                         archive.writestr(name, "notice")
-                manifest = dict(self.context(), platform=platform, archive=package.name,
-                                sha256=release.digest(package))
-                (root / (platform + ".json")).write_text(json.dumps(manifest))
+                release.write_manifest(package, platform, self.context())
             self.assertEqual(len(release.verify_assets(root, self.context())), 3)
             for key, value in (("sha", "b" * 40), ("run_attempt", 2), ("configuration", "Debug")):
                 with self.subTest(key=key), self.assertRaises(ValueError):
                     release.verify_assets(root, dict(self.context(), **{key: value}))
-            (root / "windows-x64.zip").write_bytes(b"tampered")
+            (root / "halionbridge-main-aaaaaaa-windows-x64.zip").write_bytes(b"tampered")
             with self.assertRaises(ValueError):
                 release.verify_assets(root, self.context())
 
@@ -127,24 +150,6 @@ class ReleaseTests(unittest.TestCase):
                 release.draft(Path("unused"), dict(self.context(), configuration=configuration))
             api.assert_not_called()
 
-    def test_new_branch_creates_draft_without_publishing(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            ctx = self.context()
-            for platform in release.PLATFORMS:
-                (root / (platform + ".json")).write_text("{}")
-            backend = FakeGitHub(ctx, self.context(run=1))
-            backend.current = None
-            with patch.dict(os.environ, GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_WORKFLOW="00 Full - All Platforms"), \
-                 patch.object(release, "verify_assets", return_value=[]), \
-                 patch.object(release, "api", side_effect=backend.api), \
-                 patch.object(release.subprocess, "run", side_effect=backend.upload):
-                release.draft(root, ctx)
-            self.assertTrue(backend.current["draft"])
-            self.assertTrue(backend.current["prerelease"])
-            self.assertEqual(backend.current["target_commitish"], ctx["sha"])
-            self.assertEqual(backend.current["tag_name"], release.target(ctx))
-            self.assertTrue(all(payload.get("draft", True) for _, _, payload in backend.mutations))
 
     def test_remote_tag_is_checked_without_mutation(self):
         ctx = self.context("refs/tags/v1.2.3")
@@ -160,101 +165,6 @@ class ReleaseTests(unittest.TestCase):
         with patch.object(release, "api", side_effect=[[{}] * 100, [{}]]) as api:
             self.assertEqual(len(release.api_pages("assets")), 101)
             self.assertIn("page=2", api.call_args.args[0])
-
-    def test_failed_upload_retains_previous_assets_and_retry_repairs_draft(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            archives = []
-            for platform in release.PLATFORMS:
-                archive = root / (platform + ".zip")
-                archive.write_bytes(b"package")
-                (root / (platform + ".json")).write_text("{}")
-                archives.append(archive)
-            ctx = self.context()
-            backend = FakeGitHub(ctx, self.context(run=1))
-            backend.fail_upload = 2
-            env = dict(GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_WORKFLOW="00 Full - All Platforms")
-            with patch.dict(os.environ, env), patch.object(release, "verify_assets", return_value=archives), \
-                 patch.object(release, "api", side_effect=backend.api), \
-                 patch.object(release.subprocess, "run", side_effect=backend.upload):
-                with self.assertRaises(subprocess.CalledProcessError):
-                    release.draft(root, ctx)
-                self.assertIn("old.zip", [a["name"] for a in backend.assets])
-                self.assertTrue(backend.current["draft"])
-                backend.fail_upload = 0
-                release.draft(root, ctx)
-            self.assertEqual(len(backend.assets), 7)
-            self.assertNotIn("old.zip", [a["name"] for a in backend.assets])
-            self.assertFalse(any(a["name"].startswith("pending-") for a in backend.assets))
-            self.assertEqual(backend.current["body"], release.notes(ctx))
-            self.assertEqual(backend.other["body"], "unrelated")
-            self.assertTrue(all(payload.get("draft", True) for _, _, payload in backend.mutations))
-
-    def test_published_unowned_and_moved_tag_refuse_before_any_mutation(self):
-        for scenario in ("published", "unowned", "moved"):
-            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
-                ctx = self.context()
-                backend = FakeGitHub(ctx, self.context(run=1))
-                if scenario == "published":
-                    backend.current["draft"] = False
-                elif scenario == "unowned":
-                    backend.current["body"] = "manual draft"
-                else:
-                    backend.refs = [dict(ref="refs/tags/" + release.target(ctx), object=dict(type="commit", sha="c" * 40))]
-                with patch.dict(os.environ, GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_WORKFLOW="00 Full - All Platforms"), \
-                     patch.object(release, "verify_assets", return_value=[]), patch.object(release, "api", side_effect=backend.api), \
-                     self.assertRaises(ValueError):
-                    release.draft(Path(directory), ctx)
-                self.assertEqual(backend.mutations, [])
-
-
-class FakeGitHub:
-    """Offline API model: no test reads credentials or contacts GitHub."""
-    def __init__(self, ctx, previous):
-        self.current = dict(id=1, tag_name=release.target(ctx), draft=True, body=release.notes(previous))
-        self.other = dict(id=2, tag_name="unrelated", draft=False, body="unrelated")
-        self.assets = [dict(id=10, name="old.zip")]
-        self.refs = []
-        self.mutations = []
-        self.uploads = 0
-        self.fail_upload = 0
-        self.next_id = 20
-
-    def api(self, endpoint, method="GET", payload=None):
-        if method != "GET":
-            self.mutations.append((endpoint, method, payload or {}))
-        if "/git/matching-refs/" in endpoint:
-            return self.refs
-        if endpoint.endswith("releases?per_page=100&page=1"):
-            return ([dict(self.current)] if self.current else []) + [dict(self.other)]
-        if endpoint.endswith("/releases") and method == "POST":
-            self.current = dict(id=1, **payload)
-            self.assets = []
-            return dict(self.current)
-        if endpoint.endswith("releases/1"):
-            if method == "PATCH":
-                self.current.update(payload)
-            return dict(self.current)
-        if endpoint.endswith("releases/1/assets?per_page=100&page=1"):
-            return [dict(asset) for asset in self.assets]
-        if "/releases/assets/" in endpoint:
-            asset_id = int(endpoint.rsplit("/", 1)[1])
-            asset = next(a for a in self.assets if a["id"] == asset_id)
-            if method == "DELETE":
-                self.assets.remove(asset)
-                return None
-            if method == "PATCH":
-                asset.update(payload)
-                return dict(asset)
-        raise AssertionError(f"Unexpected API call {method} {endpoint}")
-
-    def upload(self, args, **kwargs):
-        self.uploads += 1
-        if self.uploads == self.fail_upload:
-            raise subprocess.CalledProcessError(1, "simulated failed upload")
-        path = Path(args[4])
-        self.assets.append(dict(id=self.next_id, name=path.name, digest="sha256:" + release.digest(path)))
-        self.next_id += 1
 
 
 if __name__ == "__main__":

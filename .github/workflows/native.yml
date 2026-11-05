@@ -56,7 +56,7 @@ jobs:
     needs: [windows-x64, macos]
     runs-on: [self-hosted, Linux, X64, jammy, docker]
     permissions:
-      contents: write
+      contents: read
       actions: read
     concurrency:
       group: native-x64-host
@@ -64,7 +64,6 @@ jobs:
       queue: max
     env:
       CONFIGURATION: Release
-      GH_TOKEN: ${{ github.token }}
     defaults:
       run:
         shell: bash
@@ -83,7 +82,9 @@ jobs:
           path: .ci/${{ github.run_id }}-${{ github.run_attempt }}-draft/build-ci/assets
       - name: Verify complete source-matched package set
         run: python3 -B packaging/ci/release.py verify build-ci/assets
-      - name: Create or replace only the owned draft
+      - name: Prepare or preserve release draft
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: python3 -B packaging/ci/release.py draft build-ci/assets
       - name: Clean owned checkout
         if: always()

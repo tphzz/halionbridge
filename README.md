@@ -65,6 +65,8 @@ Portable ZIP packages are provided for Windows x64, Windows ARM64, and macOS Uni
 
 See [manual build workflows](DEVELOPMENT.md#github-actions) for selecting a branch, building one or all platforms, and downloading build artifacts.
 
+The All Platforms Release workflow prepares an unpublished release draft. Rebuilding an existing release tag preserves its notes and assets; branch builds refresh one `snapshot/<branch-name>` prerelease draft. The workflow reports the release URL for review.
+
 Before running the generic builder, open HALion's **Options Editor**, go to **Scripting**, and make sure the HALion user scripts directory is listed in **Library Search Paths**:
 
 - Windows: `C:\Users\<username>\Documents\Steinberg\HALion\Library\scripts`
